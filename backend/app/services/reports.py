@@ -152,7 +152,7 @@ def forecast(db: Session, days: int = 30, history_days: int = 120) -> dict:
     season = {wd: ((dow_sum[wd] / dow_cnt[wd]) / overall if dow_cnt[wd] else 1.0) for wd in range(7)}
 
     # Holt on deseasonalized series
-    alpha, beta, phi = 0.2, 0.05, 0.9
+    alpha, beta, phi = 0.1, 0.03, 0.9
     level, trend = None, 0.0
     residuals = []
     for h in hist:

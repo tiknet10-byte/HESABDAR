@@ -6,6 +6,7 @@ Built-in plugins live in app/plugins/builtin/, third-party ones in backend/plugi
 A plugin can:
   * add REST endpoints        -> `router` (mounted at /api/plugins/<name>/...)
   * react to business events  -> `events` mapping  {"deposit.created": handler}
+                                 (handler(event, payload); payload["_db"] is the caller's session)
   * give the AI new abilities -> `ai_tools()` returning AITool objects
   * run periodic jobs         -> `jobs()` returning [(interval_seconds, callable)]
   * add pages to the UI       -> `ui` manifest (menu entries rendered by the frontend)

@@ -1,0 +1,106 @@
+@import "@fontsource/vazirmatn/300.css";
+@import "@fontsource/vazirmatn/400.css";
+@import "@fontsource/vazirmatn/500.css";
+@import "@fontsource/vazirmatn/700.css";
+@import "@fontsource/vazirmatn/800.css";
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Vazirmatn", ui-sans-serif, system-ui, sans-serif;
+  --color-brand-50: #faf5ff;
+  --color-brand-100: #f3e8ff;
+  --color-brand-200: #e9d5ff;
+  --color-brand-300: #d8b4fe;
+  --color-brand-400: #c084fc;
+  --color-brand-500: #a855f7;
+  --color-brand-600: #9333ea;
+  --color-brand-700: #7e22ce;
+  --color-rose-brand: #f472b6;
+}
+
+:root {
+  --bg: #f7f5fb;
+  --surface: rgba(255, 255, 255, 0.78);
+  --surface-solid: #ffffff;
+  --border: rgba(124, 58, 237, 0.10);
+  --text: #1f1530;
+  --muted: #6b6380;
+  color-scheme: light;
+}
+.dark {
+  --bg: #0f0b18;
+  --surface: rgba(28, 22, 42, 0.72);
+  --surface-solid: #1a1427;
+  --border: rgba(192, 132, 252, 0.14);
+  --text: #f1ecfa;
+  --muted: #a49cb8;
+  color-scheme: dark;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01";
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(60rem 40rem at 100% -10%, rgba(244, 114, 182, 0.18), transparent 60%),
+    radial-gradient(50rem 40rem at -10% 110%, rgba(124, 58, 237, 0.16), transparent 60%);
+  pointer-events: none;
+}
+
+@layer components {
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 1.25rem;
+    backdrop-filter: blur(14px);
+    box-shadow: 0 1px 2px rgba(31, 21, 48, 0.04), 0 8px 32px -12px rgba(124, 58, 237, 0.12);
+  }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: .5rem;
+    border-radius: .85rem; padding: .55rem 1rem; font-weight: 600; font-size: .9rem;
+    transition: all .15s ease; white-space: nowrap; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface-solid); color: var(--text);
+  }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 18px -8px rgba(124, 58, 237, .35); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn-primary {
+    color: #fff; border: none;
+    background: linear-gradient(135deg, #ec4899 0%, #a855f7 55%, #7c3aed 100%);
+  }
+  .btn-ghost { background: transparent; border-color: transparent; }
+  .btn-danger { background: #ef4444; color: #fff; border: none; }
+  .btn-sm { padding: .35rem .7rem; font-size: .8rem; border-radius: .65rem; }
+  .input {
+    width: 100%; border-radius: .85rem; padding: .6rem .85rem; font-size: .92rem;
+    background: var(--surface-solid); color: var(--text); border: 1px solid var(--border); outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .input:focus { border-color: #a855f7; box-shadow: 0 0 0 4px rgba(168, 85, 247, .15); }
+  .label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: .35rem; font-weight: 500; }
+  .badge { display: inline-flex; align-items: center; gap: .25rem; border-radius: 999px; padding: .15rem .6rem; font-size: .75rem; font-weight: 600; }
+  .muted { color: var(--muted); }
+  .table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .88rem; }
+  .table th { text-align: start; font-weight: 600; color: var(--muted); font-size: .78rem; padding: .7rem .8rem; border-bottom: 1px solid var(--border); }
+  .table td { padding: .7rem .8rem; border-bottom: 1px solid var(--border); }
+  .table tr:hover td { background: rgba(168, 85, 247, .04); }
+  .num { font-variant-numeric: tabular-nums; }
+  .gradient-text { background: linear-gradient(135deg, #ec4899, #8b5cf6); -webkit-background-clip: text; background-clip: text; color: transparent; }
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(168, 85, 247, .25); border-radius: 8px; }
+
+@keyframes fade-up { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.fade-up { animation: fade-up .35s ease both; }

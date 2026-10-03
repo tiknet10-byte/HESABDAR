@@ -1,0 +1,17 @@
+# Web / server mode. Put it behind HTTPS (Caddy / Nginx / Cloudflare) before exposing to the internet.
+services:
+  hesabdar:
+    build: .
+    restart: unless-stopped
+    ports: ["8000:8000"]
+    environment:
+      HESABDAR_ENVIRONMENT: production
+      HESABDAR_SECRET_KEY: ${HESABDAR_SECRET_KEY:?set a long random secret in .env}
+      HESABDAR_BACKUP_KEY: ${HESABDAR_BACKUP_KEY:?set a backup passphrase in .env}
+      HESABDAR_WEBHOOK_SECRET: ${HESABDAR_WEBHOOK_SECRET:?set a webhook secret in .env}
+      HESABDAR_CORS_ORIGINS: '["https://your-domain.example"]'
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - hesabdar-data:/app/backend/data
+volumes:
+  hesabdar-data:
