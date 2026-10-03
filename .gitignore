@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# data (database, keys, backups, receipts) - never commit
+backend/data/
+backend/.env
+*.db
+*.db-wal
+*.db-shm
+*.hbk
+# Node
+node_modules/
+frontend/dist/
+.DS_Store
