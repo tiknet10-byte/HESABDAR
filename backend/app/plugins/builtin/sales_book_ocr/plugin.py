@@ -34,7 +34,7 @@ from ....models import ImportBatch, Invoice, PaymentAccount, Service
 from ....services import accounting, learning
 from ....services.audit import audit
 from ....services.jalali import jalali_to_gregorian
-from ....services.textutil import normalize_mobile, normalize_text, parse_amount, to_en_digits
+from ....services.textutil import normalize_mobile, normalize_text, parse_amount, to_en_digits, toman
 from ...base import AITool, BasePlugin
 
 log = logging.getLogger("hesabdar.ocr")
@@ -162,7 +162,7 @@ def validate(db: Session, parsed: dict) -> list[dict]:
                 if w:
                     warnings.append(w)
         if total and items_sum and total != items_sum:
-            warnings.append(f"جمع ردیف ({total:,}) با جمع خدمات ({items_sum:,}) برابر نیست")
+            warnings.append(f"جمع ردیف ({toman(total)}) با جمع خدمات ({toman(items_sum)}) برابر نیست")
         method = r.get("payment_method")
         acc_id = default_by_kind.get(method) if method else None
         if not method:
@@ -191,7 +191,7 @@ def summarize(parsed: dict, rows: list[dict]) -> dict:
     s = {"rows": len(rows), "total": total, "page_total": page_total or None,
          "warnings": sum(len(r["warnings"]) for r in rows), "new_customers": sum(1 for r in rows if r["is_new_customer"])}
     if page_total and page_total != total:
-        s["page_total_mismatch"] = f"جمع نوشته‌شده در دفتر ({page_total:,}) با جمع ردیف‌ها ({total:,}) برابر نیست"
+        s["page_total_mismatch"] = f"جمع نوشته‌شده در دفتر ({toman(page_total)}) با جمع ردیف‌ها ({toman(total)}) برابر نیست"
     return s
 
 

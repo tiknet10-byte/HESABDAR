@@ -87,3 +87,28 @@ def mask_card(number: str | None) -> str | None:
     if len(digits) < 10:
         return digits
     return f"{digits[:6]}******{digits[-4:]}"
+
+
+def _secret_fernet():
+    import base64
+
+    from cryptography.fernet import Fernet
+
+    key = hashlib.sha256(("hesabdar-secrets:" + get_settings().secret_key).encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(key))
+
+
+def encrypt_secret(value: str) -> str:
+    """Encrypt a secret (e.g. an AI API key) before storing it in the database."""
+    return "enc:" + _secret_fernet().encrypt(value.encode()).decode() if value else ""
+
+
+def decrypt_secret(value: str | None) -> str:
+    if not value:
+        return ""
+    if not value.startswith("enc:"):
+        return value
+    try:
+        return _secret_fernet().decrypt(value[4:].encode()).decode()
+    except Exception:
+        return ""

@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     ports: ["8000:8000"]
     environment:
+      TZ: Asia/Tehran
       HESABDAR_ENVIRONMENT: production
       HESABDAR_SECRET_KEY: ${HESABDAR_SECRET_KEY:?set a long random secret in .env}
       HESABDAR_BACKUP_KEY: ${HESABDAR_BACKUP_KEY:?set a backup passphrase in .env}

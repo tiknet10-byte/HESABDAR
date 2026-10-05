@@ -16,9 +16,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.events import bus
-from ..models import BankTransaction, Customer, Deposit, InboundReceipt, Payment, PaymentAccount, utcnow
+from ..models import BankTransaction, Customer, Deposit, InboundReceipt, Payment, PaymentAccount, local_now
 from . import accounting, learning, settings_store
 from .audit import audit, raise_alert
+from .textutil import toman
 
 
 def _receipt_time(r: InboundReceipt) -> datetime:
@@ -41,7 +42,7 @@ def find_bank_match(db: Session, r: InboundReceipt) -> tuple[BankTransaction | N
     if p.get("reference"):
         same_ref = db.scalar(select(BankTransaction).where(BankTransaction.reference == p["reference"]))
         if same_ref and same_ref.amount != r.amount:
-            return same_ref, -1.0, f"شماره پیگیری یکسان اما مبلغ بانک {same_ref.amount:,} ریال است"
+            return same_ref, -1.0, f"شماره پیگیری یکسان اما مبلغ بانک {toman(same_ref.amount)} است"
 
     candidates = db.scalars(select(BankTransaction).where(
         BankTransaction.direction == "in", BankTransaction.amount == r.amount, BankTransaction.status == "unmatched",
@@ -124,11 +125,11 @@ def expire_pending_receipts(db: Session) -> int:
     grace = timedelta(hours=int(settings_store.get(db, "matching.grace_hours", 24)))
     count = 0
     for r in db.scalars(select(InboundReceipt).where(InboundReceipt.status == "pending")):
-        if utcnow() - r.created_at > grace:
+        if local_now() - r.created_at > grace:
             r.status = "mismatch"
             r.note = "پس از مهلت تعیین‌شده هیچ واریزی در بانک دیده نشد"
             raise_alert(db, "receipt_not_found", "رسید بدون واریز بانکی",
-                        f"{r.sender} رسید {r.amount or 0:,} ریالی فرستاده ولی واریز آن در بانک پیدا نشد",
+                        f"{r.sender} رسید {toman(r.amount)} فرستاده ولی واریز آن در بانک پیدا نشد",
                         level="danger", ref_type="receipt", ref_id=r.id)
             count += 1
     return count

@@ -17,7 +17,27 @@ from typing import Any
 from ..core.config import get_settings
 
 log = logging.getLogger("hesabdar.ai")
-_client = None
+_clients: dict[tuple[str, str], object] = {}
+
+MASK = "••••"
+
+
+def config() -> dict:
+    """AI settings: from the Settings page (stored encrypted in the database), falling back to environment."""
+    from ..core.db import SessionLocal
+    from ..core.security import decrypt_secret
+    from ..services import settings_store
+
+    with SessionLocal() as db:
+        key = decrypt_secret(settings_store.get(db, "ai.api_key"))
+        model = settings_store.get(db, "ai.model") or get_settings().ai_model
+        base_url = settings_store.get(db, "ai.base_url") or ""
+    return {"api_key": key, "model": model, "base_url": base_url}
+
+
+def _env_credentials() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+                or os.environ.get("ANTHROPIC_PROFILE") or os.path.exists(os.path.expanduser("~/.config/anthropic")))
 
 
 def available() -> bool:
@@ -27,23 +47,39 @@ def available() -> bool:
         import anthropic  # noqa: F401
     except ImportError:
         return False
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-                or os.environ.get("ANTHROPIC_PROFILE") or os.path.exists(os.path.expanduser("~/.config/anthropic")))
+    return bool(config()["api_key"]) or _env_credentials()
 
 
-def client():  # noqa: ANN201
-    global _client
-    if _client is None:
-        import anthropic
+def client(cfg: dict | None = None):  # noqa: ANN201
+    import anthropic
 
-        _client = anthropic.Anthropic()
-    return _client
+    cfg = cfg or config()
+    k = (cfg["api_key"], cfg["base_url"])
+    if k not in _clients:
+        kwargs = {}
+        if cfg["api_key"]:
+            kwargs["api_key"] = cfg["api_key"]
+        if cfg["base_url"]:
+            kwargs["base_url"] = cfg["base_url"]
+        _clients[k] = anthropic.Anthropic(**kwargs)
+    return _clients[k]
 
 
 def create(**kwargs: Any):  # noqa: ANN201
     """messages.create with sensible defaults and server-side refusal fallback enabled."""
-    params = {"model": get_settings().ai_model, "max_tokens": 16000, **kwargs}
-    return client().beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params)
+    cfg = config()
+    params = {"model": cfg["model"], "max_tokens": 16000, **kwargs}
+    return client(cfg).beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params)
+
+
+def test_connection() -> dict:
+    """Small request to verify the key, model and network path."""
+    try:
+        resp = create(max_tokens=64, output_config={"effort": "low"},
+                      messages=[{"role": "user", "content": "Reply with the single word: OK"}])
+        return {"ok": True, "model": resp.model, "reply": text_of(resp)[:50]}
+    except Exception as exc:  # show the real reason (invalid key, network, model...)
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:400]}
 
 
 def text_of(response) -> str:  # noqa: ANN001

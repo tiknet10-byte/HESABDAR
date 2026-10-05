@@ -62,6 +62,7 @@ def export_csv(start: date | None = None, end: date | None = None, db: Session =
 def dashboard(db: Session = Depends(get_db), user=Depends(current_user)):
     today = date.today()
     out = {"today": reports.summary(db, today, today), "reconciliation": matching.unreconciled_summary(db),
+           "now": __import__("datetime").datetime.now().isoformat(timespec="minutes"),
            "alerts": [{"id": a.id, "level": a.level, "title": a.title, "message": a.message, "at": a.at.isoformat()}
                       for a in db.scalars(select(Alert).where(Alert.is_read.is_(False)).order_by(Alert.at.desc()).limit(8))],
            "ai_available": claude.available()}
@@ -145,19 +146,41 @@ def retrain(db: Session = Depends(get_db), user=Depends(require("settings"))):
 
 
 # ---------------------------------------------------------------- settings
+SECRET_KEYS = {"ai.api_key"}
+
+
+def _public_settings(db: Session) -> dict:
+    out = settings_store.all_settings(db)
+    for k in SECRET_KEYS:
+        out[k] = claude.MASK if out.get(k) else ""
+    return out
+
+
 @router.get("/settings")
 def get_settings_(db: Session = Depends(get_db), _=Depends(require("read"))):
-    return settings_store.all_settings(db)
+    return _public_settings(db)
 
 
 @router.put("/settings")
 def put_settings(body: dict, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    from ..core.security import encrypt_secret
     for k, v in body.items():
+        if k in SECRET_KEYS:
+            if v == claude.MASK:
+                continue  # unchanged
+            v = encrypt_secret(str(v).strip())
         if k in settings_store.DEFAULTS or k.startswith("custom."):
             settings_store.set_value(db, k, v)
-    audit(db, "settings.update", data=body, user=user)
+    audit(db, "settings.update", data={k: ("***" if k in SECRET_KEYS else v) for k, v in body.items()}, user=user)
     db.commit()
-    return settings_store.all_settings(db)
+    return _public_settings(db)
+
+
+@router.post("/ai/test")
+def ai_test(_=Depends(require("settings"))):
+    if not claude.available():
+        return {"ok": False, "error": "کلید API وارد نشده یا بسته anthropic نصب نیست"}
+    return claude.test_connection()
 
 
 # ---------------------------------------------------------------- plugins
@@ -263,3 +286,57 @@ def audit_log(limit: int = 200, db: Session = Depends(get_db), _=Depends(require
 @router.get("/audit/verify")
 def audit_verify(db: Session = Depends(get_db), _=Depends(require("settings"))):
     return verify_audit_chain(db)
+
+
+# ---------------------------------------------------------------- data management (owner only)
+class ResetIn(BaseModel):
+    scope: str
+    password: str
+    confirm: str  # must be the word "حذف"
+
+
+@router.get("/admin/data")
+def data_stats(db: Session = Depends(get_db), _=Depends(require("users"))):
+    from ..services import maintenance
+    return {"stats": maintenance.stats(db), "scopes": maintenance.SCOPES}
+
+
+@router.post("/admin/optimize")
+def optimize_db(user=Depends(require("users"))):
+    from ..services import maintenance
+    return maintenance.optimize()
+
+
+@router.post("/admin/reset")
+def reset_data(body: ResetIn, db: Session = Depends(get_db), user=Depends(require("users"))):
+    from ..core.security import verify_password
+    from ..services import maintenance
+    if body.confirm.strip() != "حذف":
+        raise HTTPException(400, "برای تأیید، کلمه «حذف» را تایپ کنید")
+    if not verify_password(body.password, user.password_hash):
+        raise HTTPException(403, "رمز عبور اشتباه است")
+    if body.scope not in maintenance.SCOPES:
+        raise HTTPException(400, "نوع پاک‌سازی نامعتبر است")
+    safety = None
+    try:
+        safety = backup.create_backup(f"before-reset:{body.scope}")["name"]
+    except backup.BackupError:
+        pass
+    counts = maintenance.reset(db, body.scope)
+    audit(db, "admin.reset", "database", body.scope, {"deleted": counts, "safety_backup": safety}, user=user)
+    db.commit()
+    try:
+        maintenance.optimize()
+    except Exception:  # noqa: BLE001 - optimizing is best effort
+        pass
+    return {"ok": True, "deleted": counts, "safety_backup": safety}
+
+
+@router.post("/admin/demo")
+def load_demo(db: Session = Depends(get_db), user=Depends(require("users"))):
+    """Fill the database with realistic sample data for testing."""
+    from ..seed import seed_demo
+    out = seed_demo(db)
+    audit(db, "admin.demo", data=out, user=user)
+    db.commit()
+    return out

@@ -6,7 +6,7 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Alert, AuditLog, utcnow
+from ..models import Alert, AuditLog, local_now
 from ..core.events import bus
 
 
@@ -22,7 +22,7 @@ def audit(db: Session, action: str, entity: str = "", entity_id: object = "", da
           user=None, actor: str | None = None) -> AuditLog:
     last = db.scalar(select(AuditLog).order_by(AuditLog.id.desc()).limit(1))
     row = AuditLog(
-        at=utcnow(), user_id=getattr(user, "id", None),
+        at=local_now(), user_id=getattr(user, "id", None),
         actor=actor or getattr(user, "username", None) or "system",
         action=action, entity=entity, entity_id=str(entity_id or ""), data=data or {},
         prev_hash=last.hash if last else "",

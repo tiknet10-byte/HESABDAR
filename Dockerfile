@@ -8,7 +8,7 @@ RUN npm run build
 
 # --- API + static UI in one image
 FROM python:3.12-slim
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HESABDAR_FRONTEND_DIST=/app/frontend/dist
+ENV TZ=Asia/Tehran PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HESABDAR_FRONTEND_DIST=/app/frontend/dist
 WORKDIR /app/backend
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

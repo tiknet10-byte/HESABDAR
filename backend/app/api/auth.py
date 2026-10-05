@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..core.config import get_settings
 from ..core.db import get_db
 from ..core.security import ROLES, create_access_token, hash_password, validate_password_strength, verify_password
-from ..models import User, utcnow
+from ..models import User, local_now
 from ..services.audit import audit
 from .deps import current_user, require
 
@@ -76,7 +76,7 @@ def setup(body: SetupIn, db: Session = Depends(get_db)):
 def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     s = get_settings()
     u = db.scalar(select(User).where(User.username == body.username.strip().lower()))
-    now = utcnow()
+    now = local_now()
     if u and u.locked_until and u.locked_until > now:
         raise HTTPException(423, "حساب به دلیل تلاش‌های ناموفق موقتاً قفل است")
     if not u or not u.is_active or not verify_password(body.password, u.password_hash):

@@ -19,6 +19,14 @@ DEFAULTS: dict[str, Any] = {
     "bot.mismatch_message": "رسید شما دریافت شد و پس از تأیید بانک ثبت می‌شود. 🙏",
     "ai.assistant_instructions": "",
     "backup.mirror_dir": "",
+    "booking.open": "10:00",
+    "booking.close": "20:00",
+    "booking.slot_minutes": 15,
+    "booking.days_off": [4],  # Python weekday numbers: 4 = Friday
+    "booking.auto": False,  # automatically book the first free slot when a deposit is registered
+    "ai.api_key": "",
+    "ai.model": "",
+    "ai.base_url": "",
 }
 
 

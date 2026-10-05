@@ -5,12 +5,13 @@ import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicke
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Tabs } from "../components/ui";
 import { api } from "../lib/api";
 import { ACCOUNT_KINDS, jdatetime, money } from "../lib/format";
+import { formatJ } from "../lib/jalali";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
 
 type Item = { service_id?: number; description?: string; unit_price: number; quantity: number; staff_id?: number };
 type Pay = { payment_account_id: number; amount: number };
 
-export function InvoiceForm({ onDone, preset }: { onDone: () => void; preset?: CustomerChoice }) {
+export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => void; preset?: CustomerChoice; appointmentId?: number }) {
   const toast = useToast();
   const services = useApi<any[]>("/api/services").data ?? [];
   const staff = useApi<any[]>("/api/staff").data ?? [];
@@ -19,13 +20,29 @@ export function InvoiceForm({ onDone, preset }: { onDone: () => void; preset?: C
   const [items, setItems] = useState<Item[]>([{ unit_price: 0, quantity: 1 }]);
   const [discount, setDiscount] = useState(0);
   const [pays, setPays] = useState<Pay[]>([]);
-  const [applyDeposits, setApplyDeposits] = useState(true);
+  const [picked, setPicked] = useState<number[] | null>(null); // selected deposit ids (null = not initialised)
   const [check, setCheck] = useState<{ warnings: string[]; held_deposits: any[] }>({ warnings: [], held_deposits: [] });
+
+  useEffect(() => {
+    if (!appointmentId) return;
+    api(`/api/appointments/${appointmentId}`).then((a) => {
+      setCust({ customer_id: a.customer_id, label: `${a.customer}${a.customer_mobile ? " · " + a.customer_mobile : ""}` });
+      if (a.service_id) setItems([{ service_id: a.service_id, description: a.service, unit_price: a.quoted_price, quantity: 1, staff_id: a.staff_id ?? undefined }]);
+      setPicked(a.deposits.filter((d: any) => d.status === "held").map((d: any) => d.id));
+    }).catch(() => {});
+  }, [appointmentId]);
+
+  useEffect(() => {
+    // by default every held deposit of the customer is applied; the user can untick any of them
+    if (picked === null && check.held_deposits.length) setPicked(check.held_deposits.map((d) => d.id));
+  }, [check.held_deposits, picked]);
+  useEffect(() => setPicked(appointmentId ? picked : null), [cust.customer_id]); // eslint-disable-line react-hooks/exhaustive-deps
   const [busy, setBusy] = useState(false);
 
   const subtotal = items.reduce((s, i) => s + i.unit_price * i.quantity, 0);
   const total = Math.max(0, subtotal - discount);
-  const heldSum = applyDeposits ? check.held_deposits.reduce((s, d) => s + d.amount, 0) : 0;
+  const selected = check.held_deposits.filter((d) => (picked ?? []).includes(d.id));
+  const heldSum = selected.reduce((s, d) => s + d.amount, 0);
   const due = Math.max(0, total - Math.min(heldSum, total));
   const paid = pays.reduce((s, p) => s + p.amount, 0);
 
@@ -49,7 +66,8 @@ export function InvoiceForm({ onDone, preset }: { onDone: () => void; preset?: C
     setBusy(true);
     try {
       const inv = await api("/api/invoices", {
-        body: { ...cust, items: items.filter((i) => i.service_id || i.description), discount, apply_deposits: applyDeposits, payments: pays.filter((p) => p.amount > 0) },
+        body: { ...cust, items: items.filter((i) => i.service_id || i.description), discount, apply_deposits: selected.length > 0, deposit_ids: selected.map((d) => d.id),
+          payments: pays.filter((p) => p.amount > 0), appointment_id: appointmentId ?? null },
       });
       toast(`فاکتور ${inv.number} ثبت شد`);
       onDone();
@@ -96,13 +114,21 @@ export function InvoiceForm({ onDone, preset }: { onDone: () => void; preset?: C
 
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="تخفیف کل"><MoneyInput value={discount} onChange={setDiscount} /></Field>
-        {check.held_deposits.length > 0 && (
-          <label className="flex items-center gap-2 rounded-2xl bg-emerald-500/10 p-3 text-sm">
-            <input type="checkbox" checked={applyDeposits} onChange={(e) => setApplyDeposits(e.target.checked)} />
-            کسر بیعانه‌های مشتری ({money(check.held_deposits.reduce((s, d) => s + d.amount, 0))})
-          </label>
-        )}
       </div>
+      {check.held_deposits.length > 0 && (
+        <div className="space-y-2 rounded-2xl bg-emerald-500/10 p-3 text-sm">
+          <div className="font-bold">بیعانه‌های باز این مشتری (هر کدام که باید از این فاکتور کسر شود را انتخاب کنید):</div>
+          {check.held_deposits.map((d) => (
+            <label key={d.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl px-2 py-1.5 hover:bg-emerald-500/10">
+              <input type="checkbox" checked={(picked ?? []).includes(d.id)} onChange={(e) => setPicked(e.target.checked ? [...(picked ?? []), d.id] : (picked ?? []).filter((x) => x !== d.id))} />
+              <span className="num font-bold">{money(d.amount)}</span>
+              <span className="muted text-xs">دریافت: {formatJ(d.received_at)}</span>
+              <span className="text-xs">خدمت: <b>{d.service ?? "نامشخص"}</b></span>
+              {d.appointment_at && <span className="text-xs text-violet-600 dark:text-violet-300">نوبت: {formatJ(d.appointment_at)}</span>}
+            </label>
+          ))}
+        </div>
+      )}
 
       <div className="space-y-2">
         <div className="label">دریافت (قابل تقسیم بین چند کارتخوان/کارت)</div>
@@ -217,7 +243,8 @@ export default function Invoices() {
         </div>
       </Card>
       <Modal open={open} onClose={() => setParams({})} title="فاکتور جدید" wide>
-        <InvoiceForm onDone={() => { setParams({}); reload(); }} />
+        {open && <InvoiceForm key={params.get("appointment") ?? "new"} appointmentId={params.get("appointment") ? Number(params.get("appointment")) : undefined}
+          onDone={() => { setParams({}); reload(); }} />}
       </Modal>
       <Modal open={view !== null} onClose={() => setView(null)} title="جزئیات فاکتور">
         {view !== null && <InvoiceView id={view} onChange={reload} />}

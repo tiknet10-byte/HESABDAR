@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .textutil import toman
 from ..models import (
     Appointment,
     Customer,
@@ -211,7 +212,7 @@ def insights(db: Session) -> list[dict]:
         if p and abs(x["value"] - p) / p >= 0.25:
             out.append({"level": "info", "text": f"لاین «{x['name']}» {abs(x['value'] - p) / p * 100:.0f}٪ {'رشد' if x['value'] > p else 'افت'} داشته"})
     if cur["deposits_held_count"]:
-        out.append({"level": "info", "text": f"{cur['deposits_held_count']} بیعانه باز به مبلغ {cur['deposits_held']:,} ریال در انتظار ارائه خدمت است"})
+        out.append({"level": "info", "text": f"{cur['deposits_held_count']} بیعانه باز به مبلغ {toman(cur['deposits_held'])} در انتظار ارائه خدمت است"})
     if cur["appointments"].get("no_show_rate", 0) > 0.1:
         out.append({"level": "warning", "text": f"نرخ عدم مراجعه {cur['appointments']['no_show_rate'] * 100:.0f}٪ است؛ یادآوری پیامکی پیشنهاد می‌شود"})
     if cur["expenses"] > cur["revenue"] and cur["revenue"]:

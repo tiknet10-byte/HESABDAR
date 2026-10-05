@@ -25,7 +25,7 @@ from ..models import (
     Payment,
     PaymentAccount,
     Service,
-    utcnow,
+    local_now,
 )
 from .audit import audit
 from .textutil import normalize_mobile
@@ -127,7 +127,7 @@ def post(db: Session, description: str, legs: list[Leg], ref_type: str = "", ref
         raise AccountingError(f"unbalanced entry: debit={dr} credit={cr}")
     if any(l.debit < 0 or l.credit < 0 for l in legs):
         raise AccountingError("negative amounts are not allowed in journal lines")
-    entry = JournalEntry(description=description, ref_type=ref_type, ref_id=ref_id, at=at or utcnow())
+    entry = JournalEntry(description=description, ref_type=ref_type, ref_id=ref_id, at=at or local_now())
     for l in legs:
         entry.lines.append(JournalLine(account_id=l.account.id, debit=l.debit, credit=l.credit,
                                        customer_id=l.customer_id, line_id=l.line_id))
@@ -176,7 +176,7 @@ def record_deposit(db: Session, *, customer: Customer, amount: int, payment_acco
     if amount <= 0:
         raise AccountingError("مبلغ بیعانه باید مثبت باشد")
     dep = Deposit(customer_id=customer.id, amount=amount, payment_account_id=payment_account.id,
-                  received_at=received_at or utcnow(), reference=reference, service_id=service_id,
+                  received_at=received_at or local_now(), reference=reference, service_id=service_id,
                   appointment_id=appointment_id, source=source, notes=notes, service_guess=service_guess or {})
     db.add(dep)
     db.flush()
@@ -226,7 +226,7 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     payments: [{payment_account_id, amount, reference?}]"""
     if not items:
         raise AccountingError("فاکتور بدون آیتم قابل ثبت نیست")
-    inv = Invoice(number=next_invoice_number(db), customer_id=customer.id, issued_at=issued_at or utcnow(),
+    inv = Invoice(number=next_invoice_number(db), customer_id=customer.id, issued_at=issued_at or local_now(),
                   discount=discount, source=source, notes=notes)
     revenue_by_line: dict[int | None, int] = {}
     line_names: dict[int | None, str] = {}
@@ -319,7 +319,7 @@ def record_payment(db: Session, *, payment_account: PaymentAccount, amount: int,
             raise AccountingError("مبلغ پرداخت از مانده فاکتور بیشتر است؛ مازاد را به‌عنوان بیعانه ثبت کنید")
     pay = Payment(invoice_id=invoice.id if invoice else None, customer_id=customer_id,
                   payment_account_id=payment_account.id, amount=amount, reference=reference,
-                  paid_at=paid_at or utcnow(), source=source)
+                  paid_at=paid_at or local_now(), source=source)
     db.add(pay)
     db.flush()
     post(db, f"دریافت وجه {('فاکتور ' + invoice.number) if invoice else ''}".strip(), [
@@ -357,7 +357,7 @@ def record_expense(db: Session, *, category: str, amount: int, payment_account: 
     if amount <= 0:
         raise AccountingError("مبلغ هزینه باید مثبت باشد")
     exp = Expense(category=category, amount=amount, payment_account_id=payment_account.id,
-                  spent_at=spent_at or utcnow(), description=description, staff_id=staff_id)
+                  spent_at=spent_at or local_now(), description=description, staff_id=staff_id)
     db.add(exp)
     db.flush()
     post(db, f"هزینه: {category}", [

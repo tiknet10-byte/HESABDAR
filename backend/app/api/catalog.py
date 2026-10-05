@@ -3,12 +3,24 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
 from ..core.security import mask_card
-from ..models import PaymentAccount, Service, ServiceLine, Staff
+from ..models import (
+    Appointment,
+    Deposit,
+    Expense,
+    InvoiceItem,
+    JournalLine,
+    LedgerAccount,
+    Payment,
+    PaymentAccount,
+    Service,
+    ServiceLine,
+    Staff,
+)
 from ..services import accounting, learning
 from ..services.audit import audit
 from .deps import require
@@ -76,14 +88,24 @@ def _account(a: PaymentAccount) -> dict:
 
 # ---------------------------------------------------------------- lines
 @router.get("/lines")
-def lines(db: Session = Depends(get_db), _=Depends(require("read"))):
-    return [_line(l) for l in db.scalars(select(ServiceLine).order_by(ServiceLine.id))]
+def lines(all: bool = False, db: Session = Depends(get_db), _=Depends(require("read"))):
+    q = select(ServiceLine).order_by(ServiceLine.id)
+    if not all:
+        q = q.where(ServiceLine.is_active.is_(True))
+    return [_line(l) for l in db.scalars(q)]
 
 
 @router.post("/lines")
 def create_line(body: LineIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
-    l = ServiceLine(**body.model_dump())
-    db.add(l)
+    l = db.scalar(select(ServiceLine).where(ServiceLine.name == body.name.strip()))
+    if l is not None:
+        if l.is_active:
+            raise HTTPException(409, "این لاین وجود دارد")
+        l.is_active = True  # re-activate an archived line with the same name
+        l.color, l.icon = body.color, body.icon
+    else:
+        l = ServiceLine(**{**body.model_dump(), "name": body.name.strip()})
+        db.add(l)
     db.flush()
     accounting.revenue_account_for_line(db, l.name)
     audit(db, "line.create", "line", l.id, body.model_dump(), user=user)
@@ -94,6 +116,10 @@ def create_line(body: LineIn, db: Session = Depends(get_db), user=Depends(requir
 @router.put("/lines/{lid}")
 def update_line(lid: int, body: LineIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
     l = db.get(ServiceLine, lid) or _404()
+    if body.name != l.name:
+        # keep the line's revenue account (and its history) - just rename it
+        acc = accounting.revenue_account_for_line(db, l.name)
+        acc.name = f"درآمد {body.name}"
     for k, v in body.model_dump().items():
         setattr(l, k, v)
     audit(db, "line.update", "line", l.id, body.model_dump(), user=user)
@@ -101,10 +127,42 @@ def update_line(lid: int, body: LineIn, db: Session = Depends(get_db), user=Depe
     return _line(l)
 
 
+@router.delete("/lines/{lid}")
+def delete_line(lid: int, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    """Delete a line with all its services (services used in the books are archived, not erased)."""
+    l = db.get(ServiceLine, lid) or _404()
+    for s in list(db.scalars(select(Service).where(Service.line_id == lid))):
+        _remove_service(db, s)
+    used = db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.line_id == lid)) or \
+        db.scalar(select(func.count(Service.id)).where(Service.line_id == lid))
+    if used:
+        l.is_active = False
+    else:
+        db.delete(l)
+    audit(db, "line.delete", "line", lid, {"name": l.name, "archived": bool(used)}, user=user)
+    db.commit()
+    return {"ok": True, "archived": bool(used)}
+
+
+def _remove_service(db: Session, s: Service) -> bool:
+    """Hard-delete an unused service; archive (hide) one that appears in invoices, deposits or appointments."""
+    used = any(db.scalar(select(func.count()).select_from(m).where(m.service_id == s.id))
+               for m in (InvoiceItem, Deposit, Appointment))
+    if used:
+        s.is_active = False
+    else:
+        db.delete(s)
+    db.flush()
+    return used
+
+
 # ---------------------------------------------------------------- services
 @router.get("/services")
-def services(db: Session = Depends(get_db), _=Depends(require("read"))):
-    return [_service(s) for s in db.scalars(select(Service).order_by(Service.line_id, Service.name))]
+def services(all: bool = False, db: Session = Depends(get_db), _=Depends(require("read"))):
+    q = select(Service).order_by(Service.line_id, Service.name)
+    if not all:
+        q = q.where(Service.is_active.is_(True))
+    return [_service(s) for s in db.scalars(q)]
 
 
 @router.post("/services")
@@ -129,6 +187,26 @@ def update_service(sid: int, body: ServiceIn, db: Session = Depends(get_db), use
     audit(db, "service.update", "service", s.id, {**body.model_dump(), "old_price": old_price}, user=user)
     db.commit()
     return _service(s)
+
+
+@router.delete("/services/{sid}")
+def delete_service(sid: int, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    s = db.get(Service, sid) or _404()
+    line_id = s.line_id
+    archived = _remove_service(db, s)
+    line_removed = False
+    if not db.scalar(select(func.count(Service.id)).where(Service.line_id == line_id, Service.is_active.is_(True))):
+        line = db.get(ServiceLine, line_id)
+        if line:  # last service of the line is gone -> remove the line too
+            if db.scalar(select(func.count(Service.id)).where(Service.line_id == line_id)) or \
+                    db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.line_id == line_id)):
+                line.is_active = False
+            else:
+                db.delete(line)
+            line_removed = True
+    audit(db, "service.delete", "service", sid, {"archived": archived, "line_removed": line_removed}, user=user)
+    db.commit()
+    return {"ok": True, "archived": archived, "line_removed": line_removed}
 
 
 @router.get("/services/classify")
@@ -168,8 +246,33 @@ def update_staff(pid: int, body: StaffIn, db: Session = Depends(get_db), user=De
 
 # ---------------------------------------------------------------- payment accounts
 @router.get("/accounts")
-def accounts(db: Session = Depends(get_db), _=Depends(require("read"))):
-    return [_account(a) for a in db.scalars(select(PaymentAccount).order_by(PaymentAccount.id))]
+def accounts(all: bool = False, db: Session = Depends(get_db), _=Depends(require("read"))):
+    q = select(PaymentAccount).order_by(PaymentAccount.id)
+    if not all:
+        q = q.where(PaymentAccount.is_active.is_(True))
+    return [_account(a) for a in db.scalars(q)]
+
+
+@router.delete("/accounts/{aid}")
+def delete_account(aid: int, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    """Delete a POS / card / bank account. If it already has transactions it is archived so the books stay intact."""
+    a = db.get(PaymentAccount, aid) or _404()
+    used = any(db.scalar(select(func.count()).select_from(m).where(m.payment_account_id == aid)) for m in (Deposit, Payment, Expense))
+    if a.ledger_account_id and db.scalar(select(func.count(JournalLine.id)).where(JournalLine.account_id == a.ledger_account_id)):
+        used = True
+    if used:
+        a.is_active = False
+    else:
+        ledger_id = a.ledger_account_id
+        db.delete(a)
+        db.flush()
+        if ledger_id:
+            acc = db.get(LedgerAccount, ledger_id)
+            if acc:
+                db.delete(acc)
+    audit(db, "account.delete", "payment_account", aid, {"name": a.name, "archived": used}, user=user)
+    db.commit()
+    return {"ok": True, "archived": used}
 
 
 @router.get("/accounts/balances")

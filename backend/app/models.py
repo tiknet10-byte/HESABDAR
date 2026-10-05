@@ -4,7 +4,7 @@ All money amounts are integers in **Rial** to avoid floating point errors.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import (
     JSON,
@@ -23,13 +23,14 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .core.db import Base
 
 
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+def local_now() -> datetime:
+    """All stored times are the salon's local wall-clock time (naive). Set TZ on servers (e.g. Asia/Tehran)."""
+    return datetime.now()
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, onupdate=local_now)
 
 
 # ---------------------------------------------------------------- users & audit
@@ -50,7 +51,7 @@ class AuditLog(Base):
     """Tamper-evident audit trail: each row stores the hash of the previous row."""
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     actor: Mapped[str] = mapped_column(String(64), default="system")
     action: Mapped[str] = mapped_column(String(64))
@@ -162,7 +163,7 @@ class Deposit(TimestampMixin, Base):
     service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id"), nullable=True)
     payment_account_id: Mapped[int] = mapped_column(ForeignKey("payment_accounts.id"))
     amount: Mapped[int] = mapped_column(BigInteger)
-    received_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     reference: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="held")  # held|applied|refunded|forfeited
     source: Mapped[str] = mapped_column(String(32), default="manual")
@@ -176,7 +177,7 @@ class Invoice(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     number: Mapped[str] = mapped_column(String(32), unique=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
-    issued_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    issued_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     status: Mapped[str] = mapped_column(String(16), default="issued")  # issued|paid|partial|void
     discount: Mapped[int] = mapped_column(BigInteger, default=0)
     subtotal: Mapped[int] = mapped_column(BigInteger, default=0)
@@ -212,7 +213,7 @@ class Payment(TimestampMixin, Base):
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)
     payment_account_id: Mapped[int] = mapped_column(ForeignKey("payment_accounts.id"))
     amount: Mapped[int] = mapped_column(BigInteger)
-    paid_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    paid_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     reference: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source: Mapped[str] = mapped_column(String(32), default="manual")
 
@@ -223,7 +224,7 @@ class Expense(TimestampMixin, Base):
     category: Mapped[str] = mapped_column(String(64))  # rent, salary, supplies, ...
     amount: Mapped[int] = mapped_column(BigInteger)
     payment_account_id: Mapped[int] = mapped_column(ForeignKey("payment_accounts.id"))
-    spent_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    spent_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     staff_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"), nullable=True)
 
@@ -242,7 +243,7 @@ class LedgerAccount(Base):
 class JournalEntry(Base):
     __tablename__ = "journal_entries"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     description: Mapped[str] = mapped_column(String(256))
     ref_type: Mapped[str] = mapped_column(String(32), default="")
     ref_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -302,7 +303,7 @@ class InboundReceipt(TimestampMixin, Base):
 class Alert(Base):
     __tablename__ = "alerts"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     level: Mapped[str] = mapped_column(String(8), default="warning")  # info|warning|danger
     kind: Mapped[str] = mapped_column(String(32))
     title: Mapped[str] = mapped_column(String(256))
@@ -316,7 +317,7 @@ class Alert(Base):
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     channel: Mapped[str] = mapped_column(String(16))
     peer: Mapped[str] = mapped_column(String(64), index=True)  # phone / handle
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True)
@@ -333,7 +334,7 @@ class ConversationState(Base):
     peer: Mapped[str] = mapped_column(String(64), index=True)
     state: Mapped[str] = mapped_column(String(32), default="idle")
     data: Mapped[dict] = mapped_column(JSON, default=dict)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, onupdate=local_now)
 
 
 class KnowledgeItem(Base):
@@ -344,7 +345,7 @@ class KnowledgeItem(Base):
     kind: Mapped[str] = mapped_column(String(32))  # token_service | note | faq | price_observation
     key: Mapped[str] = mapped_column(String(256))
     value: Mapped[dict] = mapped_column(JSON, default=dict)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, onupdate=local_now)
 
 
 # ---------------------------------------------------------------- imports (OCR / sales book)

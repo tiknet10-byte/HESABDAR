@@ -50,3 +50,8 @@ _STOP = {"و", "به", "از", "با", "برای", "که", "را", "این", "ا
 def tokens(text: str) -> list[str]:
     words = re.findall(r"[\w]+", normalize_text(text))
     return [w for w in words if len(w) > 1 and not w.isdigit() and w not in _STOP]
+
+
+def toman(rial: int | None) -> str:
+    """User-facing money text: amounts are stored in Rial, shown in Toman."""
+    return f"{(rial or 0) // 10:,} تومان"

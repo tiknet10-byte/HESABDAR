@@ -154,3 +154,67 @@ def test_mcp_server_protocol(client):
     assert lines[0]["result"]["serverInfo"]["name"] == "hesabdar"
     assert any(t["name"] == "financial_summary" for t in lines[1]["result"]["tools"])
     assert "isError" not in lines[2]["result"]
+
+
+def test_price_warning_in_toman(client, services):
+    svc = services["میکروبلیدینگ ابرو"]
+    r = client.post("/api/invoices/preview", json={"items": [{"service_id": svc["id"], "unit_price": 75_000_000}]}).json()
+    assert r["warnings"] and "7,500,000 تومان" in r["warnings"][0]
+
+
+def test_delete_service_line_and_account(client):
+    line = client.post("/api/lines", json={"name": "لاین آزمایشی"}).json()
+    s1 = client.post("/api/services", json={"line_id": line["id"], "name": "خدمت ۱", "base_price": 1000}).json()
+    s2 = client.post("/api/services", json={"line_id": line["id"], "name": "خدمت ۲", "base_price": 1000}).json()
+    assert client.delete(f"/api/services/{s1['id']}").json() == {"ok": True, "archived": False, "line_removed": False}
+    r = client.delete(f"/api/services/{s2['id']}").json()
+    assert r["line_removed"] is True
+    assert all(l["id"] != line["id"] for l in client.get("/api/lines").json())
+    acc = client.post("/api/accounts", json={"kind": "pos", "name": "کارتخوان اضافه"}).json()
+    assert client.delete(f"/api/accounts/{acc['id']}").json()["archived"] is False
+    assert all(a["id"] != acc["id"] for a in client.get("/api/accounts").json())
+
+
+def test_deposit_with_booking_and_slots(client, accounts, services):
+    svc = services["کاشت ناخن"]
+    slots = client.get(f"/api/appointments/suggest?service_id={svc['id']}").json()
+    assert len(slots) >= 2 and slots[0]["start_at"] < slots[1]["start_at"]
+    d = client.post("/api/deposits", json={"customer_name": "نوبت دار", "customer_mobile": "09127770000", "amount": 1_000_000,
+                                           "payment_account_id": accounts["کارت پاسارگاد"], "service_id": svc["id"],
+                                           "received_at": "2026-10-01T09:30:00", "book_at": slots[0]["start_at"]}).json()
+    assert d["appointment_at"] == slots[0]["start_at"] and d["received_at"] == "2026-10-01T09:30"
+    nxt = client.get(f"/api/appointments/suggest?service_id={svc['id']}").json()
+    assert nxt[0]["start_at"] != slots[0]["start_at"]  # slot is taken now (single capacity)
+    # deposit without booking, linked later
+    d2 = client.post("/api/deposits", json={"customer_id": d["customer_id"], "amount": 500_000,
+                                            "payment_account_id": accounts["کارت پاسارگاد"], "service_id": svc["id"]}).json()
+    assert d2["appointment_id"] is None
+    linked = client.post(f"/api/deposits/{d2['id']}/appointment?appointment_id={d['appointment_id']}").json()
+    assert linked["appointment_id"] == d["appointment_id"]
+    appt = client.get(f"/api/appointments/{d['appointment_id']}").json()
+    assert len(appt["deposits"]) == 2
+
+
+def test_ai_key_saved_encrypted(client):
+    r = client.put("/api/settings", json={"ai.api_key": "sk-ant-test-123", "ai.model": "claude-opus-5-5"}).json()
+    assert r["ai.api_key"] == "••••"
+    from app.core.db import SessionLocal
+    from app.models import Setting
+    with SessionLocal() as db:
+        raw = db.get(Setting, "ai.api_key").value
+    assert raw.startswith("enc:") and "sk-ant" not in raw
+    client.put("/api/settings", json={"ai.api_key": ""})
+
+
+def test_zz_reset_and_optimize(client):
+    assert client.post("/api/admin/reset", json={"scope": "transactions", "password": "bad", "confirm": "حذف"}).status_code == 403
+    r = client.post("/api/admin/reset", json={"scope": "transactions", "password": "Secret123", "confirm": "حذف"}).json()
+    assert r["ok"] and r["safety_backup"]
+    st = client.get("/api/admin/data").json()["stats"]
+    assert st["invoices"] == 0 and st["deposits"] == 0 and st["customers"] > 0
+    tb = client.get("/api/ledger/trial-balance").json()
+    assert tb["total_debit"] == tb["total_credit"] == 0
+    r = client.post("/api/admin/reset", json={"scope": "factory", "password": "Secret123", "confirm": "حذف"}).json()
+    st = client.get("/api/admin/data").json()["stats"]
+    assert st["customers"] == 0 and st["services"] > 0  # defaults re-seeded
+    assert client.post("/api/admin/optimize").json()["ok"]

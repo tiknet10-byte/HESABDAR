@@ -1,10 +1,15 @@
-import { Bell, Bot, Brain, CreditCard, DatabaseBackup, Plug, Scissors, Settings as Cog, ShieldCheck, UserCog, Users } from "lucide-react";
+import {
+  AlertTriangle, Bell, BookOpen, Bot, Brain, CreditCard, Database, DatabaseBackup, KeyRound, Pencil, Plug, Plus, Scissors, Settings as Cog, ShieldCheck,
+  Trash2, UserCog, Users, Wrench,
+} from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader } from "../components/ui";
 import { api, download } from "../lib/api";
-import { ACCOUNT_KINDS, jdatetime, money, ROLES } from "../lib/format";
+import { ACCOUNT_KINDS, jdatetime, money, num, ROLES } from "../lib/format";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
+
+const WEEKDAYS = [{ v: 5, l: "شنبه" }, { v: 6, l: "یکشنبه" }, { v: 0, l: "دوشنبه" }, { v: 1, l: "سه‌شنبه" }, { v: 2, l: "چهارشنبه" }, { v: 3, l: "پنجشنبه" }, { v: 4, l: "جمعه" }];
 
 function General() {
   const toast = useToast();
@@ -14,9 +19,33 @@ function General() {
   const text = (k: string, label: string, area = false) => (
     <Field label={label}>{area ? <textarea className="input min-h-20" value={data[k] ?? ""} onChange={(e) => set(k, e.target.value)} /> : <input className="input" value={data[k] ?? ""} onChange={(e) => set(k, e.target.value)} />}</Field>
   );
+  const daysOff: number[] = data["booking.days_off"] ?? [];
   return (
     <div className="space-y-4">
       <Card title="مشخصات سالن"><div className="grid gap-3 sm:grid-cols-2">{text("salon.name", "نام سالن")}{text("salon.phone", "تلفن")}{text("salon.address", "آدرس")}</div></Card>
+      <Card title="نوبت‌دهی">
+        <div className="space-y-4">
+          <label className="flex items-start gap-3 rounded-2xl bg-violet-500/10 p-3 text-sm">
+            <input type="checkbox" className="mt-1" checked={!!data["booking.auto"]} onChange={(e) => set("booking.auto", e.target.checked)} />
+            <span><b>نوبت‌دهی خودکار</b><br /><span className="muted">با ثبت بیعانه‌ای که خدمتش مشخص است، اولین نوبت خالی همان خدمت به‌صورت خودکار رزرو می‌شود. اگر خاموش باشد، سیستم فقط نوبت خالی را پیشنهاد می‌دهد.</span></span>
+          </label>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Field label="شروع ساعت کاری"><input type="time" className="input" value={data["booking.open"]} onChange={(e) => set("booking.open", e.target.value)} /></Field>
+            <Field label="پایان ساعت کاری"><input type="time" className="input" value={data["booking.close"]} onChange={(e) => set("booking.close", e.target.value)} /></Field>
+            <Field label="فاصله نوبت‌ها (دقیقه)"><select className="input" value={data["booking.slot_minutes"]} onChange={(e) => set("booking.slot_minutes", Number(e.target.value))}>{[5, 10, 15, 20, 30, 60].map((m) => <option key={m} value={m}>{m}</option>)}</select></Field>
+          </div>
+          <div>
+            <div className="label">روزهای تعطیل</div>
+            <div className="flex flex-wrap gap-2">
+              {WEEKDAYS.map((w) => (
+                <button type="button" key={w.v} onClick={() => set("booking.days_off", daysOff.includes(w.v) ? daysOff.filter((x) => x !== w.v) : [...daysOff, w.v])}
+                  className={`rounded-xl px-3 py-1.5 text-sm font-semibold ${daysOff.includes(w.v) ? "bg-rose-500 text-white" : "border hover:bg-violet-500/10"}`} style={daysOff.includes(w.v) ? {} : { borderColor: "var(--border)" }}>{w.l}</button>
+              ))}
+            </div>
+          </div>
+          <p className="muted text-xs">مدت زمان هر خدمت در «لاین‌ها و خدمات» و لاین هر پرسنل در «پرسنل و کاربران» تعیین می‌شود؛ ظرفیت هر لاین = تعداد پرسنل آن لاین.</p>
+        </div>
+      </Card>
       <Card title="تطبیق رسید با بانک">
         <div className="grid gap-3 sm:grid-cols-3">
           <Field label="بازه زمانی تطبیق (ساعت)"><input type="number" className="input" value={data["matching.window_hours"]} onChange={(e) => set("matching.window_hours", Number(e.target.value))} /></Field>
@@ -32,54 +61,85 @@ function General() {
           {text("bot.mismatch_message", "پیام در انتظار تأیید بانک", true)}
         </div>
       </Card>
-      <Card title="هوش مصنوعی و پشتیبان">
-        <div className="space-y-3">
-          {text("ai.assistant_instructions", "دستورالعمل اختصاصی برای دستیار (مثلاً سیاست تخفیف یا لحن)", true)}
-          {text("backup.mirror_dir", "پوشه کپی دوم پشتیبان (فلش، Google Drive، Dropbox)")}
-        </div>
-      </Card>
-      <button className="btn btn-primary" onClick={async () => { try { await api("/api/settings", { method: "PUT", body: data }); toast("ذخیره شد"); } catch (e: any) { toast(e.message, "error"); } }}>ذخیره تنظیمات</button>
+      <Card title="پشتیبان"><div className="space-y-3">{text("backup.mirror_dir", "پوشه کپی دوم پشتیبان (مثلاً E:\\Backup یا پوشه Google Drive)")}</div></Card>
+      <button className="btn btn-primary" onClick={async () => { try { const { ["ai.api_key"]: _k, ...rest } = data; await api("/api/settings", { method: "PUT", body: rest }); toast("ذخیره شد"); } catch (e: any) { toast(e.message, "error"); } }}>ذخیره تنظیمات</button>
     </div>
   );
 }
+
+const LINE_COLORS = ["#f472b6", "#a78bfa", "#34d399", "#fbbf24", "#fb7185", "#60a5fa", "#f97316", "#14b8a6"];
 
 function Catalog() {
   const toast = useToast();
   const lines = useApi<any[]>("/api/lines");
   const services = useApi<any[]>("/api/services");
   const [edit, setEdit] = useState<any>(null);
-  const [lineName, setLineName] = useState("");
+  const [line, setLine] = useState<any>(null);
+  const reload = () => { lines.reload(); services.reload(); };
+
   async function saveService() {
     try {
       const body = { ...edit, aliases: typeof edit.aliases === "string" ? edit.aliases.split(/[،,]/).map((s: string) => s.trim()).filter(Boolean) : edit.aliases };
       await api(edit.id ? `/api/services/${edit.id}` : "/api/services", { method: edit.id ? "PUT" : "POST", body });
       toast("ذخیره شد");
       setEdit(null);
-      services.reload();
+      reload();
     } catch (e: any) {
       toast(e.message, "error");
     }
   }
+  async function deleteService(s: any) {
+    if (!confirm(`خدمت «${s.name}» حذف شود؟`)) return;
+    const r = await api(`/api/services/${s.id}`, { method: "DELETE" });
+    toast(r.archived ? "خدمت در سوابق استفاده شده بود؛ از فهرست حذف و بایگانی شد" : "خدمت حذف شد");
+    if (r.line_removed) toast("لاین بدون خدمت ماند و حذف شد", "info");
+    setEdit(null);
+    reload();
+  }
+  async function saveLine() {
+    try {
+      await api(line.id ? `/api/lines/${line.id}` : "/api/lines", { method: line.id ? "PUT" : "POST", body: { name: line.name, color: line.color, icon: line.icon ?? "sparkles", is_active: true } });
+      toast("ذخیره شد");
+      setLine(null);
+      reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  }
+  async function deleteLine() {
+    const count = (services.data ?? []).filter((s) => s.line_id === line.id).length;
+    if (!confirm(`لاین «${line.name}»${count ? ` و ${count} خدمت آن` : ""} حذف شود؟`)) return;
+    await api(`/api/lines/${line.id}`, { method: "DELETE" });
+    toast("لاین حذف شد");
+    setLine(null);
+    reload();
+  }
+
   return (
     <div className="space-y-4">
-      <Card title="لاین‌های خدماتی">
+      <Card title="لاین‌های خدماتی" actions={<button className="btn btn-sm" onClick={() => setLine({ name: "", color: LINE_COLORS[(lines.data?.length ?? 0) % 8] })}><Plus size={14} />لاین جدید</button>}>
         <div className="flex flex-wrap gap-2">
-          {(lines.data ?? []).map((l) => <span key={l.id} className="badge py-1.5 text-sm" style={{ background: l.color + "22", color: l.color }}>{l.name}</span>)}
+          {(lines.data ?? []).map((l) => (
+            <button key={l.id} onClick={() => setLine({ ...l })} className="badge cursor-pointer gap-2 py-2 text-sm transition hover:scale-105" style={{ background: l.color + "22", color: l.color }} title="ویرایش یا حذف">
+              {l.name}<Pencil size={12} />
+            </button>
+          ))}
         </div>
-        <div className="mt-3 flex gap-2">
-          <input className="input max-w-xs" placeholder="نام لاین جدید" value={lineName} onChange={(e) => setLineName(e.target.value)} />
-          <button className="btn" disabled={!lineName} onClick={async () => { await api("/api/lines", { body: { name: lineName } }); setLineName(""); lines.reload(); }}>افزودن</button>
-        </div>
+        <p className="muted mt-2 text-xs">برای ویرایش یا حذف، روی لاین کلیک کنید. با حذف آخرین خدمت یک لاین، خود لاین هم حذف می‌شود.</p>
       </Card>
-      <Card title="خدمات و قیمت‌ها" actions={<button className="btn btn-sm btn-primary" onClick={() => setEdit({ line_id: lines.data?.[0]?.id, name: "", base_price: 0, default_deposit: 0, duration_minutes: 60, aliases: [], is_active: true })}>خدمت جدید</button>} pad={false}>
+      <Card title="خدمات و قیمت‌ها" actions={<button className="btn btn-sm btn-primary" onClick={() => setEdit({ line_id: lines.data?.[0]?.id, name: "", base_price: 0, default_deposit: 0, duration_minutes: 60, aliases: "", is_active: true })}><Plus size={14} />خدمت جدید</button>} pad={false}>
         <div className="overflow-x-auto">
           <table className="table">
-            <thead><tr><th>لاین</th><th>خدمت</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th>نام‌های دیگر</th></tr></thead>
+            <thead><tr><th>لاین</th><th>خدمت</th><th>مدت</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th></th></tr></thead>
             <tbody>{(services.data ?? []).map((s) => (
-              <tr key={s.id} className="cursor-pointer" onClick={() => setEdit({ ...s, aliases: s.aliases.join("، ") })}>
-                <td className="muted">{s.line}</td><td className="font-semibold">{s.name}</td><td className="num">{money(s.base_price)}</td>
-                <td className="num">{s.learned_avg_price ? <>{money(s.learned_avg_price)} <span className="muted text-xs">({s.learned_count})</span></> : "—"}</td>
-                <td className="num">{s.default_deposit ? money(s.default_deposit) : "—"}</td><td className="muted max-w-52 truncate text-xs">{s.aliases.join("، ")}</td>
+              <tr key={s.id}>
+                <td className="muted">{s.line}</td><td className="font-semibold">{s.name}</td><td className="num">{num(s.duration_minutes)} دقیقه</td><td className="num">{money(s.base_price)}</td>
+                <td className="num">{s.learned_avg_price ? <>{money(s.learned_avg_price)} <span className="muted text-xs">({num(s.learned_count)})</span></> : "—"}</td>
+                <td className="num">{s.default_deposit ? money(s.default_deposit) : "—"}</td>
+                <td className="whitespace-nowrap">
+                  <button className="btn btn-ghost btn-sm" onClick={() => setEdit({ ...s, aliases: s.aliases.join("، ") })} title="ویرایش"><Pencil size={15} /></button>
+                  <button className="btn btn-ghost btn-sm text-rose-500" onClick={() => deleteService(s)} title="حذف"><Trash2 size={15} /></button>
+                </td>
               </tr>
             ))}</tbody>
           </table>
@@ -92,12 +152,34 @@ function Catalog() {
               <Field label="لاین"><select className="input" value={edit.line_id} onChange={(e) => setEdit({ ...edit, line_id: Number(e.target.value) })}>{(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></Field>
               <Field label="نام خدمت"><input className="input" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
               <Field label="قیمت پایه"><MoneyInput value={edit.base_price} onChange={(v) => setEdit({ ...edit, base_price: v })} /></Field>
+              <Field label="مدت زمان انجام (دقیقه)" hint="برای پیشنهاد خودکار نوبت خالی استفاده می‌شود">
+                <input type="number" min={5} step={5} className="input" value={edit.duration_minutes} onChange={(e) => setEdit({ ...edit, duration_minutes: Number(e.target.value) })} />
+              </Field>
               <Field label="بیعانه پیش‌فرض"><MoneyInput value={edit.default_deposit} onChange={(v) => setEdit({ ...edit, default_deposit: v })} /></Field>
+              <div />
               <Field label="حداقل قیمت مجاز"><MoneyInput value={edit.min_price ?? 0} onChange={(v) => setEdit({ ...edit, min_price: v || null })} /></Field>
               <Field label="حداکثر قیمت مجاز"><MoneyInput value={edit.max_price ?? 0} onChange={(v) => setEdit({ ...edit, max_price: v || null })} /></Field>
             </div>
             <Field label="نام‌های دیگری که مشتری‌ها استفاده می‌کنند" hint="با ویرگول جدا کنید؛ سیستم از این‌ها و گفتگوها یاد می‌گیرد"><input className="input" value={edit.aliases} onChange={(e) => setEdit({ ...edit, aliases: e.target.value })} /></Field>
-            <button className="btn btn-primary w-full" onClick={saveService}>ذخیره</button>
+            <div className="flex gap-2">
+              <button className="btn btn-primary flex-1" onClick={saveService}>ذخیره</button>
+              {edit.id && <button className="btn btn-danger" onClick={() => deleteService(edit)}><Trash2 size={15} />حذف</button>}
+            </div>
+          </div>
+        )}
+      </Modal>
+      <Modal open={!!line} onClose={() => setLine(null)} title={line?.id ? "ویرایش لاین" : "لاین جدید"}>
+        {line && (
+          <div className="space-y-3">
+            <Field label="نام لاین"><input className="input" value={line.name} onChange={(e) => setLine({ ...line, name: e.target.value })} /></Field>
+            <div>
+              <div className="label">رنگ</div>
+              <div className="flex gap-2">{LINE_COLORS.map((c) => <button key={c} type="button" onClick={() => setLine({ ...line, color: c })} className={`h-8 w-8 rounded-full ${line.color === c ? "ring-4 ring-violet-300" : ""}`} style={{ background: c }} />)}</div>
+            </div>
+            <div className="flex gap-2">
+              <button className="btn btn-primary flex-1" disabled={!line.name} onClick={saveLine}>ذخیره</button>
+              {line.id && <button className="btn btn-danger" onClick={deleteLine}><Trash2 size={15} />حذف لاین و خدماتش</button>}
+            </div>
           </div>
         )}
       </Modal>
@@ -114,7 +196,7 @@ function Accounts() {
       <table className="table">
         <thead><tr><th>نام</th><th>نوع</th><th>بانک</th><th>کارت / ترمینال</th><th>اتصال API</th><th>وضعیت</th></tr></thead>
         <tbody>{(data ?? []).map((a) => (
-          <tr key={a.id} className="cursor-pointer" onClick={() => setEdit({ ...a })}>
+          <tr key={a.id} className="cursor-pointer" onClick={() => setEdit({ ...a })} title="برای ویرایش یا حذف کلیک کنید">
             <td className="font-semibold">{a.name}</td><td>{ACCOUNT_KINDS[a.kind]}</td><td>{a.bank_name}</td><td className="num" dir="ltr">{a.card_mask || a.terminal_id || "—"}</td>
             <td>{a.provider ? <Badge status="registered">{a.provider}</Badge> : "—"}</td><td>{a.is_active ? "فعال" : "غیرفعال"}</td>
           </tr>
@@ -138,9 +220,17 @@ function Accounts() {
                 <textarea className="input num min-h-24" dir="ltr" defaultValue={JSON.stringify(edit.provider_config, null, 1)} onBlur={(e) => { try { setEdit({ ...edit, provider_config: JSON.parse(e.target.value || "{}") }); } catch { toast("JSON نامعتبر", "error"); } }} />
               </Field>
             )}
-            <button className="btn btn-primary w-full" onClick={async () => {
-              try { await api(edit.id ? `/api/accounts/${edit.id}` : "/api/accounts", { method: edit.id ? "PUT" : "POST", body: edit }); toast("ذخیره شد"); setEdit(null); reload(); } catch (e: any) { toast(e.message, "error"); }
-            }}>ذخیره</button>
+            <div className="flex gap-2">
+              <button className="btn btn-primary flex-1" onClick={async () => {
+                try { await api(edit.id ? `/api/accounts/${edit.id}` : "/api/accounts", { method: edit.id ? "PUT" : "POST", body: edit }); toast("ذخیره شد"); setEdit(null); reload(); } catch (e: any) { toast(e.message, "error"); }
+              }}>ذخیره</button>
+              {edit.id && <button className="btn btn-danger" onClick={async () => {
+                if (!confirm(`«${edit.name}» حذف شود؟`)) return;
+                const r = await api(`/api/accounts/${edit.id}`, { method: "DELETE" });
+                toast(r.archived ? "این حساب تراکنش داشت؛ برای سالم ماندن دفاتر بایگانی و از فهرست‌ها حذف شد" : "حذف شد");
+                setEdit(null); reload();
+              }}><Trash2 size={15} />حذف</button>}
+            </div>
           </div>
         )}
       </Modal>
@@ -153,17 +243,35 @@ function StaffAndUsers() {
   const { user } = useAuth();
   const staff = useApi<any[]>("/api/staff");
   const users = useApi<any[]>(can(user, "users") ? "/api/auth/users" : null);
-  const [s, setS] = useState({ full_name: "", commission_percent: 30 });
+  const [s, setS] = useState({ full_name: "", commission_percent: 30, line_id: 0 });
+  const lines = useApi<any[]>("/api/lines");
   const [u, setU] = useState({ username: "", full_name: "", password: "", role: "receptionist" });
   return (
     <div className="space-y-4">
       <Card title="پرسنل">
-        <div className="space-y-1.5">{(staff.data ?? []).map((p) => <div key={p.id} className="flex justify-between text-sm"><span className="font-semibold">{p.full_name}</span><span className="muted">پورسانت {p.commission_percent}٪</span></div>)}</div>
+        <div className="space-y-2">
+          {(staff.data ?? []).map((p) => (
+            <div key={p.id} className={`grid grid-cols-12 items-center gap-2 text-sm ${p.is_active ? "" : "opacity-50"}`}>
+              <span className="col-span-4 font-semibold">{p.full_name}</span>
+              <select className="input col-span-4 py-1.5" value={p.line_id ?? ""} onChange={async (e) => { await api(`/api/staff/${p.id}`, { method: "PUT", body: { ...p, line_id: Number(e.target.value) || null } }); staff.reload(); }}>
+                <option value="">بدون لاین</option>
+                {(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+              </select>
+              <span className="muted col-span-2 text-xs">پورسانت {num(p.commission_percent)}٪</span>
+              <button className="btn btn-sm col-span-2" onClick={async () => { await api(`/api/staff/${p.id}`, { method: "PUT", body: { ...p, is_active: !p.is_active } }); staff.reload(); }}>{p.is_active ? "غیرفعال" : "فعال"}</button>
+            </div>
+          ))}
+        </div>
         <div className="mt-3 flex flex-wrap gap-2">
           <input className="input max-w-xs" placeholder="نام پرسنل" value={s.full_name} onChange={(e) => setS({ ...s, full_name: e.target.value })} />
-          <input className="input w-28" type="number" value={s.commission_percent} onChange={(e) => setS({ ...s, commission_percent: Number(e.target.value) })} />
-          <button className="btn" disabled={!s.full_name} onClick={async () => { await api("/api/staff", { body: s }); setS({ full_name: "", commission_percent: 30 }); staff.reload(); }}>افزودن</button>
+          <select className="input w-40" value={s.line_id} onChange={(e) => setS({ ...s, line_id: Number(e.target.value) })}>
+            <option value={0}>لاین…</option>
+            {(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+          <input className="input w-24" type="number" title="درصد پورسانت" value={s.commission_percent} onChange={(e) => setS({ ...s, commission_percent: Number(e.target.value) })} />
+          <button className="btn" disabled={!s.full_name} onClick={async () => { await api("/api/staff", { body: { ...s, line_id: s.line_id || null } }); setS({ full_name: "", commission_percent: 30, line_id: 0 }); staff.reload(); }}>افزودن</button>
         </div>
+        <p className="muted mt-2 text-xs">لاین هر پرسنل برای محاسبه ظرفیت نوبت‌دهی استفاده می‌شود.</p>
       </Card>
       {can(user, "users") && (
         <Card title="کاربران سیستم و سطح دسترسی">
@@ -287,30 +395,162 @@ function Security() {
 function AIIntegration() {
   const toast = useToast();
   const tools = useApi<any[]>("/api/ai/tools");
+  const { data, setData } = useApi<Record<string, any>>("/api/settings");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [showGuide, setShowGuide] = useState(false);
+  if (!data) return <Loading />;
+  const save = async () => {
+    await api("/api/settings", { method: "PUT", body: { "ai.api_key": data["ai.api_key"], "ai.model": data["ai.model"], "ai.base_url": data["ai.base_url"], "ai.assistant_instructions": data["ai.assistant_instructions"] } });
+    toast("تنظیمات هوش مصنوعی ذخیره شد");
+  };
   const mcp = `{
   "mcpServers": {
     "hesabdar": {
-      "command": "<مسیر پروژه>/backend/.venv/bin/python",
+      "command": "D:\\\\HESABDAR\\\\backend\\\\.venv\\\\Scripts\\\\python.exe",
       "args": ["manage.py", "mcp", "--user", "ai"],
-      "cwd": "<مسیر پروژه>/backend"
+      "cwd": "D:\\\\HESABDAR\\\\backend"
     }
   }
 }`;
   return (
     <div className="space-y-4">
-      <Card title="اتصال به Claude و سایر هوش‌های مصنوعی">
-        <div className="space-y-3 text-sm leading-7">
-          <p>سیستم از سه راه با هوش مصنوعی همگام می‌شود: <b>دستیار داخلی</b> (با کلید <code dir="ltr">ANTHROPIC_API_KEY</code>)، <b>سرور MCP</b> برای Claude Desktop / Claude Code، و <b>REST API ابزارها</b> برای هر عامل هوشمند دیگر.</p>
-          <div className="label">پیکربندی MCP (یک کاربر با نقش «عامل هوش مصنوعی» بسازید):</div>
-          <pre className="overflow-x-auto rounded-2xl p-3 text-xs" dir="ltr" style={{ background: "var(--surface)" }}>{mcp}</pre>
-          <div className="flex flex-wrap gap-2">
-            <button className="btn btn-sm" onClick={async () => { const r = await api("/api/learning/retrain", { method: "POST" }); toast(`یادگیری مجدد: ${r.messages} پیام، ${r.invoice_items} آیتم فاکتور`); }}><Brain size={14} />یادگیری مجدد از کل سوابق</button>
-            <button className="btn btn-sm" onClick={() => download("/api/ai/knowledge-export", "hesabdar-knowledge.json")}>خروجی دانش آموخته‌شده</button>
+      <Card title={<span className="flex items-center gap-2"><KeyRound size={18} className="text-violet-500" />اتصال به هوش مصنوعی (Claude)</span>}
+        actions={<button className="btn btn-sm" onClick={() => setShowGuide(!showGuide)}><BookOpen size={14} />{showGuide ? "بستن راهنما" : "راهنمای اتصال"}</button>}>
+        <div className="space-y-4">
+          <Field label="کلید API (API Key)" hint="کلید به‌صورت رمزگذاری‌شده در پایگاه داده ذخیره می‌شود و دیگر نمایش داده نمی‌شود.">
+            <input className="input" dir="ltr" type="password" autoComplete="off" placeholder="sk-ant-api03-..." value={data["ai.api_key"] ?? ""}
+              onFocus={() => data["ai.api_key"] === "••••" && setData({ ...data, "ai.api_key": "" })}
+              onChange={(e) => setData({ ...data, "ai.api_key": e.target.value })} />
+          </Field>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="مدل">
+              <select className="input" dir="ltr" value={data["ai.model"] || "claude-opus-5-5"} onChange={(e) => setData({ ...data, "ai.model": e.target.value })}>
+                <option value="claude-opus-5-5">Claude Opus 5.5 (پیشنهادی - دقیق‌ترین تحلیل)</option>
+                <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (سریع‌تر و ارزان‌تر)</option>
+                <option value="claude-haiku-4-5">Claude Haiku 4.5 (ارزان‌ترین)</option>
+              </select>
+            </Field>
+            <Field label="آدرس سرور واسط (اختیاری)" hint="فقط اگر از درگاه/پراکسی سازمانی استفاده می‌کنید">
+              <input className="input" dir="ltr" placeholder="https://api.anthropic.com" value={data["ai.base_url"] ?? ""} onChange={(e) => setData({ ...data, "ai.base_url": e.target.value })} />
+            </Field>
           </div>
+          <Field label="دستورالعمل اختصاصی دستیار (اختیاری)" hint="مثلاً سیاست تخفیف، لحن پاسخ یا نکات مهم سالن">
+            <textarea className="input min-h-20" value={data["ai.assistant_instructions"] ?? ""} onChange={(e) => setData({ ...data, "ai.assistant_instructions": e.target.value })} />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <button className="btn btn-primary" onClick={save}>ذخیره</button>
+            <button className="btn" disabled={busy} onClick={async () => {
+              setBusy(true); setResult(null);
+              try { await save(); setResult(await api("/api/ai/test", { method: "POST" })); } catch (e: any) { setResult({ ok: false, error: e.message }); } finally { setBusy(false); }
+            }}>{busy ? "در حال بررسی…" : "تست اتصال"}</button>
+          </div>
+          {result && (
+            <div className={`rounded-2xl p-3 text-sm ${result.ok ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-rose-500/10 text-rose-700 dark:text-rose-300"}`}>
+              {result.ok ? `✓ اتصال برقرار است (${result.model})` : <>✗ اتصال ناموفق: <span dir="ltr" className="text-xs">{result.error}</span></>}
+            </div>
+          )}
+        </div>
+      </Card>
+
+      {showGuide && (
+        <Card title="راهنمای اتصال هوش مصنوعی">
+          <ol className="list-decimal space-y-3 pr-5 text-sm leading-7">
+            <li>به <b dir="ltr">console.anthropic.com</b> بروید و ثبت‌نام کنید (ایمیل + تأیید).</li>
+            <li>از منوی <b>Billing</b> اعتبار (Credit) اضافه کنید؛ بدون اعتبار، کلید کار نمی‌کند.</li>
+            <li>از منوی <b>API Keys</b> روی <b>Create Key</b> بزنید، یک نام بدهید (مثلاً hesabdar) و کلید را کپی کنید. کلید با <code dir="ltr">sk-ant-</code> شروع می‌شود و فقط یک بار نمایش داده می‌شود.</li>
+            <li>کلید را در کادر «کلید API» بالا بچسبانید، <b>ذخیره</b> و سپس <b>تست اتصال</b> را بزنید.</li>
+            <li>اگر تست ناموفق بود: اتصال اینترنت به <code dir="ltr">api.anthropic.com</code> را بررسی کنید؛ پیام «authentication» یعنی کلید اشتباه است و «credit» یعنی اعتبار حساب تمام شده.</li>
+          </ol>
+          <div className="mt-4 rounded-2xl p-4 text-sm leading-7" style={{ background: "var(--surface)" }}>
+            <b>پس از اتصال، این قابلیت‌ها فعال می‌شوند:</b>
+            <ul className="mt-1 list-disc pr-5">
+              <li>دستیار هوشمند (منوی «دستیار هوش مصنوعی») با دسترسی به داده‌های واقعی سالن</li>
+              <li>خواندن عکس رسیدهای واتساپ/اینستاگرام</li>
+              <li>اسکن عکس و دست‌خط دفتر فروش</li>
+            </ul>
+          </div>
+          <div className="mt-4 space-y-2 text-sm leading-7">
+            <b>اتصال Claude Desktop یا Claude Code به حسابدار (MCP) - اختیاری:</b>
+            <ol className="list-decimal space-y-1 pr-5">
+              <li>در «پرسنل و کاربران» یک کاربر با نام کاربری <code>ai</code> و نقش «عامل هوش مصنوعی» بسازید.</li>
+              <li>در Claude Desktop: Settings ← Developer ← Edit Config و متن زیر را اضافه کنید (مسیر را با محل نصب خود تطبیق دهید):</li>
+            </ol>
+            <pre className="overflow-x-auto rounded-2xl p-3 text-xs" dir="ltr" style={{ background: "var(--surface)" }}>{mcp}</pre>
+            <p className="muted text-xs">برای اتصال هر عامل هوشمند دیگر: فهرست ابزارها از <code dir="ltr">GET /api/ai/tools</code> و اجرا با <code dir="ltr">POST /api/ai/tools/&lt;name&gt;</code> (با توکن ورود).</p>
+          </div>
+        </Card>
+      )}
+
+      <Card title="یادگیری سیستم">
+        <div className="flex flex-wrap gap-2">
+          <button className="btn btn-sm" onClick={async () => { const r = await api("/api/learning/retrain", { method: "POST" }); toast(`یادگیری مجدد: ${r.messages} پیام، ${r.invoice_items} آیتم فاکتور`); }}><Brain size={14} />یادگیری مجدد از کل سوابق</button>
+          <button className="btn btn-sm" onClick={() => download("/api/ai/knowledge-export", "hesabdar-knowledge.json")}>خروجی دانش آموخته‌شده</button>
         </div>
       </Card>
       <Card title={`ابزارهای قابل استفاده برای هوش مصنوعی (${tools.data?.length ?? 0})`} pad={false}>
-        <table className="table"><tbody>{(tools.data ?? []).map((t) => <tr key={t.name}><td dir="ltr" className="text-left font-mono text-xs">{t.name}</td><td className="muted text-xs" dir="ltr">{t.description}</td><td><Badge>{t.permission}</Badge></td></tr>)}</tbody></table>
+        <div className="overflow-x-auto"><table className="table"><tbody>{(tools.data ?? []).map((t) => <tr key={t.name}><td dir="ltr" className="text-left font-mono text-xs">{t.name}</td><td className="muted text-xs" dir="ltr">{t.description}</td><td><Badge>{t.permission}</Badge></td></tr>)}</tbody></table></div>
+      </Card>
+    </div>
+  );
+}
+
+const TABLE_LABELS: Record<string, string> = {
+  customers: "مشتریان", invoices: "فاکتورها", deposits: "بیعانه‌ها", payments: "دریافت‌ها", appointments: "نوبت‌ها", expenses: "هزینه‌ها",
+  journal_entries: "اسناد حسابداری", bank_transactions: "تراکنش‌های بانک", inbound_receipts: "رسیدها", services: "خدمات",
+  payment_accounts: "کارتخوان و کارت‌ها", knowledge_items: "دانش آموخته‌شده", audit_logs: "رکوردهای ممیزی",
+};
+
+function DataManagement() {
+  const toast = useToast();
+  const { data, reload } = useApi<any>("/api/admin/data");
+  const [scope, setScope] = useState("transactions");
+  const [password, setPassword] = useState("");
+  const [confirmWord, setConfirmWord] = useState("");
+  const [busy, setBusy] = useState("");
+  if (!data) return <Loading />;
+  const run = async (key: string, fn: () => Promise<void>) => { setBusy(key); try { await fn(); } catch (e: any) { toast(e.message, "error"); } finally { setBusy(""); } };
+  return (
+    <div className="space-y-4">
+      <Card title="وضعیت پایگاه داده">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {Object.entries(data.stats).filter(([k]) => !k.startsWith("_")).map(([k, v]) => (
+            <div key={k} className="rounded-2xl p-3" style={{ background: "var(--surface)" }}><div className="muted text-xs">{TABLE_LABELS[k] ?? k}</div><div className="num font-bold">{num(v as number)}</div></div>
+          ))}
+        </div>
+        {data.stats._size_bytes != null && <div className="muted mt-3 text-sm">حجم فایل پایگاه داده: {num(Math.round(data.stats._size_bytes / 1024))} کیلوبایت</div>}
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button className="btn" disabled={!!busy} onClick={() => run("opt", async () => {
+            const r = await api("/api/admin/optimize", { method: "POST" });
+            toast(r.ok ? `بهینه‌سازی انجام شد${r.size_after != null ? ` (${num(Math.round(r.size_before / 1024))} ← ${num(Math.round(r.size_after / 1024))} کیلوبایت)` : ""}` : "بررسی سلامت خطا داد!", r.ok ? "ok" : "error");
+            reload();
+          })}><Wrench size={15} />{busy === "opt" ? "در حال بهینه‌سازی…" : "بهینه‌سازی و بررسی سلامت"}</button>
+          <button className="btn" disabled={!!busy} onClick={() => run("demo", async () => {
+            if (!confirm("داده نمونه ۱۲۰ روزه (مشتری، فاکتور، بیعانه، هزینه) اضافه شود؟ فقط برای آزمایش.")) return;
+            const r = await api("/api/admin/demo", { method: "POST" }); toast(`${num(r.invoices)} فاکتور نمونه اضافه شد`); reload();
+          })}><Database size={15} />{busy === "demo" ? "در حال ساخت…" : "افزودن داده نمونه (برای تست)"}</button>
+        </div>
+      </Card>
+
+      <Card title={<span className="flex items-center gap-2 text-rose-600"><AlertTriangle size={18} />پاک‌سازی اطلاعات</span>}>
+        <div className="space-y-3 text-sm">
+          {Object.entries(data.scopes).map(([k, label]) => (
+            <label key={k} className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-3 ${scope === k ? "border-rose-400 bg-rose-500/5" : ""}`} style={scope === k ? {} : { borderColor: "var(--border)" }}>
+              <input type="radio" className="mt-1" checked={scope === k} onChange={() => setScope(k)} />
+              <span>{label as string}</span>
+            </label>
+          ))}
+          <p className="muted text-xs">قبل از پاک‌سازی یک پشتیبان رمزگذاری‌شده به‌صورت خودکار گرفته می‌شود و در صورت اشتباه از «پشتیبان‌گیری» قابل بازگردانی است. حساب‌های کاربری حذف نمی‌شوند.</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="رمز عبور شما"><input className="input" type="password" dir="ltr" value={password} onChange={(e) => setPassword(e.target.value)} /></Field>
+            <Field label="برای تأیید کلمه «حذف» را بنویسید"><input className="input" value={confirmWord} onChange={(e) => setConfirmWord(e.target.value)} /></Field>
+          </div>
+          <button className="btn btn-danger" disabled={!!busy || !password || confirmWord.trim() !== "حذف"} onClick={() => run("reset", async () => {
+            const r = await api("/api/admin/reset", { body: { scope, password, confirm: confirmWord } });
+            toast(`پاک‌سازی انجام شد. پشتیبان ایمنی: ${r.safety_backup ?? "—"}`);
+            setPassword(""); setConfirmWord(""); reload();
+          })}><Trash2 size={15} />{busy === "reset" ? "در حال پاک‌سازی…" : "پاک‌سازی"}</button>
+        </div>
       </Card>
     </div>
   );
@@ -322,10 +562,11 @@ const TABS: { key: string; label: string; icon: ReactNode; perm?: string; el: ()
   { key: "accounts", label: "کارتخوان و کارت‌ها", icon: <CreditCard size={16} />, el: () => <Accounts /> },
   { key: "people", label: "پرسنل و کاربران", icon: <Users size={16} />, el: () => <StaffAndUsers /> },
   { key: "plugins", label: "افزونه‌ها", icon: <Plug size={16} />, el: () => <Plugins /> },
-  { key: "ai", label: "هوش مصنوعی", icon: <Bot size={16} />, el: () => <AIIntegration /> },
+  { key: "ai", label: "هوش مصنوعی", icon: <Bot size={16} />, perm: "settings", el: () => <AIIntegration /> },
   { key: "backup", label: "پشتیبان‌گیری", icon: <DatabaseBackup size={16} />, perm: "backup", el: () => <Backups /> },
   { key: "alerts", label: "هشدارها", icon: <Bell size={16} />, el: () => <Alerts /> },
   { key: "security", label: "امنیت و ممیزی", icon: <ShieldCheck size={16} />, perm: "settings", el: () => <Security /> },
+  { key: "data", label: "مدیریت داده‌ها", icon: <Database size={16} />, perm: "users", el: () => <DataManagement /> },
 ];
 
 export default function SettingsPage() {

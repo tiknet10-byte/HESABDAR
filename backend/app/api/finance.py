@@ -21,7 +21,7 @@ from ..models import (
     PaymentAccount,
     Service,
 )
-from ..services import accounting, learning
+from ..services import accounting, learning, scheduling, settings_store
 from ..services.accounting import AccountingError
 from ..services.audit import audit
 from .deps import require
@@ -56,30 +56,87 @@ class AppointmentIn(BaseModel):
     quoted_price: int | None = None
     notes: str = ""
     status: str = "booked"
+    deposit_ids: list[int] = []  # held deposits of the customer to attach to this appointment
+
+
+def _appt(db: Session, a: Appointment, customer: str | None = None) -> dict:
+    svc = db.get(Service, a.service_id) if a.service_id else None
+    deps = db.scalars(select(Deposit).where(Deposit.appointment_id == a.id)).all()
+    return {"id": a.id, "customer_id": a.customer_id, "customer": customer, "service_id": a.service_id,
+            "service": svc.name if svc else None, "duration_minutes": svc.duration_minutes if svc else 60,
+            "staff_id": a.staff_id, "start_at": a.start_at.isoformat(timespec="minutes"), "status": a.status,
+            "quoted_price": a.quoted_price, "notes": a.notes,
+            "deposits": [{"id": d.id, "amount": d.amount, "status": d.status, "received_at": d.received_at.isoformat(timespec="minutes")}
+                         for d in deps]}
+
+
+def _book(db: Session, customer: Customer, service_id: int | None, staff_id: int | None, start_at: datetime,
+          notes: str, user, quoted_price: int | None = None) -> Appointment:  # noqa: ANN001
+    svc = db.get(Service, service_id) if service_id else None
+    a = Appointment(customer_id=customer.id, service_id=service_id, staff_id=staff_id, start_at=start_at.replace(second=0, microsecond=0),
+                    quoted_price=quoted_price if quoted_price is not None else (svc.base_price if svc else 0), notes=notes)
+    db.add(a)
+    db.flush()
+    audit(db, "appointment.create", "appointment", a.id, {"customer": customer.id}, user=user)
+    return a
 
 
 @router.get("/appointments")
 def appointments(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
     s = datetime.combine(start or date.today() - timedelta(days=7), datetime.min.time())
-    e = datetime.combine(end or date.today() + timedelta(days=30), datetime.max.time())
+    e = datetime.combine(end or date.today() + timedelta(days=60), datetime.max.time())
     rows = db.execute(select(Appointment, Customer.full_name).join(Customer, Customer.id == Appointment.customer_id)
                       .where(Appointment.start_at.between(s, e)).order_by(Appointment.start_at)).all()
-    return [{"id": a.id, "customer_id": a.customer_id, "customer": n, "service_id": a.service_id, "staff_id": a.staff_id,
-             "start_at": a.start_at.isoformat(), "status": a.status, "quoted_price": a.quoted_price, "notes": a.notes} for a, n in rows]
+    return [_appt(db, a, n) for a, n in rows]
+
+
+@router.get("/appointments/suggest")
+def suggest_slots(service_id: int, staff_id: int | None = None, after: datetime | None = None, count: int = 6,
+                  db: Session = Depends(get_db), _=Depends(require("read"))):
+    """First free times for a service, based on its duration, working hours and staff capacity."""
+    return scheduling.find_slots(db, service_id, staff_id, after, min(count, 20))
+
+
+@router.get("/appointments/{aid}")
+def get_appointment(aid: int, db: Session = Depends(get_db), _=Depends(require("read"))):
+    a = _get(db, Appointment, aid, "نوبت")
+    c = db.get(Customer, a.customer_id)
+    return {**_appt(db, a, c.full_name), "customer_mobile": c.mobile}
 
 
 @router.post("/appointments")
 def create_appointment(body: AppointmentIn, db: Session = Depends(get_db), user=Depends(require("write"))):
     c = _customer(db, body.customer_id, body.customer_name, body.customer_mobile, user)
-    svc = db.get(Service, body.service_id) if body.service_id else None
-    a = Appointment(customer_id=c.id, service_id=body.service_id, staff_id=body.staff_id, start_at=body.start_at,
-                    quoted_price=body.quoted_price if body.quoted_price is not None else (svc.base_price if svc else 0),
-                    notes=body.notes, status=body.status)
-    db.add(a)
-    db.flush()
-    audit(db, "appointment.create", "appointment", a.id, {"customer": c.id}, user=user)
+    warning = scheduling.check_slot(db, body.service_id, body.staff_id, body.start_at)
+    a = _book(db, c, body.service_id, body.staff_id, body.start_at, body.notes, user, body.quoted_price)
+    for d in db.scalars(select(Deposit).where(Deposit.id.in_(body.deposit_ids or [-1]), Deposit.customer_id == c.id)):
+        d.appointment_id = a.id
+        if not d.service_id and a.service_id:
+            d.service_id = a.service_id
     db.commit()
-    return {"id": a.id, "customer_id": c.id}
+    return {**_appt(db, a, c.full_name), "warning": warning}
+
+
+class AppointmentUpdate(BaseModel):
+    service_id: int | None = None
+    staff_id: int | None = None
+    start_at: datetime | None = None
+    notes: str | None = None
+    status: str | None = None
+
+
+@router.put("/appointments/{aid}")
+def edit_appointment(aid: int, body: AppointmentUpdate, db: Session = Depends(get_db), user=Depends(require("write"))):
+    a = _get(db, Appointment, aid, "نوبت")
+    data = body.model_dump(exclude_unset=True)
+    if "status" in data and data["status"] not in ("booked", "done", "cancelled", "no_show"):
+        raise HTTPException(400, "وضعیت نامعتبر")
+    for k, v in data.items():
+        setattr(a, k, v)
+    warning = scheduling.check_slot(db, a.service_id, a.staff_id, a.start_at, exclude_id=a.id) if body.start_at else None
+    audit(db, "appointment.update", "appointment", a.id, {k: str(v) for k, v in data.items()}, user=user)
+    db.commit()
+    return {**_appt(db, a), "warning": warning}
 
 
 @router.patch("/appointments/{aid}")
@@ -101,10 +158,13 @@ class DepositIn(BaseModel):
     amount: int
     payment_account_id: int
     service_id: int | None = None
-    appointment_id: int | None = None
+    appointment_id: int | None = None  # attach to an existing appointment
     received_at: datetime | None = None
     reference: str | None = None
     notes: str = ""
+    # optional booking in the same step
+    book_at: datetime | None = None
+    staff_id: int | None = None
 
 
 class DepositCloseIn(BaseModel):
@@ -112,19 +172,27 @@ class DepositCloseIn(BaseModel):
     refund_account_id: int | None = None
 
 
-def _dep(d: Deposit, name: str | None = None) -> dict:
-    return {"id": d.id, "customer_id": d.customer_id, "customer": name, "amount": d.amount, "status": d.status,
-            "payment_account_id": d.payment_account_id, "service_id": d.service_id, "appointment_id": d.appointment_id,
-            "received_at": d.received_at.isoformat(), "reference": d.reference, "source": d.source,
-            "applied_invoice_id": d.applied_invoice_id, "service_guess": d.service_guess, "notes": d.notes}
+def _dep(d: Deposit, name: str | None = None, db: Session | None = None) -> dict:
+    out = {"id": d.id, "customer_id": d.customer_id, "customer": name, "amount": d.amount, "status": d.status,
+           "payment_account_id": d.payment_account_id, "service_id": d.service_id, "appointment_id": d.appointment_id,
+           "received_at": d.received_at.isoformat(timespec="minutes"), "reference": d.reference, "source": d.source,
+           "applied_invoice_id": d.applied_invoice_id, "service_guess": d.service_guess, "notes": d.notes}
+    if db is not None:
+        svc = db.get(Service, d.service_id) if d.service_id else None
+        appt = db.get(Appointment, d.appointment_id) if d.appointment_id else None
+        out["service"] = svc.name if svc else None
+        out["appointment_at"] = appt.start_at.isoformat(timespec="minutes") if appt else None
+    return out
 
 
 @router.get("/deposits")
-def deposits(status: str | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
+def deposits(status: str | None = None, customer_id: int | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
     q = select(Deposit, Customer.full_name).join(Customer, Customer.id == Deposit.customer_id).order_by(Deposit.received_at.desc()).limit(500)
     if status:
         q = q.where(Deposit.status == status)
-    return [_dep(d, n) for d, n in db.execute(q).all()]
+    if customer_id:
+        q = q.where(Deposit.customer_id == customer_id)
+    return [_dep(d, n, db) for d, n in db.execute(q).all()]
 
 
 @router.post("/deposits")
@@ -132,16 +200,42 @@ def create_deposit(body: DepositIn, db: Session = Depends(get_db), user=Depends(
     c = _customer(db, body.customer_id, body.customer_name, body.customer_mobile, user)
     pa = _get(db, PaymentAccount, body.payment_account_id, "حساب دریافت")
     guess = [] if body.service_id else learning.guess_service_for_deposit(db, body.amount, c.id, body.notes)
+    appointment_id = body.appointment_id
+    warning = None
+    book_at = body.book_at
+    service_id = body.service_id
+    if not book_at and not appointment_id and service_id and settings_store.get(db, "booking.auto"):
+        slots = scheduling.find_slots(db, service_id, body.staff_id, count=1)
+        if slots:
+            book_at = datetime.fromisoformat(slots[0]["start_at"])
+    if book_at:
+        warning = scheduling.check_slot(db, service_id, body.staff_id, book_at)
+        appointment_id = _book(db, c, service_id, body.staff_id, book_at, body.notes, user).id
     try:
         d = accounting.record_deposit(db, customer=c, amount=body.amount, payment_account=pa, received_at=body.received_at,
-                                      reference=body.reference, service_id=body.service_id, appointment_id=body.appointment_id,
+                                      reference=body.reference, service_id=service_id, appointment_id=appointment_id,
                                       notes=body.notes, service_guess={"candidates": guess}, user=user)
     except AccountingError as exc:
+        db.rollback()
         raise HTTPException(400, str(exc)) from exc
-    if body.service_id and body.notes:
-        learning.learn_text(db, body.notes, body.service_id)
+    if service_id and body.notes:
+        learning.learn_text(db, body.notes, service_id)
     db.commit()
-    return _dep(d, c.full_name)
+    return {**_dep(d, c.full_name, db), "warning": warning}
+
+
+@router.post("/deposits/{did}/appointment")
+def link_deposit(did: int, appointment_id: int, db: Session = Depends(get_db), user=Depends(require("write"))):
+    d = _get(db, Deposit, did, "بیعانه")
+    a = _get(db, Appointment, appointment_id, "نوبت")
+    if a.customer_id != d.customer_id:
+        raise HTTPException(400, "نوبت متعلق به مشتری دیگری است")
+    d.appointment_id = a.id
+    if not d.service_id:
+        d.service_id = a.service_id
+    audit(db, "deposit.link_appointment", "deposit", d.id, {"appointment": a.id}, user=user)
+    db.commit()
+    return _dep(d, None, db)
 
 
 @router.post("/deposits/{did}/close")
@@ -164,7 +258,7 @@ def set_deposit_service(did: int, service_id: int, db: Session = Depends(get_db)
         learning.learn_text(db, d.notes, service_id, weight=2)
     audit(db, "deposit.set_service", "deposit", d.id, {"service_id": service_id}, user=user)
     db.commit()
-    return _dep(d)
+    return _dep(d, None, db)
 
 
 # ---------------------------------------------------------------- invoices
@@ -230,7 +324,8 @@ def preview_invoice(body: InvoiceIn, db: Session = Depends(get_db), _=Depends(re
                 warnings.append(w)
     held = []
     if body.customer_id:
-        held = [_dep(d) for d in db.scalars(select(Deposit).where(Deposit.customer_id == body.customer_id, Deposit.status == "held"))]
+        held = [_dep(d, None, db) for d in db.scalars(select(Deposit).where(Deposit.customer_id == body.customer_id, Deposit.status == "held")
+                                                         .order_by(Deposit.received_at))]
     return {"warnings": warnings, "held_deposits": held}
 
 

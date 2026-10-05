@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import ConversationMessage, Deposit, Invoice, InvoiceItem, KnowledgeItem, Service
-from .textutil import normalize_text, tokens
+from .textutil import normalize_text, tokens, toman
 
 
 # ------------------------------------------------------------------ vocabulary
@@ -113,12 +113,12 @@ def refresh_price_stats(db: Session) -> int:
 def price_check(service: Service, price: int) -> str | None:
     """Return a warning text if the price looks wrong for this service."""
     if service.min_price and price < service.min_price:
-        return f"قیمت {price:,} کمتر از حداقل تعریف‌شده برای «{service.name}» است"
+        return f"قیمت {toman(price)} کمتر از حداقل مجاز ({toman(service.min_price)}) برای «{service.name}» است"
     if service.max_price and price > service.max_price:
-        return f"قیمت {price:,} بیشتر از حداکثر تعریف‌شده برای «{service.name}» است"
+        return f"قیمت {toman(price)} بیشتر از حداکثر مجاز ({toman(service.max_price)}) برای «{service.name}» است"
     ref = service.learned_avg_price or service.base_price
     if ref and service.learned_count >= 3 and not (0.5 * ref <= price <= 1.8 * ref):
-        return f"قیمت {price:,} با میانگین آموخته‌شده ({ref:,}) برای «{service.name}» فاصله زیادی دارد"
+        return f"قیمت {toman(price)} با میانگین آموخته‌شده ({toman(ref)}) برای «{service.name}» فاصله زیادی دارد"
     return None
 
 
