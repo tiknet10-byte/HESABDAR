@@ -152,6 +152,7 @@ class Appointment(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(16), default="booked")  # booked|done|cancelled|no_show
     quoted_price: Mapped[int] = mapped_column(BigInteger, default=0)
     duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None -> service's default duration
+    invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id"), nullable=True)  # invoice that settled it
     notes: Mapped[str] = mapped_column(Text, default="")
 
 

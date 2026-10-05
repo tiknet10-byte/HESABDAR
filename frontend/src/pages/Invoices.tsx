@@ -6,7 +6,8 @@ import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicke
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Tabs } from "../components/ui";
 import { api } from "../lib/api";
 import { ACCOUNT_KINDS, jdatetime, money } from "../lib/format";
-import { formatJ } from "../lib/jalali";
+import JalaliPicker from "../components/JalaliPicker";
+import { formatJ, parseLocal, toLocalIso } from "../lib/jalali";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
 
 type Item = { service_id?: number; description?: string; unit_price: number; quantity: number; staff_id?: number };
@@ -22,6 +23,38 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   const [pays, setPays] = useState<Pay[]>([]);
   const [picked, setPicked] = useState<number[] | null>(null); // selected deposit ids (null = not initialised)
   const [check, setCheck] = useState<{ warnings: string[]; held_deposits: any[] }>({ warnings: [], held_deposits: [] });
+  const [issuedAt, setIssuedAt] = useState(toLocalIso(new Date()));
+  const [appts, setAppts] = useState<any[]>([]);
+  const [override, setOverride] = useState<Record<number, "done" | "keep">>({});
+
+  // the customer's open appointments: settle the one(s) this invoice is for, keep the rest for their own time
+  useEffect(() => {
+    setOverride({});
+    if (!cust.customer_id) return setAppts([]);
+    api<any[]>(`/api/appointments?customer_id=${cust.customer_id}&status=booked`).then(setAppts).catch(() => setAppts([]));
+  }, [cust.customer_id]);
+
+  const smartDefault = (a: any): "done" | "keep" => {
+    if (appointmentId === a.id) return "done";
+    const services = new Set(items.map((i) => i.service_id).filter(Boolean));
+    if (services.has(a.service_id)) {
+      // only the earliest open appointment of a service is settled by this invoice
+      const first = appts.filter((x) => x.service_id === a.service_id).sort((x, y) => x.start_at.localeCompare(y.start_at))[0];
+      return first?.id === a.id ? "done" : "keep";
+    }
+    const matchedAny = appts.some((x) => services.has(x.service_id));
+    const near = appts.filter((x) => Math.abs(parseLocal(x.start_at).getTime() - parseLocal(issuedAt).getTime()) < 36 * 3600 * 1000);
+    return !matchedAny && near.length === 1 && near[0].id === a.id ? "done" : "keep";
+  };
+  const choice = (a: any) => override[a.id] ?? smartDefault(a);
+  const setChoice = (a: any, c: "done" | "keep") => {
+    setOverride((o) => ({ ...o, [a.id]: c }));
+    if (c === "done" && a.service_id && !items.some((i) => i.service_id === a.service_id)) {
+      const row = { service_id: a.service_id, description: a.service, unit_price: a.quoted_price, quantity: 1, staff_id: a.staff_id ?? undefined };
+      setItems((all) => (all.length === 1 && !all[0].service_id && !all[0].description ? [row] : [...all, row]));
+    }
+  };
+  const doneIds = appts.filter((a) => choice(a) === "done").map((a) => a.id);
 
   useEffect(() => {
     if (!appointmentId) return;
@@ -67,9 +100,9 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
     try {
       const inv = await api("/api/invoices", {
         body: { ...cust, items: items.filter((i) => i.service_id || i.description), discount, apply_deposits: selected.length > 0, deposit_ids: selected.map((d) => d.id),
-          payments: pays.filter((p) => p.amount > 0), appointment_id: appointmentId ?? null },
+          payments: pays.filter((p) => p.amount > 0), appointment_id: appointmentId ?? null, appointment_ids: doneIds, issued_at: issuedAt },
       });
-      toast(`فاکتور ${inv.number} ثبت شد`);
+      toast(`فاکتور ${inv.number} ثبت شد${doneIds.length ? ` و ${doneIds.length} نوبت انجام‌شده ثبت شد` : ""}`);
       onDone();
     } catch (e: any) {
       toast(e.message, "error");
@@ -80,7 +113,38 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
 
   return (
     <div className="space-y-5">
-      <Field label="مشتری"><CustomerPicker value={cust} onChange={setCust} /></Field>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div className="sm:col-span-2"><Field label="مشتری"><CustomerPicker value={cust} onChange={setCust} /></Field></div>
+        <Field label="تاریخ فاکتور"><JalaliPicker value={issuedAt} onChange={(v) => setIssuedAt(v || toLocalIso(new Date()))} /></Field>
+      </div>
+
+      {appts.length > 0 && (
+        <div className="space-y-2 rounded-2xl border p-3 text-sm" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
+          <div className="font-bold">نوبت‌های باز این مشتری</div>
+          <div className="muted text-xs">نوبتی که این فاکتور برای آن است «انجام شد» ثبت می‌شود؛ بقیه برای زمان خودشان حفظ می‌شوند.</div>
+          {appts.map((a) => {
+            const c = choice(a);
+            return (
+              <div key={a.id} className={`flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-2 ${c === "done" ? "bg-emerald-500/10" : ""}`}>
+                <div>
+                  <div className="font-semibold">{formatJ(a.start_at)}</div>
+                  <div className="muted text-xs">{[a.line, a.service, a.staff].filter(Boolean).join(" · ")}{a.deposits?.length ? ` · بیعانه ${a.deposits.map((d: any) => money(d.amount)).join(" + ")}` : ""}</div>
+                </div>
+                <div className="flex gap-1">
+                  <button type="button" onClick={() => setChoice(a, "done")}
+                    className={`rounded-xl px-3 py-1.5 text-xs font-bold ${c === "done" ? "bg-emerald-600 text-white" : "border hover:bg-emerald-500/10"}`} style={c === "done" ? {} : { borderColor: "var(--border)" }}>
+                    ✓ همین نوبت است (انجام شد)
+                  </button>
+                  <button type="button" onClick={() => setChoice(a, "keep")}
+                    className={`rounded-xl px-3 py-1.5 text-xs font-bold ${c === "keep" ? "bg-violet-600 text-white" : "border hover:bg-violet-500/10"}`} style={c === "keep" ? {} : { borderColor: "var(--border)" }}>
+                    حفظ برای زمان خودش
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className="space-y-2">
         <div className="label">خدمات</div>

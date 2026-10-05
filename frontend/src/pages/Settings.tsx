@@ -1,6 +1,6 @@
 import {
   AlertTriangle, Bell, BookOpen, Bot, Brain, CreditCard, Database, DatabaseBackup, KeyRound, Pencil, Plug, Plus, Scissors, Settings as Cog, ShieldCheck,
-  Trash2, UserCog, Users, Wrench,
+  Save, Trash2, UserCog, Users, Wrench,
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -269,38 +269,71 @@ function StaffAndUsers() {
   const users = useApi<any[]>(can(user, "users") ? "/api/auth/users" : null);
   const [s, setS] = useState({ full_name: "", commission_percent: 30, line_id: 0 });
   const lines = useApi<any[]>("/api/lines");
+  const [drafts, setDrafts] = useState<Record<number, any>>({});
+  const dirtyIds = Object.keys(drafts).map(Number);
+  const edit = (p: any, patch: any) => setDrafts((d) => ({ ...d, [p.id]: { ...(d[p.id] ?? p), ...patch } }));
+  async function save(id: number) {
+    const d = drafts[id];
+    try {
+      await api(`/api/staff/${id}`, { method: "PUT", body: { full_name: d.full_name, mobile: d.mobile || null, line_id: d.line_id || null, commission_percent: Number(d.commission_percent) || 0, is_active: d.is_active } });
+      setDrafts(({ [id]: _x, ...rest }) => rest);
+      toast(`اطلاعات ${d.full_name} ذخیره شد`);
+      staff.reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  }
+  const saveAll = async () => { for (const id of dirtyIds) await save(id); };
   const [u, setU] = useState({ username: "", full_name: "", password: "", role: "receptionist" });
   return (
     <div className="space-y-4">
-      <Card title="پرسنل">
+      <Card title="پرسنل" actions={dirtyIds.length > 0 ? <button className="btn btn-primary btn-sm" onClick={saveAll}><Save size={14} />ذخیره همه ({num(dirtyIds.length)})</button> : null}>
         <div className="space-y-2">
-          {(staff.data ?? []).map((p) => (
-            <div key={p.id} className={`grid grid-cols-12 items-center gap-2 text-sm ${p.is_active ? "" : "opacity-50"}`}>
-              <span className="col-span-4 font-semibold">{p.full_name}</span>
-              <select className="input col-span-4 py-1.5" value={p.line_id ?? ""} onChange={async (e) => { await api(`/api/staff/${p.id}`, { method: "PUT", body: { ...p, line_id: Number(e.target.value) || null } }); staff.reload(); }}>
-                <option value="">بدون لاین</option>
-                {(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-              </select>
-              <span className="col-span-2 flex items-center gap-1" title="درصد سهم پرسنل از مبلغ خدمت">
-                <input type="number" min={0} max={100} className="input num w-16 py-1 text-sm" defaultValue={p.commission_percent} key={p.commission_percent}
-                  onBlur={async (e) => { const v = Number(e.target.value); if (v !== p.commission_percent) { await api(`/api/staff/${p.id}`, { method: "PUT", body: { ...p, commission_percent: v } }); staff.reload(); } }}
-                  onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
-                <span className="muted text-xs">٪</span>
-              </span>
-              <button className="btn btn-sm col-span-2" onClick={async () => { await api(`/api/staff/${p.id}`, { method: "PUT", body: { ...p, is_active: !p.is_active } }); staff.reload(); }}>{p.is_active ? "غیرفعال" : "فعال"}</button>
-            </div>
-          ))}
+          <div className="muted hidden grid-cols-12 gap-2 px-1 text-xs font-bold sm:grid">
+            <span className="col-span-3">نام</span><span className="col-span-2">موبایل</span><span className="col-span-3">لاین</span><span className="col-span-2">سهم پرسنل</span><span className="col-span-2"></span>
+          </div>
+          {(staff.data ?? []).map((p) => {
+            const d = drafts[p.id] ?? p;
+            const dirty = !!drafts[p.id];
+            return (
+              <div key={p.id} className={`grid grid-cols-12 items-center gap-2 rounded-2xl p-1.5 text-sm ${p.is_active ? "" : "opacity-50"} ${dirty ? "bg-amber-500/10 ring-1 ring-amber-400" : ""}`}>
+                <input className="input col-span-12 py-1.5 font-semibold sm:col-span-3" value={d.full_name} onChange={(e) => edit(p, { full_name: e.target.value })} />
+                <input className="input num col-span-6 py-1.5 sm:col-span-2" dir="ltr" placeholder="موبایل" value={d.mobile ?? ""} onChange={(e) => edit(p, { mobile: e.target.value })} />
+                <select className="input col-span-6 py-1.5 sm:col-span-3" value={d.line_id ?? ""} onChange={(e) => edit(p, { line_id: Number(e.target.value) || null })}>
+                  <option value="">بدون لاین</option>
+                  {(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                </select>
+                <span className="col-span-4 flex items-center gap-1 sm:col-span-2" title="درصد سهم پرسنل از مبلغ خالص خدمت">
+                  <input type="number" min={0} max={100} className="input num py-1.5 text-sm" value={d.commission_percent} onChange={(e) => edit(p, { commission_percent: Number(e.target.value) })} />
+                  <span className="muted text-xs">٪</span>
+                </span>
+                <span className="col-span-8 flex justify-end gap-1 sm:col-span-2">
+                  {dirty ? (
+                    <>
+                      <button className="btn btn-primary btn-sm" onClick={() => save(p.id)}><Save size={14} />ذخیره</button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => setDrafts(({ [p.id]: _x, ...rest }) => rest)} title="انصراف">✕</button>
+                    </>
+                  ) : (
+                    <button className="btn btn-sm" onClick={async () => { await api(`/api/staff/${p.id}`, { method: "PUT", body: { ...p, is_active: !p.is_active } }); toast(p.is_active ? `${p.full_name} غیرفعال شد` : `${p.full_name} فعال شد`, "info"); staff.reload(); }}>{p.is_active ? "غیرفعال" : "فعال"}</button>
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <input className="input max-w-xs" placeholder="نام پرسنل" value={s.full_name} onChange={(e) => setS({ ...s, full_name: e.target.value })} />
-          <select className="input w-40" value={s.line_id} onChange={(e) => setS({ ...s, line_id: Number(e.target.value) })}>
+        <div className="mt-4 grid grid-cols-12 gap-2 rounded-2xl border border-dashed p-2" style={{ borderColor: "var(--border)" }}>
+          <input className="input col-span-12 sm:col-span-4" placeholder="نام پرسنل جدید" value={s.full_name} onChange={(e) => setS({ ...s, full_name: e.target.value })} />
+          <select className="input col-span-6 sm:col-span-4" value={s.line_id} onChange={(e) => setS({ ...s, line_id: Number(e.target.value) })}>
             <option value={0}>لاین…</option>
             {(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
-          <input className="input w-24" type="number" title="درصد پورسانت" value={s.commission_percent} onChange={(e) => setS({ ...s, commission_percent: Number(e.target.value) })} />
-          <button className="btn" disabled={!s.full_name} onClick={async () => { await api("/api/staff", { body: { ...s, line_id: s.line_id || null } }); setS({ full_name: "", commission_percent: 30, line_id: 0 }); staff.reload(); }}>افزودن</button>
+          <span className="col-span-3 flex items-center gap-1 sm:col-span-2"><input className="input num" type="number" title="درصد سهم پرسنل" value={s.commission_percent} onChange={(e) => setS({ ...s, commission_percent: Number(e.target.value) })} /><span className="muted text-xs">٪</span></span>
+          <button className="btn btn-primary col-span-3 sm:col-span-2" disabled={!s.full_name} onClick={async () => {
+            try { await api("/api/staff", { body: { ...s, line_id: s.line_id || null } }); toast(`${s.full_name} اضافه شد`); setS({ full_name: "", commission_percent: 30, line_id: 0 }); staff.reload(); }
+            catch (e: any) { toast(e.message, "error"); }
+          }}><Plus size={14} />افزودن</button>
         </div>
-        <p className="muted mt-2 text-xs leading-6">هر پرسنل به یک لاین وصل می‌شود؛ با انتخاب هر خدمت، پرسنل همان لاین خودکار انتخاب می‌شود (اگر لاین چند پرسنل داشته باشد، فقط پرسنل همان لاین نمایش داده می‌شوند). درصد = سهم پرسنل از مبلغ خالص هر خدمت؛ باقیمانده سهم سالن است. گزارش در منوی «پرسنل و سهم‌ها».</p>
+        <p className="muted mt-2 text-xs leading-6">هر پرسنل به یک لاین وصل می‌شود؛ با انتخاب هر خدمت، پرسنل همان لاین خودکار انتخاب می‌شود (اگر لاین چند پرسنل داشته باشد، فقط پرسنل همان لاین نمایش داده می‌شوند). درصد = سهم پرسنل از مبلغ خالص هر خدمت؛ باقیمانده سهم سالن است. گزارش در منوی «پرسنل و سهم‌ها». ردیف‌های تغییرکرده زرد می‌شوند تا ذخیره کنید.</p>
       </Card>
       {can(user, "users") && (
         <Card title="کاربران سیستم و سطح دسترسی">

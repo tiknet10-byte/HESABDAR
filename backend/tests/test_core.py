@@ -305,3 +305,21 @@ def test_staff_line_commission_and_payout(client, accounts):
     assert r["balance"] == 10_000_000
     tb = client.get("/api/ledger/trial-balance").json()
     assert tb["total_debit"] == tb["total_credit"]
+
+
+def test_invoice_settles_customer_appointment_and_date(client, accounts, services):
+    svc = services["مانیکور"]
+    a1 = client.post("/api/appointments", json={"customer_name": "میلاد تهمتن", "customer_mobile": "09171353630", "service_id": svc["id"],
+                                                "start_at": "2026-10-06T11:00:00"}).json()
+    a2 = client.post("/api/appointments", json={"customer_id": a1["customer_id"], "service_id": svc["id"],
+                                                "start_at": "2026-10-20T11:00:00"}).json()
+    mine = client.get(f"/api/appointments?customer_id={a1['customer_id']}&status=booked").json()
+    assert [x["id"] for x in mine] == [a1["id"], a2["id"]]
+    inv = client.post("/api/invoices", json={"customer_id": a1["customer_id"], "issued_at": "2026-10-05T18:30:00",
+                                             "items": [{"service_id": svc["id"], "unit_price": 3_000_000}], "appointment_ids": [a1["id"]],
+                                             "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 3_000_000}]}).json()
+    assert inv["issued_at"].startswith("2026-10-05T18:30")
+    left = client.get(f"/api/appointments?customer_id={a1['customer_id']}&status=booked").json()
+    assert [x["id"] for x in left] == [a2["id"]]  # the other appointment is kept for its own time
+    done = client.get(f"/api/appointments/{a1['id']}").json()
+    assert done["status"] == "done" and done["invoice_id"] == inv["id"]

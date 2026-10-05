@@ -71,7 +71,7 @@ def _appt(db: Session, a: Appointment, customer: str | None = None) -> dict:
             "service": svc.name if svc else None, "duration_minutes": a.duration_minutes or (svc.duration_minutes if svc else 60),
             "custom_duration": a.duration_minutes is not None,
             "staff_id": a.staff_id, "start_at": a.start_at.isoformat(timespec="minutes"), "status": a.status,
-            "quoted_price": a.quoted_price, "notes": a.notes,
+            "quoted_price": a.quoted_price, "notes": a.notes, "invoice_id": a.invoice_id,
             "deposits": [{"id": d.id, "amount": d.amount, "status": d.status, "received_at": d.received_at.isoformat(timespec="minutes")}
                          for d in deps]}
 
@@ -92,11 +92,19 @@ def _book(db: Session, customer: Customer, service_id: int | None, staff_id: int
 
 
 @router.get("/appointments")
-def appointments(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
-    s = datetime.combine(start or date.today() - timedelta(days=7), datetime.min.time())
-    e = datetime.combine(end or date.today() + timedelta(days=60), datetime.max.time())
-    rows = db.execute(select(Appointment, Customer.full_name).join(Customer, Customer.id == Appointment.customer_id)
-                      .where(Appointment.start_at.between(s, e)).order_by(Appointment.start_at)).all()
+def appointments(start: date | None = None, end: date | None = None, customer_id: int | None = None, status: str | None = None,
+                 db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Appointments in a date range; with customer_id, all of that customer's (open) appointments."""
+    q = select(Appointment, Customer.full_name).join(Customer, Customer.id == Appointment.customer_id)
+    if customer_id:
+        q = q.where(Appointment.customer_id == customer_id)
+    else:
+        s = datetime.combine(start or date.today() - timedelta(days=7), datetime.min.time())
+        e = datetime.combine(end or date.today() + timedelta(days=60), datetime.max.time())
+        q = q.where(Appointment.start_at.between(s, e))
+    if status:
+        q = q.where(Appointment.status == status)
+    rows = db.execute(q.order_by(Appointment.start_at)).all()
     return [_appt(db, a, n) for a, n in rows]
 
 
@@ -310,6 +318,7 @@ class InvoiceIn(BaseModel):
     issued_at: datetime | None = None
     notes: str = ""
     appointment_id: int | None = None
+    appointment_ids: list[int] = []  # appointments this invoice settles (marked done)
 
 
 _NAMES: dict[str, tuple[float, dict[int, str]]] = {}
@@ -389,10 +398,12 @@ def create_invoice(body: InvoiceIn, db: Session = Depends(get_db), user=Depends(
     except AccountingError as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
-    if body.appointment_id:
-        a = db.get(Appointment, body.appointment_id)
-        if a:
+    for aid in {*body.appointment_ids, *([body.appointment_id] if body.appointment_id else [])}:
+        a = db.get(Appointment, aid)
+        if a and a.customer_id == c.id and a.status == "booked":
             a.status = "done"
+            a.invoice_id = inv.id
+            audit(db, "appointment.done_by_invoice", "appointment", a.id, {"invoice": inv.number}, user=user)
     learning.refresh_price_stats(db)
     db.commit()
     return _inv(inv, c.full_name)
