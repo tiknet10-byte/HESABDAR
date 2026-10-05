@@ -10,12 +10,13 @@ type Props = {
   placeholder?: string;
   minuteStep?: number;
   clearable?: boolean;
+  futureOnly?: boolean; // disable past days and, for today, past hours/minutes (bookings)
 };
 
 const HOURS = Array.from({ length: 16 }, (_, i) => i + 7); // 07..22
 
 /** Persian (Jalali) date & time picker. */
-export default function JalaliPicker({ value, onChange, withTime = true, placeholder = "انتخاب تاریخ", minuteStep = 5, clearable }: Props) {
+export default function JalaliPicker({ value, onChange, withTime = true, placeholder = "انتخاب تاریخ", minuteStep = 5, clearable, futureOnly }: Props) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const pop = useRef<HTMLDivElement>(null);
@@ -81,16 +82,36 @@ export default function JalaliPicker({ value, onChange, withTime = true, placeho
     setView({ jy: y, jm: m });
   };
 
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const dayIsPast = (jd: number) => {
+    if (!futureOnly) return false;
+    const [gy, gm, gd] = toGregorian(view.jy, view.jm, jd);
+    return new Date(gy, gm - 1, gd).getTime() < startOfToday;
+  };
+  const selIsToday = !!current && new Date(current.getFullYear(), current.getMonth(), current.getDate()).getTime() === startOfToday;
+  const hourIsPast = (h: number) => futureOnly && selIsToday && h < now.getHours();
+  const minuteIsPast = (m: number) => futureOnly && selIsToday && !!current && current.getHours() === now.getHours() && m < now.getMinutes();
+  // first allowed time today, rounded up to the minute step
+  const nextFree = () => {
+    const d = new Date(now.getTime() + minuteStep * 60000);
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), Math.floor(d.getMinutes() / minuteStep) * minuteStep);
+  };
+
   const pick = (jd: number) => {
+    if (dayIsPast(jd)) return;
     const [gy, gm, gd] = toGregorian(view.jy, view.jm, jd);
     const h = current ? current.getHours() : withTime ? 10 : 12;
     const mi = current ? current.getMinutes() : 0;
-    onChange(toLocalIso(new Date(gy, gm - 1, gd, h, mi)));
+    let d = new Date(gy, gm - 1, gd, h, mi);
+    if (futureOnly && d.getTime() < now.getTime()) d = nextFree();
+    onChange(toLocalIso(d));
     if (!withTime) setOpen(false);
   };
   const setTime = (h: number | null, m: number | null) => {
     const d = current ?? new Date();
-    const nd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h ?? d.getHours(), m ?? d.getMinutes());
+    let nd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h ?? d.getHours(), m ?? d.getMinutes());
+    if (futureOnly && nd.getTime() < now.getTime()) nd = nextFree();
     onChange(toLocalIso(nd));
   };
   const minutes = Array.from({ length: 60 / minuteStep }, (_, i) => i * minuteStep);
@@ -125,9 +146,10 @@ export default function JalaliPicker({ value, onChange, withTime = true, placeho
                 const isSel = sel && sel[0] === view.jy && sel[1] === view.jm && sel[2] === d;
                 const isToday = ty === view.jy && tm === view.jm && td === d;
                 const friday = i % 7 === 6;
+                const past = dayIsPast(d);
                 return (
-                  <button type="button" key={d} onClick={() => pick(d)}
-                    className={`aspect-square rounded-xl text-sm font-semibold transition ${isSel ? "bg-gradient-to-br from-pink-500 to-violet-600 text-white shadow-md shadow-violet-500/30" : isToday ? "ring-2 ring-violet-400" : "hover:bg-violet-500/10"} ${!isSel && friday ? "text-rose-500" : ""}`}>
+                  <button type="button" key={d} onClick={() => pick(d)} disabled={past} title={past ? "گذشته" : undefined}
+                    className={`aspect-square rounded-xl text-sm font-semibold transition ${past ? "cursor-not-allowed opacity-25 line-through" : isSel ? "bg-gradient-to-br from-pink-500 to-violet-600 text-white shadow-md shadow-violet-500/30" : isToday ? "ring-2 ring-violet-400" : "hover:bg-violet-500/10"} ${!isSel && friday && !past ? "text-rose-500" : ""}`}>
                     {faDigits(d)}
                   </button>
                 );
@@ -138,7 +160,7 @@ export default function JalaliPicker({ value, onChange, withTime = true, placeho
                 const n = new Date();
                 const [jy, jm] = toJalali(n.getFullYear(), n.getMonth() + 1, n.getDate());
                 setView({ jy, jm });
-                onChange(toLocalIso(withTime ? new Date(n.getFullYear(), n.getMonth(), n.getDate(), n.getHours(), Math.floor(n.getMinutes() / minuteStep) * minuteStep) : new Date(n.getFullYear(), n.getMonth(), n.getDate(), 12, 0)));
+                onChange(toLocalIso(futureOnly && withTime ? nextFree() : withTime ? new Date(n.getFullYear(), n.getMonth(), n.getDate(), n.getHours(), Math.floor(n.getMinutes() / minuteStep) * minuteStep) : new Date(n.getFullYear(), n.getMonth(), n.getDate(), 12, 0)));
               }}>امروز</button>
               <button type="button" className="btn btn-sm btn-primary" onClick={() => setOpen(false)}>تأیید</button>
             </div>
@@ -148,15 +170,15 @@ export default function JalaliPicker({ value, onChange, withTime = true, placeho
               <div className="muted mb-2 flex items-center gap-1 text-xs font-bold"><Clock size={14} />ساعت</div>
               <div className="grid grid-cols-8 gap-1">
                 {HOURS.map((h) => (
-                  <button type="button" key={h} onClick={() => setTime(h, null)}
-                    className={`rounded-lg py-1.5 text-sm font-semibold ${current?.getHours() === h ? "bg-violet-600 text-white" : "hover:bg-violet-500/10"}`}>{faDigits(pad(h))}</button>
+                  <button type="button" key={h} onClick={() => setTime(h, null)} disabled={hourIsPast(h)}
+                    className={`rounded-lg py-1.5 text-sm font-semibold ${hourIsPast(h) ? "cursor-not-allowed opacity-25" : current?.getHours() === h ? "bg-violet-600 text-white" : "hover:bg-violet-500/10"}`}>{faDigits(pad(h))}</button>
                 ))}
               </div>
               <div className="muted mb-2 mt-3 text-xs font-bold">دقیقه</div>
               <div className="grid grid-cols-6 gap-1">
                 {minutes.map((m) => (
-                  <button type="button" key={m} onClick={() => setTime(null, m)}
-                    className={`rounded-lg py-1.5 text-sm font-semibold ${current?.getMinutes() === m ? "bg-violet-600 text-white" : "hover:bg-violet-500/10"}`}>{faDigits(pad(m))}</button>
+                  <button type="button" key={m} onClick={() => setTime(null, m)} disabled={minuteIsPast(m)}
+                    className={`rounded-lg py-1.5 text-sm font-semibold ${minuteIsPast(m) ? "cursor-not-allowed opacity-25" : current?.getMinutes() === m ? "bg-violet-600 text-white" : "hover:bg-violet-500/10"}`}>{faDigits(pad(m))}</button>
                 ))}
               </div>
             </div>

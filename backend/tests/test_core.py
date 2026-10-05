@@ -307,12 +307,18 @@ def test_staff_line_commission_and_payout(client, accounts):
     assert tb["total_debit"] == tb["total_credit"]
 
 
+def _future_slot(client, service_id, days):
+    from datetime import datetime, timedelta
+    after = (datetime.now() + timedelta(days=days)).replace(hour=8, minute=0, second=0, microsecond=0).isoformat()
+    return client.get(f"/api/appointments/suggest?service_id={service_id}&after={after}&count=1").json()[0]["start_at"]
+
+
 def test_invoice_settles_customer_appointment_and_date(client, accounts, services):
     svc = services["مانیکور"]
     a1 = client.post("/api/appointments", json={"customer_name": "میلاد تهمتن", "customer_mobile": "09171353630", "service_id": svc["id"],
-                                                "start_at": "2026-10-06T11:00:00"}).json()
+                                                "start_at": _future_slot(client, svc["id"], 1)}).json()
     a2 = client.post("/api/appointments", json={"customer_id": a1["customer_id"], "service_id": svc["id"],
-                                                "start_at": "2026-10-20T11:00:00"}).json()
+                                                "start_at": _future_slot(client, svc["id"], 15)}).json()
     mine = client.get(f"/api/appointments?customer_id={a1['customer_id']}&status=booked").json()
     assert [x["id"] for x in mine] == [a1["id"], a2["id"]]
     inv = client.post("/api/invoices", json={"customer_id": a1["customer_id"], "issued_at": "2026-10-05T18:30:00",
@@ -323,3 +329,59 @@ def test_invoice_settles_customer_appointment_and_date(client, accounts, service
     assert [x["id"] for x in left] == [a2["id"]]  # the other appointment is kept for its own time
     done = client.get(f"/api/appointments/{a1['id']}").json()
     assert done["status"] == "done" and done["invoice_id"] == inv["id"]
+
+
+def test_booking_rules_are_strict(client, accounts):
+    from datetime import datetime, timedelta
+    client.put("/api/settings", json={"booking.open": "09:00", "booking.close": "21:00", "booking.days_off": []})
+    line = client.post("/api/lines", json={"name": "لاین تست نوبت"}).json()
+    svc = client.post("/api/services", json={"line_id": line["id"], "name": "خدمت تست نوبت", "base_price": 1000, "duration_minutes": 120}).json()
+    staff = client.post("/api/staff", json={"full_name": "پرسنل تست نوبت", "line_id": line["id"]}).json()
+    day = (datetime.now() + timedelta(days=3)).replace(hour=13, minute=0, second=0, microsecond=0)
+    t = lambda h, m=0: day.replace(hour=h, minute=m).isoformat()  # noqa: E731
+    book = lambda **kw: client.post("/api/appointments", json={"service_id": svc["id"], **kw})  # noqa: E731
+
+    past = book(customer_name="الف", customer_mobile="09120000001", start_at=(datetime.now() - timedelta(hours=2)).isoformat())
+    assert past.status_code == 409 and "گذشته" in past.json()["detail"]
+
+    a = book(customer_name="الف", customer_mobile="09120000001", start_at=t(13))
+    assert a.status_code == 200 and a.json()["staff"] == "پرسنل تست نوبت"
+    a = a.json()
+    # same staff, overlapping time, another customer
+    r = book(customer_name="ب", customer_mobile="09120000002", start_at=t(14))
+    assert r.status_code == 409
+    # the live check reports the same problem
+    chk = client.get(f"/api/appointments/check?service_id={svc['id']}&start_at={t(14)}").json()
+    assert not chk["ok"] and chk["errors"]
+    # a completed appointment still occupies its time
+    client.patch(f"/api/appointments/{a['id']}?status=done")
+    assert book(customer_name="ب", customer_mobile="09120000002", start_at=t(13)).status_code == 409
+    sugg = [s["start_at"] for s in client.get(f"/api/appointments/suggest?service_id={svc['id']}&after={t(9)}&count=10").json()]
+    assert all(not (t(13)[:16] <= s < t(15)[:16]) for s in sugg)
+    # back-to-back is fine
+    b = book(customer_name="ب", customer_mobile="09120000002", start_at=t(15))
+    assert b.status_code == 200, b.text
+    b = b.json()
+    # same customer cannot be in two places at once (different line, no staff conflict)
+    other = client.get("/api/services").json()[0]
+    r = client.post("/api/appointments", json={"customer_id": b["customer_id"], "service_id": other["id"], "start_at": t(15, 30)})
+    assert r.status_code == 409 and "مشتری" in r.json()["detail"]
+    # outside working hours needs explicit confirmation
+    r = book(customer_name="ج", customer_mobile="09120000003", start_at=t(20))
+    assert r.status_code == 409 and "ساعت کاری" in r.json()["detail"]
+    assert book(customer_name="ج", customer_mobile="09120000003", start_at=t(20), allow_outside_hours=True).status_code == 200
+    # cancelling frees the slot; re-activating then conflicts
+    client.patch(f"/api/appointments/{b['id']}?status=cancelled")
+    c = book(customer_name="د", customer_mobile="09120000004", start_at=t(15))
+    assert c.status_code == 200
+    assert client.patch(f"/api/appointments/{b['id']}?status=booked").status_code == 409
+    # rescheduling onto a taken time is refused; a done appointment cannot be moved
+    assert client.put(f"/api/appointments/{c.json()['id']}", json={"start_at": t(13)}).status_code == 409
+    assert client.put(f"/api/appointments/{a['id']}", json={"start_at": t(17)}).status_code == 400
+    # a deposit with an invalid booking is not saved at all
+    before = len(client.get("/api/deposits?status=").json())
+    r = client.post("/api/deposits", json={"customer_name": "ه", "customer_mobile": "09120000005", "amount": 1000,
+                                           "payment_account_id": accounts["کارت پاسارگاد"], "service_id": svc["id"], "book_at": t(13, 30)})
+    assert r.status_code == 409
+    assert len(client.get("/api/deposits?status=").json()) == before
+    client.put("/api/settings", json={"booking.open": "10:00", "booking.close": "20:00", "booking.days_off": [4]})

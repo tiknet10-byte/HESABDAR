@@ -1,7 +1,7 @@
 import { CalendarClock, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import BookingFields from "../components/Booking";
+import BookingFields, { type BookingState } from "../components/Booking";
 import StaffSelect from "../components/StaffSelect";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
 import { Badge, Card, Empty, Field, Loading, Modal, PageHeader } from "../components/ui";
@@ -16,6 +16,7 @@ function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => voi
   const [cust, setCust] = useState<CustomerChoice>(initial ? { customer_id: initial.customer_id, label: initial.customer } : {});
   const [f, setF] = useState({ service_id: initial?.service_id ?? 0, staff_id: initial?.staff_id ?? 0, start_at: initial?.start_at ?? "", notes: initial?.notes ?? "",
     duration_minutes: initial?.custom_duration ? initial.duration_minutes : 0 });
+  const [bs, setBs] = useState<BookingState>({ ready: false, allowOutside: false });
   const [held, setHeld] = useState<any[]>([]);
   const [picked, setPicked] = useState<number[]>([]);
 
@@ -33,7 +34,8 @@ function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => voi
 
   async function save() {
     try {
-      const body = { ...f, service_id: f.service_id || null, staff_id: f.staff_id || null, duration_minutes: f.duration_minutes || null };
+      const body = { ...f, service_id: f.service_id || null, staff_id: f.staff_id || null, duration_minutes: f.duration_minutes || null,
+        allow_outside_hours: bs.allowOutside };
       const r = initial
         ? await api(`/api/appointments/${initial.id}`, { method: "PUT", body })
         : await api("/api/appointments", { body: { ...cust, ...body, deposit_ids: picked } });
@@ -63,7 +65,8 @@ function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => voi
       <Field label="زمان نوبت">
         <BookingFields serviceId={f.service_id || undefined} staffId={f.staff_id || undefined} value={f.start_at}
           onChange={(v) => setF((x) => ({ ...x, start_at: v }))} onStaff={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))}
-          duration={f.duration_minutes || undefined} onDuration={(m) => setF((x) => ({ ...x, duration_minutes: m }))} />
+          duration={f.duration_minutes || undefined} onDuration={(m) => setF((x) => ({ ...x, duration_minutes: m }))}
+          customerId={initial?.customer_id ?? cust.customer_id} excludeId={initial?.id} onState={setBs} />
       </Field>
       {held.length > 0 && (
         <div className="space-y-2 rounded-2xl bg-emerald-500/10 p-3 text-sm">
@@ -78,7 +81,7 @@ function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => voi
         </div>
       )}
       <Field label="یادداشت"><input className="input" value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} /></Field>
-      <button className="btn btn-primary w-full" disabled={!f.start_at || (!initial && !(cust.customer_id || cust.customer_name || cust.customer_mobile))} onClick={save}>
+      <button className="btn btn-primary w-full" disabled={!f.start_at || !f.service_id || !bs.ready || (!initial && !(cust.customer_id || cust.customer_name || cust.customer_mobile))} onClick={save}>
         {initial ? "ذخیره تغییرات" : "ثبت نوبت"}
       </button>
     </div>
@@ -120,6 +123,7 @@ export default function Appointments() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  {a.conflict && <span className="badge bg-rose-500/15 text-rose-600" title="این نوبت با نوبت دیگری از همین پرسنل یا مشتری هم‌زمان است؛ یکی را جابه‌جا یا لغو کنید">⚠ تداخل</span>}
                   <Badge status={a.status} />
                   {a.status === "booked" && (
                     <>

@@ -59,6 +59,7 @@ class AppointmentIn(BaseModel):
     notes: str = ""
     status: str = "booked"
     duration_minutes: int | None = None  # override the service's default length for this booking
+    allow_outside_hours: bool = False  # manager confirmed booking outside working hours / on a day off
     deposit_ids: list[int] = []  # held deposits of the customer to attach to this appointment
 
 
@@ -76,12 +77,26 @@ def _appt(db: Session, a: Appointment, customer: str | None = None) -> dict:
                          for d in deps]}
 
 
+def _ensure_bookable(db: Session, service_id: int | None, staff_id: int | None, start_at: datetime, *, customer_id: int | None,
+                     duration_minutes: int | None, exclude_id: int | None = None, allow_outside_hours: bool = False) -> None:
+    """Reject any booking that is in the past, overlaps, exceeds capacity or (unless overridden) is outside working hours."""
+    errors = scheduling.validate_slot(db, service_id, staff_id, start_at, duration_minutes=duration_minutes, exclude_id=exclude_id,
+                                      customer_id=customer_id, allow_outside_hours=allow_outside_hours)
+    if errors:
+        overridable = all(e["overridable"] for e in errors)
+        raise HTTPException(409, detail=" | ".join(e["message"] for e in errors)
+                            + (" - برای ثبت خارج از ساعت کاری، گزینه آن را تأیید کنید" if overridable else ""))
+
+
 def _book(db: Session, customer: Customer, service_id: int | None, staff_id: int | None, start_at: datetime,
-          notes: str, user, quoted_price: int | None = None, duration_minutes: int | None = None) -> Appointment:  # noqa: ANN001
+          notes: str, user, quoted_price: int | None = None, duration_minutes: int | None = None,  # noqa: ANN001
+          allow_outside_hours: bool = False) -> Appointment:
     svc = db.get(Service, service_id) if service_id else None
     if svc and duration_minutes == svc.duration_minutes:
         duration_minutes = None  # same as the service default
     staff_id = accounting.default_staff_id(db, service_id, staff_id)
+    _ensure_bookable(db, service_id, staff_id, start_at, customer_id=customer.id, duration_minutes=duration_minutes,
+                     allow_outside_hours=allow_outside_hours)
     a = Appointment(customer_id=customer.id, service_id=service_id, staff_id=staff_id, start_at=start_at.replace(second=0, microsecond=0),
                     quoted_price=quoted_price if quoted_price is not None else (svc.base_price if svc else 0), notes=notes,
                     duration_minutes=duration_minutes)
@@ -105,7 +120,17 @@ def appointments(start: date | None = None, end: date | None = None, customer_id
     if status:
         q = q.where(Appointment.status == status)
     rows = db.execute(q.order_by(Appointment.start_at)).all()
-    return [_appt(db, a, n) for a, n in rows]
+    out = [_appt(db, a, n) for a, n in rows]
+    # flag overlaps that already exist in the data (e.g. created before the strict rules), so they can be fixed
+    active = [(x, datetime.fromisoformat(x["start_at"]), datetime.fromisoformat(x["start_at"]) + timedelta(minutes=x["duration_minutes"] or 60))
+              for x in out if x["status"] in scheduling.OCCUPYING]
+    for i, (x, s1, e1) in enumerate(active):
+        for y, s2, e2 in active[i + 1:]:
+            if s2 >= e1:
+                break
+            if s1 < e2 and (x["customer_id"] == y["customer_id"] or (x["staff_id"] and x["staff_id"] == y["staff_id"])):
+                x["conflict"] = y["conflict"] = True
+    return out
 
 
 @router.get("/appointments/suggest")
@@ -113,6 +138,19 @@ def suggest_slots(service_id: int, staff_id: int | None = None, after: datetime 
                   duration: int | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
     """First free times for a service, based on its duration (or the given one), working hours and staff capacity."""
     return scheduling.find_slots(db, service_id, staff_id, after, min(count, 20), duration_minutes=duration)
+
+
+@router.get("/appointments/check")
+def check_time(service_id: int | None = None, start_at: datetime | None = None, staff_id: int | None = None,
+               duration: int | None = None, customer_id: int | None = None, exclude_id: int | None = None,
+               db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Live check used by the booking form before saving."""
+    if not start_at:
+        return {"ok": False, "errors": []}
+    staff_id = accounting.default_staff_id(db, service_id, staff_id)
+    errors = scheduling.validate_slot(db, service_id, staff_id, start_at, duration_minutes=duration, exclude_id=exclude_id,
+                                      customer_id=customer_id)
+    return {"ok": not errors, "errors": errors, "overridable": bool(errors) and all(e["overridable"] for e in errors)}
 
 
 @router.get("/appointments/{aid}")
@@ -125,14 +163,14 @@ def get_appointment(aid: int, db: Session = Depends(get_db), _=Depends(require("
 @router.post("/appointments")
 def create_appointment(body: AppointmentIn, db: Session = Depends(get_db), user=Depends(require("write"))):
     c = _customer(db, body.customer_id, body.customer_name, body.customer_mobile, user)
-    warning = scheduling.check_slot(db, body.service_id, body.staff_id, body.start_at, duration_minutes=body.duration_minutes)
-    a = _book(db, c, body.service_id, body.staff_id, body.start_at, body.notes, user, body.quoted_price, body.duration_minutes)
+    a = _book(db, c, body.service_id, body.staff_id, body.start_at, body.notes, user, body.quoted_price, body.duration_minutes,
+              allow_outside_hours=body.allow_outside_hours)
     for d in db.scalars(select(Deposit).where(Deposit.id.in_(body.deposit_ids or [-1]), Deposit.customer_id == c.id)):
         d.appointment_id = a.id
         if not d.service_id and a.service_id:
             d.service_id = a.service_id
     db.commit()
-    return {**_appt(db, a, c.full_name), "warning": warning}
+    return _appt(db, a, c.full_name)
 
 
 class AppointmentUpdate(BaseModel):
@@ -142,24 +180,32 @@ class AppointmentUpdate(BaseModel):
     duration_minutes: int | None = None
     notes: str | None = None
     status: str | None = None
+    allow_outside_hours: bool = False
 
 
 @router.put("/appointments/{aid}")
 def edit_appointment(aid: int, body: AppointmentUpdate, db: Session = Depends(get_db), user=Depends(require("write"))):
     a = _get(db, Appointment, aid, "نوبت")
     data = body.model_dump(exclude_unset=True)
+    allow = data.pop("allow_outside_hours", False)
     if "status" in data and data["status"] not in ("booked", "done", "cancelled", "no_show"):
         raise HTTPException(400, "وضعیت نامعتبر")
+    timing = {"service_id", "staff_id", "start_at", "duration_minutes"} & data.keys()
+    if timing and a.status != "booked":
+        raise HTTPException(400, "فقط نوبت‌های رزرو (انجام‌نشده) قابل جابه‌جایی هستند")
     for k, v in data.items():
         setattr(a, k, v)
     svc = db.get(Service, a.service_id) if a.service_id else None
     if svc and a.duration_minutes == svc.duration_minutes:
         a.duration_minutes = None
-    warning = scheduling.check_slot(db, a.service_id, a.staff_id, a.start_at, exclude_id=a.id,
-                                    duration_minutes=a.duration_minutes) if (body.start_at or body.duration_minutes) else None
+    if timing:
+        a.staff_id = accounting.default_staff_id(db, a.service_id, a.staff_id)
+        db.flush()
+        _ensure_bookable(db, a.service_id, a.staff_id, a.start_at, customer_id=a.customer_id, duration_minutes=a.duration_minutes,
+                         exclude_id=a.id, allow_outside_hours=allow)
     audit(db, "appointment.update", "appointment", a.id, {k: str(v) for k, v in data.items()}, user=user)
     db.commit()
-    return {**_appt(db, a), "warning": warning}
+    return _appt(db, a)
 
 
 @router.patch("/appointments/{aid}")
@@ -167,6 +213,10 @@ def update_appointment(aid: int, status: str, db: Session = Depends(get_db), use
     if status not in ("booked", "done", "cancelled", "no_show"):
         raise HTTPException(400, "وضعیت نامعتبر")
     a = _get(db, Appointment, aid, "نوبت")
+    if status == "booked" and a.status != "booked":
+        # re-activating a cancelled / no-show appointment takes its slot back: it must still be free and in the future
+        _ensure_bookable(db, a.service_id, a.staff_id, a.start_at, customer_id=a.customer_id, duration_minutes=a.duration_minutes,
+                         exclude_id=a.id)
     a.status = status
     audit(db, "appointment.status", "appointment", a.id, {"status": status}, user=user)
     db.commit()
@@ -188,6 +238,7 @@ class DepositIn(BaseModel):
     # optional booking in the same step
     book_at: datetime | None = None
     book_duration: int | None = None
+    book_outside_hours: bool = False
     staff_id: int | None = None
 
 
@@ -229,7 +280,6 @@ def create_deposit(body: DepositIn, db: Session = Depends(get_db), user=Depends(
     pa = _get(db, PaymentAccount, body.payment_account_id, "حساب دریافت")
     guess = [] if body.service_id else learning.guess_service_for_deposit(db, body.amount, c.id, body.notes)
     appointment_id = body.appointment_id
-    warning = None
     book_at = body.book_at
     service_id = body.service_id
     if not book_at and not appointment_id and service_id and settings_store.get(db, "booking.auto"):
@@ -237,8 +287,8 @@ def create_deposit(body: DepositIn, db: Session = Depends(get_db), user=Depends(
         if slots:
             book_at = datetime.fromisoformat(slots[0]["start_at"])
     if book_at:
-        warning = scheduling.check_slot(db, service_id, body.staff_id, book_at, duration_minutes=body.book_duration)
-        appointment_id = _book(db, c, service_id, body.staff_id, book_at, body.notes, user, duration_minutes=body.book_duration).id
+        appointment_id = _book(db, c, service_id, body.staff_id, book_at, body.notes, user, duration_minutes=body.book_duration,
+                               allow_outside_hours=body.book_outside_hours).id
     try:
         d = accounting.record_deposit(db, customer=c, amount=body.amount, payment_account=pa, received_at=body.received_at,
                                       reference=body.reference, service_id=service_id, appointment_id=appointment_id,
@@ -250,7 +300,7 @@ def create_deposit(body: DepositIn, db: Session = Depends(get_db), user=Depends(
     if service_id and body.notes:
         learning.learn_text(db, body.notes, service_id)
     db.commit()
-    return {**_dep(d, c.full_name, db), "warning": warning}
+    return _dep(d, c.full_name, db)
 
 
 @router.post("/deposits/{did}/appointment")

@@ -8,10 +8,15 @@ import JalaliPicker, { SlotChips } from "./JalaliPicker";
 const QUICK = [15, 30, 45, 60, 90, 120, 180];
 
 /** Booking time: suggests the first free slots for a service using its own duration (editable per booking). */
-export default function BookingFields({ serviceId, staffId, value, onChange, onStaff, duration, onDuration }: {
+export type BookingState = { ready: boolean; allowOutside: boolean; message?: string };
+
+export default function BookingFields({ serviceId, staffId, value, onChange, onStaff, duration, onDuration, customerId, excludeId, onState }: {
   serviceId?: number; staffId?: number; value: string; onChange: (v: string) => void; onStaff?: (id: number | undefined) => void;
   duration?: number; onDuration?: (minutes: number) => void;
+  customerId?: number; excludeId?: number; onState?: (s: BookingState) => void;
 }) {
+  const [check, setCheck] = useState<{ ok: boolean; errors: any[]; overridable: boolean } | null>(null);
+  const [allowOutside, setAllowOutside] = useState(false);
   const services = useApi<any[]>("/api/services").data ?? [];
   const svc = services.find((s) => s.id === serviceId);
   const [slots, setSlots] = useState<any[]>([]);
@@ -39,6 +44,25 @@ export default function BookingFields({ serviceId, staffId, value, onChange, onS
     }, 250);
     return () => clearTimeout(t);
   }, [serviceId, staffId, minutes]);
+
+  // live validation of the chosen time against the server's booking rules
+  useEffect(() => {
+    setAllowOutside(false);
+    if (!value || !serviceId) return setCheck(null);
+    const t = setTimeout(() => {
+      const q = new URLSearchParams({ service_id: String(serviceId), start_at: value, ...(minutes ? { duration: String(minutes) } : {}),
+        ...(staffId ? { staff_id: String(staffId) } : {}), ...(customerId ? { customer_id: String(customerId) } : {}),
+        ...(excludeId ? { exclude_id: String(excludeId) } : {}) });
+      api(`/api/appointments/check?${q}`).then(setCheck).catch(() => setCheck(null));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [value, serviceId, staffId, minutes, customerId, excludeId]);
+
+  useEffect(() => {
+    const ready = !!value && !!serviceId && !!check && (check.ok || (check.overridable && allowOutside));
+    onState?.({ ready, allowOutside, message: check && !check.ok ? check.errors.map((e: any) => e.message).join(" | ") : undefined });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [check, allowOutside, value, serviceId]);
 
   const setDur = (m: number) => {
     setMinutes(m);
@@ -72,7 +96,20 @@ export default function BookingFields({ serviceId, staffId, value, onChange, onS
           </div>
         ) : <div className="muted text-xs">در ۶۰ روز آینده نوبت خالی پیدا نشد؛ زمان را دستی انتخاب کنید.</div>
       ) : <div className="muted text-xs">برای پیشنهاد نوبت خالی، خدمت را انتخاب کنید.</div>}
-      <JalaliPicker value={value} onChange={onChange} placeholder="یا تاریخ و ساعت دلخواه را انتخاب کنید" clearable />
+      <JalaliPicker value={value} onChange={onChange} placeholder="یا تاریخ و ساعت دلخواه را انتخاب کنید" clearable futureOnly />
+      {value && check && (check.ok ? (
+        <div className="rounded-xl bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-700 dark:text-emerald-300">✓ این زمان آزاد است و قابل ثبت است</div>
+      ) : (
+        <div className="space-y-2 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-700 dark:text-rose-300">
+          {check.errors.map((e: any) => <div key={e.code}>✕ {e.message}</div>)}
+          {check.overridable && (
+            <label className="flex items-center gap-2 text-amber-700 dark:text-amber-300">
+              <input type="checkbox" checked={allowOutside} onChange={(e) => setAllowOutside(e.target.checked)} />
+              با این حال ثبت شود (نوبت خارج از ساعت کاری / روز تعطیل)
+            </label>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

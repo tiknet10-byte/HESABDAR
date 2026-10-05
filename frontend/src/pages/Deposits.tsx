@@ -1,7 +1,7 @@
 import { CalendarPlus, HandCoins, Plus, Sparkles } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import BookingFields from "../components/Booking";
+import BookingFields, { type BookingState } from "../components/Booking";
 import StaffSelect from "../components/StaffSelect";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
 import JalaliPicker from "../components/JalaliPicker";
@@ -21,6 +21,7 @@ function DepositForm({ onDone }: { onDone: () => void }) {
   const [book, setBook] = useState(false);
   const [bookAt, setBookAt] = useState("");
   const [bookDur, setBookDur] = useState(0);
+  const [bs, setBs] = useState<BookingState>({ ready: false, allowOutside: false });
   const [guess, setGuess] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
   const auto = !!settings?.["booking.auto"];
@@ -38,7 +39,7 @@ function DepositForm({ onDone }: { onDone: () => void }) {
     setBusy(true);
     try {
       const r = await api("/api/deposits", {
-        body: { ...cust, ...f, service_id: f.service_id || null, staff_id: f.staff_id || null, payment_account_id: f.payment_account_id || accounts[0]?.id, book_at: book && bookAt ? bookAt : null, book_duration: book && bookDur ? bookDur : null },
+        body: { ...cust, ...f, service_id: f.service_id || null, staff_id: f.staff_id || null, payment_account_id: f.payment_account_id || accounts[0]?.id, book_at: book && bookAt ? bookAt : null, book_duration: book && bookDur ? bookDur : null, book_outside_hours: book && bs.allowOutside },
       });
       toast(r.appointment_at ? `بیعانه ثبت و نوبت ${formatJ(r.appointment_at)} رزرو شد` : "بیعانه ثبت شد");
       if (r.warning) toast(r.warning, "info");
@@ -101,11 +102,12 @@ function DepositForm({ onDone }: { onDone: () => void }) {
         {book && (
           <div className="mt-3 space-y-3">
             <BookingFields serviceId={f.service_id || undefined} staffId={f.staff_id || undefined} value={bookAt} onChange={setBookAt}
-              onStaff={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))} onDuration={setBookDur} />
+              onStaff={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))} onDuration={setBookDur}
+              customerId={cust.customer_id} onState={setBs} />
           </div>
         )}
       </div>
-      <button className="btn btn-primary w-full py-3" disabled={busy || !f.amount || !(cust.customer_id || cust.customer_name || cust.customer_mobile)} onClick={save}>ثبت بیعانه</button>
+      <button className="btn btn-primary w-full py-3" disabled={busy || !f.amount || !(cust.customer_id || cust.customer_name || cust.customer_mobile) || (book && (!bookAt || !bs.ready))} onClick={save}>ثبت بیعانه</button>
     </div>
   );
 }
@@ -117,6 +119,7 @@ function BookForDeposit({ deposit, onDone }: { deposit: any; onDone: () => void 
   const [at, setAt] = useState("");
   const [staffId, setStaffId] = useState<number | undefined>();
   const [dur, setDur] = useState(0);
+  const [bs, setBs] = useState<BookingState>({ ready: false, allowOutside: false });
   return (
     <div className="space-y-3">
       <div className="text-sm">بیعانه <b>{money(deposit.amount)}</b> از <b>{deposit.customer}</b> · دریافت {formatJ(deposit.received_at)}</div>
@@ -124,10 +127,11 @@ function BookForDeposit({ deposit, onDone }: { deposit: any; onDone: () => void 
         <option value={0}>انتخاب خدمت…</option>
         {services.map((s) => <option key={s.id} value={s.id}>{s.line} / {s.name}</option>)}
       </select>
-      <BookingFields serviceId={serviceId || undefined} value={at} onChange={setAt} onStaff={setStaffId} onDuration={setDur} />
-      <button className="btn btn-primary w-full" disabled={!at || !serviceId} onClick={async () => {
+      <BookingFields serviceId={serviceId || undefined} value={at} onChange={setAt} onStaff={setStaffId} onDuration={setDur}
+        customerId={deposit.customer_id} onState={setBs} />
+      <button className="btn btn-primary w-full" disabled={!at || !serviceId || !bs.ready} onClick={async () => {
         try {
-          const r = await api("/api/appointments", { body: { customer_id: deposit.customer_id, service_id: serviceId, staff_id: staffId ?? null, start_at: at, duration_minutes: dur || null, deposit_ids: [deposit.id] } });
+          const r = await api("/api/appointments", { body: { customer_id: deposit.customer_id, service_id: serviceId, staff_id: staffId ?? null, start_at: at, duration_minutes: dur || null, deposit_ids: [deposit.id], allow_outside_hours: bs.allowOutside } });
           toast("نوبت ثبت و به بیعانه وصل شد");
           if (r.warning) toast(r.warning, "info");
           onDone();
