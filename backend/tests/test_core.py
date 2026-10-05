@@ -251,3 +251,33 @@ def test_auto_migration_adds_columns(tmp_path):
         dbmod.engine.dispose()
         dbmod.engine = old
     assert "duration_minutes" in cols
+
+
+def test_backup_leaves_no_open_files(client, monkeypatch):
+    """Windows cannot delete open files: every temp database must be closed before its folder is removed."""
+    import os
+    import tempfile
+
+    from app.services import backup as backup_mod
+
+    leaks = []
+    real = tempfile.TemporaryDirectory
+
+    class Checked(real):  # type: ignore[misc, valid-type]
+        def __exit__(self, *exc):
+            for fd in os.listdir("/proc/self/fd"):
+                try:
+                    target = os.readlink(f"/proc/self/fd/{fd}")
+                except OSError:
+                    continue
+                if target.startswith(self.name):
+                    leaks.append(target)
+            return super().__exit__(*exc)
+
+    monkeypatch.setattr(backup_mod.tempfile, "TemporaryDirectory", Checked)
+    m = client.post("/api/backups").json()
+    assert client.post(f"/api/backups/{m['name']}/verify").json()["ok"]
+    assert client.post(f"/api/backups/{m['name']}/restore").status_code == 200
+    r = client.post("/api/admin/reset", json={"scope": "transactions", "password": "Secret123", "confirm": "حذف"})
+    assert r.status_code == 200, r.text
+    assert leaks == []

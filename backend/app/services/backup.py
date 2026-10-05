@@ -17,6 +17,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -48,6 +49,16 @@ def _sqlite_path() -> Path:
     return Path(dbmod.engine.url.database)
 
 
+def _tempdir():  # noqa: ANN202
+    return tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+
+
+def _copy_db(src: Path, dst: Path) -> None:
+    """Online, consistent copy of a SQLite database (works while the app is running)."""
+    with closing(sqlite3.connect(src, timeout=30)) as a, closing(sqlite3.connect(dst, timeout=30)) as b:
+        a.backup(b)
+
+
 def _integrity_ok(path: Path) -> bool:
     con = sqlite3.connect(path)
     try:
@@ -61,10 +72,11 @@ def create_backup(reason: str = "manual", mirror_dir: str | None = None) -> dict
     src = _sqlite_path()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     name = f"hesabdar-{stamp}"
-    with tempfile.TemporaryDirectory() as tmp:
+    # NB: `with sqlite3.connect()` does not close the file; on Windows an open file cannot be deleted,
+    # so every connection is closed explicitly before the temp folder is removed.
+    with _tempdir() as tmp:
         snap = Path(tmp) / "snap.db"
-        with sqlite3.connect(src) as live, sqlite3.connect(snap) as out:
-            live.backup(out)
+        _copy_db(src, snap)
         if not _integrity_ok(snap):
             raise BackupError("integrity check of snapshot failed")
         raw = snap.read_bytes()
@@ -115,7 +127,7 @@ def verify_backup(name: str, passphrase: str | None = None) -> dict:
     manifest = json.loads((s.backup_dir / f"{name}.json").read_text())
     raw = _decrypt(s.backup_dir / manifest["file"], passphrase)
     ok_hash = hashlib.sha256(raw).hexdigest() == manifest["sha256"]
-    with tempfile.TemporaryDirectory() as tmp:
+    with _tempdir() as tmp:
         p = Path(tmp) / "v.db"
         p.write_bytes(raw)
         ok_integrity = _integrity_ok(p)
@@ -133,15 +145,14 @@ def restore_backup(name: str, passphrase: str | None = None, file: Path | None =
     raw = _decrypt(file, passphrase)
     if expected and hashlib.sha256(raw).hexdigest() != expected:
         raise BackupError("checksum mismatch - backup is corrupted")
-    with tempfile.TemporaryDirectory() as tmp:
+    with _tempdir() as tmp:
         restored = Path(tmp) / "restore.db"
         restored.write_bytes(raw)
         if not _integrity_ok(restored):
             raise BackupError("integrity check failed on backup content")
         safety = create_backup(reason=f"before-restore:{name}")
         dbmod.engine.dispose()
-        with sqlite3.connect(restored) as src_con, sqlite3.connect(_sqlite_path()) as dst:
-            src_con.backup(dst)
+        _copy_db(restored, _sqlite_path())
         dbmod.engine.dispose()
     return {"restored": name, "safety_backup": safety["name"]}
 

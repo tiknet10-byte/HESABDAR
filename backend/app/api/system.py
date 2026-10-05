@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import io
 import shutil
 import tempfile
@@ -24,6 +25,7 @@ from ..services.audit import audit, verify_audit_chain
 from .deps import current_user, require
 
 router = APIRouter(prefix="/api", tags=["system"])
+log = logging.getLogger("hesabdar.system")
 
 
 # ---------------------------------------------------------------- reports
@@ -254,7 +256,7 @@ def restore(name: str, user=Depends(require("users"))):  # owner only
 
 @router.post("/backups/upload-restore")
 async def upload_restore(file: UploadFile = File(...), passphrase: str = Form(""), user=Depends(require("users"))):
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         p = Path(tmp) / "upload.hbk"
         with p.open("wb") as f:
             shutil.copyfileobj(file.file, f)
@@ -317,14 +319,19 @@ def reset_data(body: ResetIn, db: Session = Depends(get_db), user=Depends(requir
         raise HTTPException(403, "رمز عبور اشتباه است")
     if body.scope not in maintenance.SCOPES:
         raise HTTPException(400, "نوع پاک‌سازی نامعتبر است")
-    safety = None
     try:
         safety = backup.create_backup(f"before-reset:{body.scope}")["name"]
-    except backup.BackupError:
-        pass
-    counts = maintenance.reset(db, body.scope)
-    audit(db, "admin.reset", "database", body.scope, {"deleted": counts, "safety_backup": safety}, user=user)
-    db.commit()
+    except Exception as exc:  # never wipe data without a safety copy
+        log.exception("safety backup before reset failed")
+        raise HTTPException(500, f"پشتیبان ایمنی ساخته نشد؛ برای حفظ اطلاعات، پاک‌سازی انجام نشد ({type(exc).__name__}: {exc})") from exc
+    try:
+        counts = maintenance.reset(db, body.scope)
+        audit(db, "admin.reset", "database", body.scope, {"deleted": counts, "safety_backup": safety}, user=user)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        log.exception("reset failed")
+        raise HTTPException(500, f"پاک‌سازی انجام نشد و هیچ اطلاعاتی حذف نشد ({type(exc).__name__}: {exc})") from exc
     try:
         maintenance.optimize()
     except Exception:  # noqa: BLE001 - optimizing is best effort

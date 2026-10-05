@@ -86,13 +86,19 @@ def optimize() -> dict:
         con.execute(text("PRAGMA optimize"))
         con.execute(text("ANALYZE"))
         con.commit()
-    raw = dbmod.engine.raw_connection()
-    try:
-        raw.execute("VACUUM")
-        raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    finally:
-        raw.close()
-    return {"ok": integrity == "ok", "integrity": integrity, "size_before": before, "size_after": path.stat().st_size}
+    import sqlite3
+    from contextlib import closing
+
+    dbmod.engine.dispose()  # release pooled connections so VACUUM can get exclusive access
+    vacuumed = True
+    with closing(sqlite3.connect(path, timeout=30)) as con:
+        try:
+            con.execute("VACUUM")
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.OperationalError:
+            vacuumed = False  # database busy - integrity check and statistics still done
+    return {"ok": integrity == "ok", "integrity": integrity, "vacuumed": vacuumed, "size_before": before,
+            "size_after": path.stat().st_size}
 
 
 def stats(db: Session) -> dict:

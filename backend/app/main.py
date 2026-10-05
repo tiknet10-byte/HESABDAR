@@ -22,6 +22,23 @@ log = logging.getLogger("hesabdar")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
+def _file_logging() -> None:
+    """Keep a log file in data/logs so problems on a user's machine can be diagnosed."""
+    from logging.handlers import RotatingFileHandler
+
+    from .core.config import DATA_DIR
+    try:
+        (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
+        h = RotatingFileHandler(DATA_DIR / "logs" / "hesabdar.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        logging.getLogger().addHandler(h)
+    except OSError:
+        pass
+
+
+_file_logging()
+
+
 def init_db() -> None:
     from . import models  # noqa: F401  (register tables)
 
@@ -107,6 +124,11 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health():
         return {"ok": True, "version": app.version}
+
+    @app.exception_handler(Exception)
+    async def unexpected(request: Request, exc: Exception):  # noqa: ANN202
+        log.exception("unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500, content={"detail": f"خطای داخلی ({type(exc).__name__}): {exc}"})
 
     @app.exception_handler(ValueError)
     async def value_error(_: Request, exc: ValueError):  # noqa: ANN202
