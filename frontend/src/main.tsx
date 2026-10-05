@@ -18,6 +18,7 @@ import Login from "./pages/Login";
 import Reconciliation from "./pages/Reconciliation";
 import Reports from "./pages/Reports";
 import Scan from "./pages/Scan";
+import PrintAppointments from "./pages/PrintAppointments";
 import SettingsPage from "./pages/Settings";
 import StaffShares from "./pages/StaffShares";
 import { Loading } from "./components/ui";
@@ -75,13 +76,14 @@ function App() {
   return (
     <AuthContext.Provider value={{ user, setUser, logout }}>
       <ToastContext.Provider value={toast}>
-        <VersionBanner />
+        <div className="no-print"><VersionBanner /></div>
         <ErrorBoundary>
         {!user ? (
           <Login />
         ) : (
           <BrowserRouter>
             <Routes>
+              <Route path="print/appointments" element={<PrintAppointments />} />
               <Route element={<Layout />}>
                 <Route index element={<Dashboard />} />
                 <Route path="invoices" element={<Invoices />} />

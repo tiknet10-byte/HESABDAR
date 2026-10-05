@@ -11,7 +11,7 @@ appointment settled earlier than its booked day (its reserved time is released f
 """
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -154,3 +154,51 @@ def check_slot(db: Session, service_id: int | None, staff_id: int | None, start_
     """Backwards-compatible: first problem as text, or None."""
     errs = validate_slot(db, service_id, staff_id, start_at, duration_minutes=duration_minutes, exclude_id=exclude_id)
     return errs[0]["message"] if errs else None
+
+
+def line_calendar(db: Session, line_id: int, start: date, days: int = 182, now: datetime | None = None) -> dict:
+    """Day-by-day occupancy of one service line, for the booking calendar.
+
+    status per day: past | closed | empty | partial | full. "full" means not even the line's shortest service
+    fits anywhere in the working hours any more (taking line capacity and the staff's other bookings into account).
+    """
+    now = now or local_now()
+    services = list(db.scalars(select(Service).where(Service.line_id == line_id, Service.is_active.is_(True))))
+    open_t, close_t, step, days_off = _hours(db)
+    end = start + timedelta(days=days)
+    out = {"line_id": line_id, "open": open_t.strftime("%H:%M"), "close": close_t.strftime("%H:%M"), "days_off": sorted(days_off),
+           "capacity": 0, "min_duration": 0, "days": []}
+    if not services:
+        return out
+    min_dur = timedelta(minutes=min(s.duration_minutes or 60 for s in services))
+    cal = _Calendar(db, services[0], datetime.combine(start, time()), datetime.combine(end, time()))
+    out["capacity"], out["min_duration"] = cal.capacity, int(min_dur.total_seconds() // 60)
+    by_day: dict[date, list] = {}
+    for iv in cal.intervals:
+        by_day.setdefault(iv[0].date(), []).append(iv)
+    day_minutes = max(1, (datetime.combine(start, close_t) - datetime.combine(start, open_t)).total_seconds() / 60) * cal.capacity
+    for i in range(days):
+        d = start + timedelta(days=i)
+        cal.intervals = by_day.get(d, []) + [iv for iv in by_day.get(d - timedelta(days=1), []) if iv[1].date() >= d]
+        mine = [(s, e) for s, e, a in cal.intervals if a.service_id in cal.line_services and s.date() == d]
+        booked = sum((e - s).total_seconds() / 60 for s, e in mine)
+        info = {"date": d.isoformat(), "count": len(mine), "booked_minutes": int(booked), "fill": round(min(1.0, booked / day_minutes), 2),
+                "first_free": None}
+        if d < now.date():
+            info["status"] = "past"
+        elif d.weekday() in days_off:
+            info["status"] = "closed"
+        else:
+            t = datetime.combine(d, open_t)
+            if d == now.date():
+                n = now.replace(second=0, microsecond=0)
+                t = max(t, n + timedelta(minutes=(-n.minute) % 5))
+            close = datetime.combine(d, close_t)
+            while t + min_dur <= close:
+                if cal.why_busy(t, t + min_dur, None)[0] is None:
+                    info["first_free"] = t.strftime("%H:%M")
+                    break
+                t += step
+            info["status"] = "full" if info["first_free"] is None else ("empty" if not mine else "partial")
+        out["days"].append(info)
+    return out

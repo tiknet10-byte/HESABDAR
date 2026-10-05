@@ -111,9 +111,11 @@ def _book(db: Session, customer: Customer, service_id: int | None, staff_id: int
 
 @router.get("/appointments")
 def appointments(start: date | None = None, end: date | None = None, customer_id: int | None = None, status: str | None = None,
-                 db: Session = Depends(get_db), _=Depends(require("read"))):
+                 line_id: int | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
     """Appointments in a date range; with customer_id, all of that customer's (open) appointments."""
-    q = select(Appointment, Customer.full_name).join(Customer, Customer.id == Appointment.customer_id)
+    q = select(Appointment, Customer.full_name, Customer.mobile).join(Customer, Customer.id == Appointment.customer_id)
+    if line_id:
+        q = q.where(Appointment.service_id.in_(select(Service.id).where(Service.line_id == line_id)))
     if customer_id:
         q = q.where(Appointment.customer_id == customer_id)
     else:
@@ -123,7 +125,7 @@ def appointments(start: date | None = None, end: date | None = None, customer_id
     if status:
         q = q.where(Appointment.status == status)
     rows = db.execute(q.order_by(Appointment.start_at)).all()
-    out = [_appt(db, a, n) for a, n in rows]
+    out = [{**_appt(db, a, n), "customer_mobile": m} for a, n, m in rows]
     # flag overlaps that already exist in the data (e.g. created before the strict rules), so they can be fixed
     active = [(x, datetime.fromisoformat(x["start_at"]), datetime.fromisoformat(x["start_at"]) + timedelta(minutes=x["duration_minutes"] or 60))
               for x in out if x["status"] in scheduling.OCCUPYING and not x["original_start_at"]]
@@ -154,6 +156,13 @@ def check_time(service_id: int | None = None, start_at: datetime | None = None, 
     errors = scheduling.validate_slot(db, service_id, staff_id, start_at, duration_minutes=duration, exclude_id=exclude_id,
                                       customer_id=customer_id)
     return {"ok": not errors, "errors": errors, "overridable": bool(errors) and all(e["overridable"] for e in errors)}
+
+
+@router.get("/appointments/calendar")
+def booking_calendar(line_id: int, start: date | None = None, days: int = 182, db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Occupancy of a line per day (empty / partial / full / closed) for the next months - the booking guide."""
+    line = _get(db, ServiceLine, line_id, "لاین")
+    return {**scheduling.line_calendar(db, line.id, start or date.today(), max(7, min(days, 400))), "line": line.name, "color": line.color}
 
 
 @router.get("/appointments/{aid}")

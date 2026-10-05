@@ -1,21 +1,23 @@
 import { CalendarClock, Plus } from "lucide-react";
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import BookingCalendar from "../components/BookingCalendar";
 import BookingFields, { type BookingState } from "../components/Booking";
 import StaffSelect from "../components/StaffSelect";
 import { announceFreed, WAITLIST_CHANGED, WaitlistPanel } from "../components/Waitlist";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
-import { Badge, Card, Empty, Field, Loading, Modal, PageHeader } from "../components/ui";
+import { Badge, Card, Empty, Field, Loading, Modal, PageHeader, Tabs } from "../components/ui";
 import { api } from "../lib/api";
 import { money } from "../lib/format";
 import { useApi, useToast } from "../lib/hooks";
 import { faDigits, formatJ } from "../lib/jalali";
 
-function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => void }) {
+function AppointmentForm({ initial, preset, onDone }: { initial?: any; preset?: { service_id?: number; start_at?: string }; onDone: () => void }) {
   const toast = useToast();
   const services = useApi<any[]>("/api/services").data ?? [];
   const [cust, setCust] = useState<CustomerChoice>(initial ? { customer_id: initial.customer_id, label: initial.customer } : {});
-  const [f, setF] = useState({ service_id: initial?.service_id ?? 0, staff_id: initial?.staff_id ?? 0, start_at: initial?.start_at ?? "", notes: initial?.notes ?? "",
+  const [f, setF] = useState({ service_id: initial?.service_id ?? preset?.service_id ?? 0, staff_id: initial?.staff_id ?? 0,
+    start_at: initial?.start_at ?? preset?.start_at ?? "", notes: initial?.notes ?? "",
     duration_minutes: initial?.custom_duration ? initial.duration_minutes : 0 });
   const [bs, setBs] = useState<BookingState>({ ready: false, allowOutside: false });
   const [held, setHeld] = useState<any[]>([]);
@@ -95,8 +97,13 @@ const endTime = (start: string, minutes: number) => {
 };
 
 export default function Appointments() {
-  const { data, reload } = useApi<any[]>("/api/appointments");
-  const [open, setOpen] = useState(false);
+  const { data, reload: reloadList } = useApi<any[]>("/api/appointments");
+  const [refresh, setRefresh] = useState(0);
+  const reload = useCallback(() => { reloadList(); setRefresh((n) => n + 1); }, [reloadList]);
+  const [params, setParams] = useSearchParams();
+  const tab = (params.get("tab") as "calendar" | "list" | "waitlist") || "calendar";
+  const waiting = useApi<any[]>("/api/waitlist", [refresh]).data?.length ?? 0;
+  const [open, setOpen] = useState<false | { service_id?: number; start_at?: string }>(false);
   const [edit, setEdit] = useState<any>(null);
   const groups = (data ?? []).reduce((g: Record<string, any[]>, a) => ((g[a.start_at.slice(0, 10)] ||= []).push(a), g), {});
 
@@ -120,9 +127,15 @@ export default function Appointments() {
   return (
     <div className="space-y-5">
       <PageHeader title="نوبت‌ها" subtitle="رزروهای پیش رو؛ پس از انجام خدمت، فاکتور صادر و بیعانه کسر می‌شود" icon={<CalendarClock size={22} />}
-        actions={<button className="btn btn-primary" onClick={() => setOpen(true)}><Plus size={16} />نوبت جدید</button>} />
-      <WaitlistPanel onBooked={reload} />
-      {!data ? <Loading /> : data.length === 0 ? <Card><Empty text="نوبتی ثبت نشده" /></Card> : Object.entries(groups).map(([day, list]) => (
+        actions={<button className="btn btn-primary" onClick={() => setOpen({})}><Plus size={16} />نوبت جدید</button>} />
+      <Tabs value={tab} onChange={(t) => setParams({ tab: t }, { replace: true })} items={[
+        { value: "calendar", label: "تقویم نوبت‌دهی" },
+        { value: "list", label: `نوبت‌های پیش رو${data ? ` (${faDigits(data.filter((a) => a.status === "booked").length)})` : ""}` },
+        { value: "waitlist", label: `لیست انتظار / VIP${waiting ? ` (${faDigits(waiting)})` : ""}` },
+      ]} />
+      {tab === "calendar" && <BookingCalendar refresh={refresh} onBook={(p) => setOpen(p)} />}
+      {tab === "waitlist" && <WaitlistPanel onBooked={reload} />}
+      {tab !== "list" ? null : !data ? <Loading /> : data.length === 0 ? <Card><Empty text="نوبتی ثبت نشده" /></Card> : Object.entries(groups).map(([day, list]) => (
         <Card key={day} title={formatJ(day + "T12:00", false)}>
           <div className="space-y-2">
             {list.map((a) => (
@@ -154,8 +167,8 @@ export default function Appointments() {
           </div>
         </Card>
       ))}
-      <Modal open={open} onClose={() => setOpen(false)} title="نوبت جدید">
-        {open && <AppointmentForm onDone={() => { setOpen(false); reload(); }} />}
+      <Modal open={!!open} onClose={() => setOpen(false)} title="نوبت جدید">
+        {open && <AppointmentForm preset={open} onDone={() => { setOpen(false); reload(); }} />}
       </Modal>
       <Modal open={!!edit} onClose={() => setEdit(null)} title="ویرایش نوبت">
         {edit && <AppointmentForm initial={edit} onDone={() => { setEdit(null); reload(); }} />}

@@ -104,3 +104,17 @@ body::before {
 
 @keyframes fade-up { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .fade-up { animation: fade-up .35s ease both; }
+
+/* printable sheets (appointments per line on A4) */
+.print-table th, .print-table td { border: 1px solid #555; padding: 4px 6px; vertical-align: middle; }
+.print-table th { background: #eee; font-weight: 700; }
+@media print {
+  @page { size: A4 portrait; margin: 10mm; }
+  .no-print { display: none !important; }
+  html, body { background: #fff !important; color: #000 !important; }
+  .a4-page { break-after: page; page-break-after: always; max-width: none !important; padding: 0 !important; margin: 0 !important; }
+  .a4-page:last-child { break-after: auto; page-break-after: auto; }
+  .print-table thead { display: table-header-group; }
+  .print-table tr { break-inside: avoid; page-break-inside: avoid; }
+  .print-table th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}

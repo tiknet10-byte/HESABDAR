@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { STATUS, fromRial, unitLabel } from "../lib/format";
@@ -65,8 +66,9 @@ export function Modal({ open, onClose, title, children, wide }: { open: boolean;
     return () => window.removeEventListener("keydown", h);
   }, [onClose]);
   if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 backdrop-blur-sm sm:items-center sm:p-4" onClick={onClose}>
+  // rendered at <body>: a parent with backdrop-filter/transform (e.g. .card) would otherwise trap a fixed overlay inside it
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 backdrop-blur-sm sm:items-center sm:p-4" onClick={(e) => { e.stopPropagation(); onClose(); }}>
       <div
         className={`fade-up max-h-[92vh] w-full overflow-y-auto rounded-t-3xl border sm:rounded-3xl ${wide ? "sm:max-w-4xl" : "sm:max-w-lg"}`}
         style={{ background: "var(--surface-solid)", borderColor: "var(--border)" }}
@@ -78,7 +80,8 @@ export function Modal({ open, onClose, title, children, wide }: { open: boolean;
         </div>
         <div className="p-5">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

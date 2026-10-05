@@ -434,3 +434,28 @@ def test_booking_rules_are_strict(client, accounts):
     assert r.status_code == 409
     assert len(client.get("/api/deposits?status=").json()) == before
     client.put("/api/settings", json={"booking.open": "10:00", "booking.close": "20:00", "booking.days_off": [4]})
+
+
+def test_line_calendar_shows_empty_partial_full_days(client):
+    from datetime import datetime, timedelta
+    client.put("/api/settings", json={"booking.open": "10:00", "booking.close": "14:00", "booking.days_off": []})
+    line = client.post("/api/lines", json={"name": "لاین تقویم"}).json()
+    svc = client.post("/api/services", json={"line_id": line["id"], "name": "خدمت تقویم", "base_price": 1000, "duration_minutes": 120}).json()
+    client.post("/api/staff", json={"full_name": "پرسنل تقویم", "line_id": line["id"]})
+    day = (datetime.now() + timedelta(days=5)).replace(hour=10, minute=0, second=0, microsecond=0)
+    for h, mob in ((10, "09130000001"), (12, "09130000002")):  # fills the whole 10-14 day
+        r = client.post("/api/appointments", json={"customer_name": "تقویم", "customer_mobile": mob, "service_id": svc["id"],
+                                                   "start_at": day.replace(hour=h).isoformat()})
+        assert r.status_code == 200, r.text
+    half = day + timedelta(days=1)
+    client.post("/api/appointments", json={"customer_name": "تقویم", "customer_mobile": "09130000003", "service_id": svc["id"],
+                                           "start_at": half.isoformat()})
+    cal = client.get(f"/api/appointments/calendar?line_id={line['id']}&days=10").json()
+    days = {d["date"]: d for d in cal["days"]}
+    assert cal["capacity"] == 1 and cal["min_duration"] == 120
+    assert days[day.date().isoformat()]["status"] == "full" and days[day.date().isoformat()]["count"] == 2
+    assert days[half.date().isoformat()]["status"] == "partial" and days[half.date().isoformat()]["first_free"] == "12:00"
+    assert days[(day + timedelta(days=2)).date().isoformat()]["status"] == "empty"
+    listed = client.get(f"/api/appointments?line_id={line['id']}&start={day.date()}&end={day.date()}").json()
+    assert len(listed) == 2 and listed[0]["customer_mobile"] == "09130000001"
+    client.put("/api/settings", json={"booking.open": "10:00", "booking.close": "20:00"})
