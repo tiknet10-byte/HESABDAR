@@ -5,6 +5,7 @@ import {
 import { type ReactNode, useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { api } from "../lib/api";
+import ErrorBoundary from "./ErrorBoundary";
 import { can, useAuth } from "../lib/hooks";
 import { jlong, ROLES } from "../lib/format";
 
@@ -140,7 +141,9 @@ export default function Layout() {
           </div>
         </header>
         <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
-          <Outlet />
+          <ErrorBoundary key={loc.pathname + loc.search}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

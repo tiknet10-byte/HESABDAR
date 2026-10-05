@@ -82,13 +82,15 @@ export function Modal({ open, onClose, title, children, wide }: { open: boolean;
   );
 }
 
+/** Form field. A <div>, not a <label>: a label re-dispatches clicks to its first button, which broke
+ * composite controls (customer picker, date picker) - selecting an item also clicked their "change" button. */
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: ReactNode }) {
   return (
-    <label className="block">
+    <div className="block">
       <span className="label">{label}</span>
       {children}
       {hint && <span className="muted mt-1 block text-xs">{hint}</span>}
-    </label>
+    </div>
   );
 }
 

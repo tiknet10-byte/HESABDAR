@@ -56,6 +56,7 @@ class AppointmentIn(BaseModel):
     quoted_price: int | None = None
     notes: str = ""
     status: str = "booked"
+    duration_minutes: int | None = None  # override the service's default length for this booking
     deposit_ids: list[int] = []  # held deposits of the customer to attach to this appointment
 
 
@@ -63,7 +64,8 @@ def _appt(db: Session, a: Appointment, customer: str | None = None) -> dict:
     svc = db.get(Service, a.service_id) if a.service_id else None
     deps = db.scalars(select(Deposit).where(Deposit.appointment_id == a.id)).all()
     return {"id": a.id, "customer_id": a.customer_id, "customer": customer, "service_id": a.service_id,
-            "service": svc.name if svc else None, "duration_minutes": svc.duration_minutes if svc else 60,
+            "service": svc.name if svc else None, "duration_minutes": a.duration_minutes or (svc.duration_minutes if svc else 60),
+            "custom_duration": a.duration_minutes is not None,
             "staff_id": a.staff_id, "start_at": a.start_at.isoformat(timespec="minutes"), "status": a.status,
             "quoted_price": a.quoted_price, "notes": a.notes,
             "deposits": [{"id": d.id, "amount": d.amount, "status": d.status, "received_at": d.received_at.isoformat(timespec="minutes")}
@@ -71,10 +73,13 @@ def _appt(db: Session, a: Appointment, customer: str | None = None) -> dict:
 
 
 def _book(db: Session, customer: Customer, service_id: int | None, staff_id: int | None, start_at: datetime,
-          notes: str, user, quoted_price: int | None = None) -> Appointment:  # noqa: ANN001
+          notes: str, user, quoted_price: int | None = None, duration_minutes: int | None = None) -> Appointment:  # noqa: ANN001
     svc = db.get(Service, service_id) if service_id else None
+    if svc and duration_minutes == svc.duration_minutes:
+        duration_minutes = None  # same as the service default
     a = Appointment(customer_id=customer.id, service_id=service_id, staff_id=staff_id, start_at=start_at.replace(second=0, microsecond=0),
-                    quoted_price=quoted_price if quoted_price is not None else (svc.base_price if svc else 0), notes=notes)
+                    quoted_price=quoted_price if quoted_price is not None else (svc.base_price if svc else 0), notes=notes,
+                    duration_minutes=duration_minutes)
     db.add(a)
     db.flush()
     audit(db, "appointment.create", "appointment", a.id, {"customer": customer.id}, user=user)
@@ -92,9 +97,9 @@ def appointments(start: date | None = None, end: date | None = None, db: Session
 
 @router.get("/appointments/suggest")
 def suggest_slots(service_id: int, staff_id: int | None = None, after: datetime | None = None, count: int = 6,
-                  db: Session = Depends(get_db), _=Depends(require("read"))):
-    """First free times for a service, based on its duration, working hours and staff capacity."""
-    return scheduling.find_slots(db, service_id, staff_id, after, min(count, 20))
+                  duration: int | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
+    """First free times for a service, based on its duration (or the given one), working hours and staff capacity."""
+    return scheduling.find_slots(db, service_id, staff_id, after, min(count, 20), duration_minutes=duration)
 
 
 @router.get("/appointments/{aid}")
@@ -107,8 +112,8 @@ def get_appointment(aid: int, db: Session = Depends(get_db), _=Depends(require("
 @router.post("/appointments")
 def create_appointment(body: AppointmentIn, db: Session = Depends(get_db), user=Depends(require("write"))):
     c = _customer(db, body.customer_id, body.customer_name, body.customer_mobile, user)
-    warning = scheduling.check_slot(db, body.service_id, body.staff_id, body.start_at)
-    a = _book(db, c, body.service_id, body.staff_id, body.start_at, body.notes, user, body.quoted_price)
+    warning = scheduling.check_slot(db, body.service_id, body.staff_id, body.start_at, duration_minutes=body.duration_minutes)
+    a = _book(db, c, body.service_id, body.staff_id, body.start_at, body.notes, user, body.quoted_price, body.duration_minutes)
     for d in db.scalars(select(Deposit).where(Deposit.id.in_(body.deposit_ids or [-1]), Deposit.customer_id == c.id)):
         d.appointment_id = a.id
         if not d.service_id and a.service_id:
@@ -121,6 +126,7 @@ class AppointmentUpdate(BaseModel):
     service_id: int | None = None
     staff_id: int | None = None
     start_at: datetime | None = None
+    duration_minutes: int | None = None
     notes: str | None = None
     status: str | None = None
 
@@ -133,7 +139,11 @@ def edit_appointment(aid: int, body: AppointmentUpdate, db: Session = Depends(ge
         raise HTTPException(400, "وضعیت نامعتبر")
     for k, v in data.items():
         setattr(a, k, v)
-    warning = scheduling.check_slot(db, a.service_id, a.staff_id, a.start_at, exclude_id=a.id) if body.start_at else None
+    svc = db.get(Service, a.service_id) if a.service_id else None
+    if svc and a.duration_minutes == svc.duration_minutes:
+        a.duration_minutes = None
+    warning = scheduling.check_slot(db, a.service_id, a.staff_id, a.start_at, exclude_id=a.id,
+                                    duration_minutes=a.duration_minutes) if (body.start_at or body.duration_minutes) else None
     audit(db, "appointment.update", "appointment", a.id, {k: str(v) for k, v in data.items()}, user=user)
     db.commit()
     return {**_appt(db, a), "warning": warning}
@@ -164,6 +174,7 @@ class DepositIn(BaseModel):
     notes: str = ""
     # optional booking in the same step
     book_at: datetime | None = None
+    book_duration: int | None = None
     staff_id: int | None = None
 
 
@@ -205,12 +216,12 @@ def create_deposit(body: DepositIn, db: Session = Depends(get_db), user=Depends(
     book_at = body.book_at
     service_id = body.service_id
     if not book_at and not appointment_id and service_id and settings_store.get(db, "booking.auto"):
-        slots = scheduling.find_slots(db, service_id, body.staff_id, count=1)
+        slots = scheduling.find_slots(db, service_id, body.staff_id, count=1, duration_minutes=body.book_duration)
         if slots:
             book_at = datetime.fromisoformat(slots[0]["start_at"])
     if book_at:
-        warning = scheduling.check_slot(db, service_id, body.staff_id, book_at)
-        appointment_id = _book(db, c, service_id, body.staff_id, book_at, body.notes, user).id
+        warning = scheduling.check_slot(db, service_id, body.staff_id, book_at, duration_minutes=body.book_duration)
+        appointment_id = _book(db, c, service_id, body.staff_id, book_at, body.notes, user, duration_minutes=body.book_duration).id
     try:
         d = accounting.record_deposit(db, customer=c, amount=body.amount, payment_account=pa, received_at=body.received_at,
                                       reference=body.reference, service_id=service_id, appointment_id=appointment_id,

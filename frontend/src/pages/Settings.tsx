@@ -29,10 +29,9 @@ function General() {
             <input type="checkbox" className="mt-1" checked={!!data["booking.auto"]} onChange={(e) => set("booking.auto", e.target.checked)} />
             <span><b>نوبت‌دهی خودکار</b><br /><span className="muted">با ثبت بیعانه‌ای که خدمتش مشخص است، اولین نوبت خالی همان خدمت به‌صورت خودکار رزرو می‌شود. اگر خاموش باشد، سیستم فقط نوبت خالی را پیشنهاد می‌دهد.</span></span>
           </label>
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             <Field label="شروع ساعت کاری"><input type="time" className="input" value={data["booking.open"]} onChange={(e) => set("booking.open", e.target.value)} /></Field>
             <Field label="پایان ساعت کاری"><input type="time" className="input" value={data["booking.close"]} onChange={(e) => set("booking.close", e.target.value)} /></Field>
-            <Field label="فاصله نوبت‌ها (دقیقه)"><select className="input" value={data["booking.slot_minutes"]} onChange={(e) => set("booking.slot_minutes", Number(e.target.value))}>{[5, 10, 15, 20, 30, 60].map((m) => <option key={m} value={m}>{m}</option>)}</select></Field>
           </div>
           <div>
             <div className="label">روزهای تعطیل</div>
@@ -43,7 +42,7 @@ function General() {
               ))}
             </div>
           </div>
-          <p className="muted text-xs">مدت زمان هر خدمت در «لاین‌ها و خدمات» و لاین هر پرسنل در «پرسنل و کاربران» تعیین می‌شود؛ ظرفیت هر لاین = تعداد پرسنل آن لاین.</p>
+          <p className="muted text-xs">فاصله نوبت‌ها برای هر خدمت جداست: مدت انجام هر خدمت را در «لاین‌ها و خدمات» وارد کنید (هنگام نوبت‌دهی هم قابل تغییر است). لاین هر پرسنل در «پرسنل و کاربران» تعیین می‌شود؛ ظرفیت هر لاین = تعداد پرسنل آن لاین.</p>
         </div>
       </Card>
       <Card title="تطبیق رسید با بانک">
@@ -90,11 +89,25 @@ function Catalog() {
   }
   async function deleteService(s: any) {
     if (!confirm(`خدمت «${s.name}» حذف شود؟`)) return;
-    const r = await api(`/api/services/${s.id}`, { method: "DELETE" });
-    toast(r.archived ? "خدمت در سوابق استفاده شده بود؛ از فهرست حذف و بایگانی شد" : "خدمت حذف شد");
-    if (r.line_removed) toast("لاین بدون خدمت ماند و حذف شد", "info");
-    setEdit(null);
-    reload();
+    try {
+      const r = await api(`/api/services/${s.id}`, { method: "DELETE" });
+      toast(r.archived ? `«${s.name}» حذف شد (در سوابق قبلی نگه داشته می‌شود)` : `«${s.name}» حذف شد`);
+      if (r.line_removed) toast("لاین بدون خدمت ماند و حذف شد", "info");
+      setEdit(null);
+      reload();
+    } catch (e: any) {
+      toast(`حذف انجام نشد: ${e.message}`, "error");
+    }
+  }
+  async function saveDuration(s: any, minutes: number) {
+    if (!minutes || minutes === s.duration_minutes) return;
+    try {
+      await api(`/api/services/${s.id}`, { method: "PUT", body: { ...s, duration_minutes: minutes } });
+      toast(`مدت «${s.name}» ذخیره شد`);
+      services.reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
   }
   async function saveLine() {
     try {
@@ -109,10 +122,14 @@ function Catalog() {
   async function deleteLine() {
     const count = (services.data ?? []).filter((s) => s.line_id === line.id).length;
     if (!confirm(`لاین «${line.name}»${count ? ` و ${count} خدمت آن` : ""} حذف شود؟`)) return;
-    await api(`/api/lines/${line.id}`, { method: "DELETE" });
-    toast("لاین حذف شد");
-    setLine(null);
-    reload();
+    try {
+      await api(`/api/lines/${line.id}`, { method: "DELETE" });
+      toast("لاین حذف شد");
+      setLine(null);
+      reload();
+    } catch (e: any) {
+      toast(`حذف انجام نشد: ${e.message}`, "error");
+    }
   }
 
   return (
@@ -130,10 +147,17 @@ function Catalog() {
       <Card title="خدمات و قیمت‌ها" actions={<button className="btn btn-sm btn-primary" onClick={() => setEdit({ line_id: lines.data?.[0]?.id, name: "", base_price: 0, default_deposit: 0, duration_minutes: 60, aliases: "", is_active: true })}><Plus size={14} />خدمت جدید</button>} pad={false}>
         <div className="overflow-x-auto">
           <table className="table">
-            <thead><tr><th>لاین</th><th>خدمت</th><th>مدت</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th></th></tr></thead>
+            <thead><tr><th>لاین</th><th>خدمت</th><th>مدت انجام</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th></th></tr></thead>
             <tbody>{(services.data ?? []).map((s) => (
               <tr key={s.id}>
-                <td className="muted">{s.line}</td><td className="font-semibold">{s.name}</td><td className="num">{num(s.duration_minutes)} دقیقه</td><td className="num">{money(s.base_price)}</td>
+                <td className="muted">{s.line}</td><td className="font-semibold">{s.name}</td><td>
+                  <span className="flex items-center gap-1">
+                    <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
+                      className="input num w-20 py-1 text-sm" onBlur={(e) => saveDuration(s, Number(e.target.value))}
+                      onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
+                    <span className="muted text-xs">دقیقه</span>
+                  </span>
+                </td><td className="num">{money(s.base_price)}</td>
                 <td className="num">{s.learned_avg_price ? <>{money(s.learned_avg_price)} <span className="muted text-xs">({num(s.learned_count)})</span></> : "—"}</td>
                 <td className="num">{s.default_deposit ? money(s.default_deposit) : "—"}</td>
                 <td className="whitespace-nowrap">
@@ -152,7 +176,7 @@ function Catalog() {
               <Field label="لاین"><select className="input" value={edit.line_id} onChange={(e) => setEdit({ ...edit, line_id: Number(e.target.value) })}>{(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></Field>
               <Field label="نام خدمت"><input className="input" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
               <Field label="قیمت پایه"><MoneyInput value={edit.base_price} onChange={(v) => setEdit({ ...edit, base_price: v })} /></Field>
-              <Field label="مدت زمان انجام (دقیقه)" hint="برای پیشنهاد خودکار نوبت خالی استفاده می‌شود">
+              <Field label="مدت زمان انجام (دقیقه)" hint="فاصله پیش‌فرض نوبت‌های این خدمت؛ هنگام نوبت‌دهی قابل تغییر است">
                 <input type="number" min={5} step={5} className="input" value={edit.duration_minutes} onChange={(e) => setEdit({ ...edit, duration_minutes: Number(e.target.value) })} />
               </Field>
               <Field label="بیعانه پیش‌فرض"><MoneyInput value={edit.default_deposit} onChange={(v) => setEdit({ ...edit, default_deposit: v })} /></Field>
@@ -503,11 +527,12 @@ const TABLE_LABELS: Record<string, string> = {
 
 function DataManagement() {
   const toast = useToast();
-  const { data, reload } = useApi<any>("/api/admin/data");
+  const { data, reload, error } = useApi<any>("/api/admin/data");
   const [scope, setScope] = useState("transactions");
   const [password, setPassword] = useState("");
   const [confirmWord, setConfirmWord] = useState("");
   const [busy, setBusy] = useState("");
+  if (error) return <Card><div className="space-y-2 text-sm"><div className="font-bold text-rose-600">اطلاعات بارگذاری نشد: {error}</div><div className="muted">اگر برنامه را به‌روزرسانی کرده‌اید، همه پنجره‌های سیاه برنامه را ببندید و دوباره اجرا کنید.</div><button className="btn btn-sm" onClick={reload}>تلاش دوباره</button></div></Card>;
   if (!data) return <Loading />;
   const run = async (key: string, fn: () => Promise<void>) => { setBusy(key); try { await fn(); } catch (e: any) { toast(e.message, "error"); } finally { setBusy(""); } };
   return (

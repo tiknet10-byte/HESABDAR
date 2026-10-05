@@ -14,7 +14,8 @@ function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => voi
   const services = useApi<any[]>("/api/services").data ?? [];
   const staff = useApi<any[]>("/api/staff").data ?? [];
   const [cust, setCust] = useState<CustomerChoice>(initial ? { customer_id: initial.customer_id, label: initial.customer } : {});
-  const [f, setF] = useState({ service_id: initial?.service_id ?? 0, staff_id: initial?.staff_id ?? 0, start_at: initial?.start_at ?? "", notes: initial?.notes ?? "" });
+  const [f, setF] = useState({ service_id: initial?.service_id ?? 0, staff_id: initial?.staff_id ?? 0, start_at: initial?.start_at ?? "", notes: initial?.notes ?? "",
+    duration_minutes: initial?.custom_duration ? initial.duration_minutes : 0 });
   const [held, setHeld] = useState<any[]>([]);
   const [picked, setPicked] = useState<number[]>([]);
 
@@ -32,7 +33,7 @@ function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => voi
 
   async function save() {
     try {
-      const body = { ...f, service_id: f.service_id || null, staff_id: f.staff_id || null };
+      const body = { ...f, service_id: f.service_id || null, staff_id: f.staff_id || null, duration_minutes: f.duration_minutes || null };
       const r = initial
         ? await api(`/api/appointments/${initial.id}`, { method: "PUT", body })
         : await api("/api/appointments", { body: { ...cust, ...body, deposit_ids: picked } });
@@ -63,7 +64,8 @@ function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => voi
       </div>
       <Field label="زمان نوبت">
         <BookingFields serviceId={f.service_id || undefined} staffId={f.staff_id || undefined} value={f.start_at}
-          onChange={(v) => setF((x) => ({ ...x, start_at: v }))} onStaff={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))} />
+          onChange={(v) => setF((x) => ({ ...x, start_at: v }))} onStaff={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))}
+          duration={f.duration_minutes || undefined} onDuration={(m) => setF((x) => ({ ...x, duration_minutes: m }))} />
       </Field>
       {held.length > 0 && (
         <div className="space-y-2 rounded-2xl bg-emerald-500/10 p-3 text-sm">
@@ -84,6 +86,11 @@ function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => voi
     </div>
   );
 }
+
+const endTime = (start: string, minutes: number) => {
+  const d = new Date(new Date(start.length <= 16 ? start + ":00" : start).getTime() + minutes * 60000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+};
 
 export default function Appointments() {
   const { data, reload } = useApi<any[]>("/api/appointments");
@@ -106,11 +113,11 @@ export default function Appointments() {
             {list.map((a) => (
               <div key={a.id} className="flex flex-wrap items-center justify-between gap-2 rounded-2xl px-4 py-3" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
                 <div className="flex items-center gap-3">
-                  <span className="num rounded-xl bg-violet-500/10 px-2 py-1 font-bold text-violet-700 dark:text-violet-300">{faDigits(a.start_at.slice(11, 16))}</span>
+                  <span className="num rounded-xl bg-violet-500/10 px-2 py-1 text-center font-bold leading-tight text-violet-700 dark:text-violet-300">{faDigits(a.start_at.slice(11, 16))}<span className="block text-[10px] font-semibold opacity-70">تا {faDigits(endTime(a.start_at, a.duration_minutes ?? 60))}</span></span>
                   <div>
                     <div className="font-semibold">{a.customer}</div>
-                    <div className="muted text-xs">{a.service ?? "—"} · {faDigits(a.duration_minutes)} دقیقه · {money(a.quoted_price)}</div>
-                    {a.deposits.length > 0 && <div className="mt-0.5 text-xs text-emerald-600">بیعانه: {a.deposits.map((d: any) => money(d.amount)).join(" + ")}</div>}
+                    <div className="muted text-xs">{a.service ?? "—"} · {faDigits(a.duration_minutes ?? 60)} دقیقه · {money(a.quoted_price)}</div>
+                    {(a.deposits ?? []).length > 0 && <div className="mt-0.5 text-xs text-emerald-600">بیعانه: {a.deposits.map((d: any) => money(d.amount)).join(" + ")}</div>}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">

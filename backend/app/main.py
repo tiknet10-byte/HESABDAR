@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .api import auth, catalog, customers, finance, system
 from .core import db as dbmod
 from .core.config import get_settings
@@ -25,9 +26,27 @@ def init_db() -> None:
     from . import models  # noqa: F401  (register tables)
 
     Base.metadata.create_all(dbmod.engine)
+    _add_missing_columns()
     with SessionLocal() as db:
         seed_base(db)
         db.commit()
+
+
+def _add_missing_columns() -> None:
+    """Lightweight auto-migration: add new nullable columns to existing tables after an update."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(dbmod.engine)
+    with dbmod.engine.begin() as con:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            existing = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name not in existing and col.nullable:
+                    ddl = col.type.compile(dialect=dbmod.engine.dialect)
+                    con.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {ddl}'))
+                    log.info("added column %s.%s", table.name, col.name)
 
 
 async def _periodic(name: str, interval: int, fn) -> None:  # noqa: ANN001
@@ -65,7 +84,7 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
 
 def create_app() -> FastAPI:
     s = get_settings()
-    app = FastAPI(title="Hesabdar - Beauty Salon Accounting", version="1.0.0", lifespan=lifespan,
+    app = FastAPI(title="Hesabdar - Beauty Salon Accounting", version=__version__, lifespan=lifespan,
                   docs_url="/api/docs", openapi_url="/api/openapi.json")
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_credentials=True,
                        allow_methods=["*"], allow_headers=["*"])

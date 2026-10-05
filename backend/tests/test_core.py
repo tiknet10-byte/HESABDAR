@@ -218,3 +218,36 @@ def test_zz_reset_and_optimize(client):
     st = client.get("/api/admin/data").json()["stats"]
     assert st["customers"] == 0 and st["services"] > 0  # defaults re-seeded
     assert client.post("/api/admin/optimize").json()["ok"]
+
+
+def test_custom_duration_and_version(client, accounts, services):
+    from app import __version__
+    assert client.get("/api/health").json()["version"] == __version__
+    svc = services["پدیکور"]  # default 60 minutes
+    s30 = client.get(f"/api/appointments/suggest?service_id={svc['id']}&duration=30&count=2").json()
+    from datetime import datetime
+    a, b = (datetime.fromisoformat(x["start_at"]) for x in s30)
+    assert (b - a).seconds == 30 * 60  # suggestions follow the chosen length
+    r = client.post("/api/appointments", json={"customer_name": "مدت سفارشی", "customer_mobile": "09128880000", "service_id": svc["id"],
+                                               "start_at": s30[0]["start_at"], "duration_minutes": 30}).json()
+    assert r["duration_minutes"] == 30 and r["custom_duration"] is True
+
+
+def test_auto_migration_adds_columns(tmp_path):
+    import sqlite3
+    from sqlalchemy import create_engine, inspect
+    from app.core import db as dbmod
+    from app.main import _add_missing_columns
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE appointments (id INTEGER PRIMARY KEY, customer_id INTEGER, start_at DATETIME)")
+    con.commit(); con.close()
+    old = dbmod.engine
+    dbmod.engine = create_engine(f"sqlite:///{path}")
+    try:
+        _add_missing_columns()
+        cols = {c["name"] for c in inspect(dbmod.engine).get_columns("appointments")}
+    finally:
+        dbmod.engine.dispose()
+        dbmod.engine = old
+    assert "duration_minutes" in cols

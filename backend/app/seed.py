@@ -44,6 +44,15 @@ DEFAULT_CATALOG = {
     ],
 }
 
+# typical duration of each service in minutes (default spacing of appointments; editable)
+DEFAULT_DURATIONS = {
+    "کوتاهی مو": 45, "رنگ مو": 120, "بالیاژ": 240, "کراتین": 180, "براشینگ": 45,
+    "کاشت ناخن": 120, "ترمیم ناخن": 90, "مانیکور": 45, "پدیکور": 60, "لاک ژل": 45,
+    "پاکسازی پوست": 60, "هیدرافیشیال": 60, "میکرونیدلینگ": 60,
+    "اکستنشن مژه": 120, "لیفت مژه": 60, "میکروبلیدینگ ابرو": 150, "اصلاح ابرو": 20,
+    "میکاپ": 90, "شینیون": 90, "پکیج عروس": 360,
+}
+
 DEFAULT_ACCOUNTS = [
     ("pos", "کارتخوان ملت", "ملت"),
     ("pos", "کارتخوان سامان", "سامان"),
@@ -64,7 +73,7 @@ def seed_base(db: Session) -> None:
         accounting.revenue_account_for_line(db, line_name)
         for name, price, deposit, aliases in services:
             s = Service(line_id=line.id, name=name, base_price=price, default_deposit=deposit, aliases=aliases,
-                        min_price=int(price * 0.5), max_price=int(price * 2.5))
+                        min_price=int(price * 0.5), max_price=int(price * 2.5), duration_minutes=DEFAULT_DURATIONS.get(name, 60))
             db.add(s)
             db.flush()
             learning.learn_text(db, name, s.id, weight=3)

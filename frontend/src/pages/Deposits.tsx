@@ -20,6 +20,7 @@ function DepositForm({ onDone }: { onDone: () => void }) {
   const [f, setF] = useState({ amount: 0, payment_account_id: 0, service_id: 0, staff_id: 0, reference: "", notes: "", received_at: toLocalIso(new Date()) });
   const [book, setBook] = useState(false);
   const [bookAt, setBookAt] = useState("");
+  const [bookDur, setBookDur] = useState(0);
   const [guess, setGuess] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
   const auto = !!settings?.["booking.auto"];
@@ -37,7 +38,7 @@ function DepositForm({ onDone }: { onDone: () => void }) {
     setBusy(true);
     try {
       const r = await api("/api/deposits", {
-        body: { ...cust, ...f, service_id: f.service_id || null, staff_id: f.staff_id || null, payment_account_id: f.payment_account_id || accounts[0]?.id, book_at: book && bookAt ? bookAt : null },
+        body: { ...cust, ...f, service_id: f.service_id || null, staff_id: f.staff_id || null, payment_account_id: f.payment_account_id || accounts[0]?.id, book_at: book && bookAt ? bookAt : null, book_duration: book && bookDur ? bookDur : null },
       });
       toast(r.appointment_at ? `بیعانه ثبت و نوبت ${formatJ(r.appointment_at)} رزرو شد` : "بیعانه ثبت شد");
       if (r.warning) toast(r.warning, "info");
@@ -98,7 +99,7 @@ function DepositForm({ onDone }: { onDone: () => void }) {
               {staff.filter((p) => p.is_active).map((p) => <option key={p.id} value={p.id}>{p.full_name}</option>)}
             </select>
             <BookingFields serviceId={f.service_id || undefined} staffId={f.staff_id || undefined} value={bookAt} onChange={setBookAt}
-              onStaff={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))} />
+              onStaff={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))} onDuration={setBookDur} />
           </div>
         )}
       </div>
@@ -113,6 +114,7 @@ function BookForDeposit({ deposit, onDone }: { deposit: any; onDone: () => void 
   const [serviceId, setServiceId] = useState<number>(deposit.service_id ?? 0);
   const [at, setAt] = useState("");
   const [staffId, setStaffId] = useState<number | undefined>();
+  const [dur, setDur] = useState(0);
   return (
     <div className="space-y-3">
       <div className="text-sm">بیعانه <b>{money(deposit.amount)}</b> از <b>{deposit.customer}</b> · دریافت {formatJ(deposit.received_at)}</div>
@@ -120,10 +122,10 @@ function BookForDeposit({ deposit, onDone }: { deposit: any; onDone: () => void 
         <option value={0}>انتخاب خدمت…</option>
         {services.map((s) => <option key={s.id} value={s.id}>{s.line} / {s.name}</option>)}
       </select>
-      <BookingFields serviceId={serviceId || undefined} value={at} onChange={setAt} onStaff={setStaffId} />
+      <BookingFields serviceId={serviceId || undefined} value={at} onChange={setAt} onStaff={setStaffId} onDuration={setDur} />
       <button className="btn btn-primary w-full" disabled={!at || !serviceId} onClick={async () => {
         try {
-          const r = await api("/api/appointments", { body: { customer_id: deposit.customer_id, service_id: serviceId, staff_id: staffId ?? null, start_at: at, deposit_ids: [deposit.id] } });
+          const r = await api("/api/appointments", { body: { customer_id: deposit.customer_id, service_id: serviceId, staff_id: staffId ?? null, start_at: at, duration_minutes: dur || null, deposit_ids: [deposit.id] } });
           toast("نوبت ثبت و به بیعانه وصل شد");
           if (r.warning) toast(r.warning, "info");
           onDone();

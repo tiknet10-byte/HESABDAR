@@ -24,6 +24,10 @@ def _hm(value: str, default: time) -> time:
         return default
 
 
+def appointment_minutes(db: Session, a: Appointment, cache: dict[int, int] | None = None) -> int:
+    return a.duration_minutes or _duration(db, a.service_id, cache if cache is not None else {})
+
+
 def _duration(db: Session, service_id: int | None, cache: dict[int, int]) -> int:
     if not service_id:
         return 60
@@ -45,7 +49,7 @@ class _Calendar:
                                       Appointment.start_at <= end)
         if exclude_id:
             q = q.where(Appointment.id != exclude_id)
-        self.intervals = [(a.start_at, a.start_at + timedelta(minutes=_duration(db, a.service_id, cache)), a) for a in db.scalars(q)]
+        self.intervals = [(a.start_at, a.start_at + timedelta(minutes=appointment_minutes(db, a, cache)), a) for a in db.scalars(q)]
 
     def free_staff(self, t: datetime, t_end: datetime, staff_id: int | None) -> tuple[bool, int | None]:
         overlapping = [a for s, e, a in self.intervals if s < t_end and e > t]
@@ -60,18 +64,21 @@ class _Calendar:
         return True, None
 
 
+STEP = timedelta(minutes=5)  # granularity used to search for the next free start time
+
+
 def _hours(db: Session) -> tuple[time, time, timedelta, set]:
     return (_hm(settings_store.get(db, "booking.open"), time(10, 0)), _hm(settings_store.get(db, "booking.close"), time(20, 0)),
-            timedelta(minutes=int(settings_store.get(db, "booking.slot_minutes") or 15)),
-            set(settings_store.get(db, "booking.days_off") or []))
+            STEP, set(settings_store.get(db, "booking.days_off") or []))
 
 
 def find_slots(db: Session, service_id: int, staff_id: int | None = None, after: datetime | None = None,
-               count: int = 6, max_days: int = 60) -> list[dict]:
+               count: int = 6, max_days: int = 60, duration_minutes: int | None = None) -> list[dict]:
+    """Free start times. Consecutive suggestions are one service-duration apart (each service has its own length)."""
     svc = db.get(Service, service_id)
     if svc is None:
         return []
-    duration = timedelta(minutes=svc.duration_minutes or 60)
+    duration = timedelta(minutes=duration_minutes or svc.duration_minutes or 60)
     open_t, close_t, step, days_off = _hours(db)
     step_min = int(step.total_seconds() // 60)
     start = (after or local_now()).replace(second=0, microsecond=0)
@@ -99,7 +106,7 @@ def find_slots(db: Session, service_id: int, staff_id: int | None = None, after:
 
 
 def check_slot(db: Session, service_id: int | None, staff_id: int | None, start_at: datetime,
-               exclude_id: int | None = None) -> str | None:
+               exclude_id: int | None = None, duration_minutes: int | None = None) -> str | None:
     """Return a warning if the time is outside working hours or already full, else None."""
     if not service_id:
         return None
@@ -107,7 +114,7 @@ def check_slot(db: Session, service_id: int | None, staff_id: int | None, start_
     if svc is None:
         return None
     open_t, close_t, _, days_off = _hours(db)
-    end = start_at + timedelta(minutes=svc.duration_minutes or 60)
+    end = start_at + timedelta(minutes=duration_minutes or svc.duration_minutes or 60)
     if start_at.weekday() in days_off:
         return "این روز تعطیل سالن است"
     if start_at.time() < open_t or end.time() > close_t or end.date() != start_at.date():

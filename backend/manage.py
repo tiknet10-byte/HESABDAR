@@ -38,7 +38,13 @@ def main() -> None:
     a = ap.parse_args()
 
     if a.cmd == "run":
+        import socket
+
         import uvicorn
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if probe.connect_ex(("127.0.0.1", a.port)) == 0:
+                sys.exit(f"Port {a.port} is already in use - another HESABDAR window is probably still running. "
+                         "Close all HESABDAR windows (or run update.bat) and start again.")
         if a.open:
             threading.Timer(1.5, lambda: webbrowser.open(f"http://{a.host}:{a.port}")).start()
         uvicorn.run("app.main:app", host=a.host, port=a.port, reload=a.reload, proxy_headers=True)

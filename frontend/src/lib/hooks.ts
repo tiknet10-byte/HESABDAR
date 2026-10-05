@@ -13,6 +13,7 @@ export function useApi<T = any>(path: string | null, deps: unknown[] = []) {
       setError(null);
     } catch (e: any) {
       setError(e.message);
+      window.dispatchEvent(new CustomEvent("hesabdar:error", { detail: e.message }));
     } finally {
       setLoading(false);
     }
