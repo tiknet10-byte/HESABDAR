@@ -281,7 +281,12 @@ function StaffAndUsers() {
                 <option value="">بدون لاین</option>
                 {(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
               </select>
-              <span className="muted col-span-2 text-xs">پورسانت {num(p.commission_percent)}٪</span>
+              <span className="col-span-2 flex items-center gap-1" title="درصد سهم پرسنل از مبلغ خدمت">
+                <input type="number" min={0} max={100} className="input num w-16 py-1 text-sm" defaultValue={p.commission_percent} key={p.commission_percent}
+                  onBlur={async (e) => { const v = Number(e.target.value); if (v !== p.commission_percent) { await api(`/api/staff/${p.id}`, { method: "PUT", body: { ...p, commission_percent: v } }); staff.reload(); } }}
+                  onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
+                <span className="muted text-xs">٪</span>
+              </span>
               <button className="btn btn-sm col-span-2" onClick={async () => { await api(`/api/staff/${p.id}`, { method: "PUT", body: { ...p, is_active: !p.is_active } }); staff.reload(); }}>{p.is_active ? "غیرفعال" : "فعال"}</button>
             </div>
           ))}
@@ -295,7 +300,7 @@ function StaffAndUsers() {
           <input className="input w-24" type="number" title="درصد پورسانت" value={s.commission_percent} onChange={(e) => setS({ ...s, commission_percent: Number(e.target.value) })} />
           <button className="btn" disabled={!s.full_name} onClick={async () => { await api("/api/staff", { body: { ...s, line_id: s.line_id || null } }); setS({ full_name: "", commission_percent: 30, line_id: 0 }); staff.reload(); }}>افزودن</button>
         </div>
-        <p className="muted mt-2 text-xs">لاین هر پرسنل برای محاسبه ظرفیت نوبت‌دهی استفاده می‌شود.</p>
+        <p className="muted mt-2 text-xs leading-6">هر پرسنل به یک لاین وصل می‌شود؛ با انتخاب هر خدمت، پرسنل همان لاین خودکار انتخاب می‌شود (اگر لاین چند پرسنل داشته باشد، فقط پرسنل همان لاین نمایش داده می‌شوند). درصد = سهم پرسنل از مبلغ خالص هر خدمت؛ باقیمانده سهم سالن است. گزارش در منوی «پرسنل و سهم‌ها».</p>
       </Card>
       {can(user, "users") && (
         <Card title="کاربران سیستم و سطح دسترسی">

@@ -25,6 +25,7 @@ from ..models import (
     Payment,
     PaymentAccount,
     Service,
+    Staff,
     local_now,
 )
 from .audit import audit
@@ -109,6 +110,9 @@ def expense_account(db: Session, category: str) -> LedgerAccount:
     return _child(db, EXPENSE_PARENT, category, "expense")
 
 
+STAFF_PAYABLE = "2200"
+
+
 @dataclass
 class Leg:
     account: LedgerAccount
@@ -116,6 +120,7 @@ class Leg:
     credit: int = 0
     customer_id: int | None = None
     line_id: int | None = None
+    staff_id: int | None = None
 
 
 def post(db: Session, description: str, legs: list[Leg], ref_type: str = "", ref_id: int | None = None,
@@ -130,10 +135,47 @@ def post(db: Session, description: str, legs: list[Leg], ref_type: str = "", ref
     entry = JournalEntry(description=description, ref_type=ref_type, ref_id=ref_id, at=at or local_now())
     for l in legs:
         entry.lines.append(JournalLine(account_id=l.account.id, debit=l.debit, credit=l.credit,
-                                       customer_id=l.customer_id, line_id=l.line_id))
+                                       customer_id=l.customer_id, line_id=l.line_id, staff_id=l.staff_id))
     db.add(entry)
     db.flush()
     return entry
+
+
+# --------------------------------------------------------------------- staff
+def staff_for_line(db: Session, line_id: int | None) -> list[Staff]:
+    if not line_id:
+        return []
+    return list(db.scalars(select(Staff).where(Staff.line_id == line_id, Staff.is_active.is_(True)).order_by(Staff.id)))
+
+
+def default_staff_id(db: Session, service_id: int | None, staff_id: int | None = None) -> int | None:
+    """The staff member for a service: the one chosen, else the only active staff of the service's line."""
+    if staff_id or not service_id:
+        return staff_id
+    svc = db.get(Service, service_id)
+    people = staff_for_line(db, svc.line_id) if svc else []
+    return people[0].id if len(people) == 1 else None
+
+
+def pay_staff(db: Session, staff: Staff, amount: int, payment_account: PaymentAccount, paid_at: datetime | None = None,
+              description: str = "", user=None) -> JournalEntry:
+    """Settle (part of) a staff member's earned commission."""
+    if amount <= 0:
+        raise AccountingError("مبلغ پرداخت باید مثبت باشد")
+    entry = post(db, f"پرداخت سهم {staff.full_name}" + (f" - {description}" if description else ""), [
+        Leg(account(db, STAFF_PAYABLE), debit=amount, staff_id=staff.id, line_id=staff.line_id),
+        Leg(cash_account_for(db, payment_account), credit=amount, staff_id=staff.id),
+    ], "staff_payout", staff.id, at=paid_at)
+    audit(db, "staff.payout", "staff", staff.id, {"amount": amount, "account": payment_account.id}, user=user)
+    return entry
+
+
+def staff_balance(db: Session, staff_id: int) -> int:
+    """Commission earned but not yet paid to the staff member."""
+    acc = account(db, STAFF_PAYABLE)
+    dr, cr = db.execute(select(func.coalesce(func.sum(JournalLine.debit), 0), func.coalesce(func.sum(JournalLine.credit), 0))
+                        .where(JournalLine.account_id == acc.id, JournalLine.staff_id == staff_id)).one()
+    return int(cr) - int(dr)
 
 
 # --------------------------------------------------------------------- customers
@@ -171,18 +213,21 @@ def find_or_create_customer(db: Session, full_name: str | None, mobile: str | No
 # --------------------------------------------------------------------- deposits
 def record_deposit(db: Session, *, customer: Customer, amount: int, payment_account: PaymentAccount,
                    received_at: datetime | None = None, reference: str | None = None, service_id: int | None = None,
+                   staff_id: int | None = None,
                    appointment_id: int | None = None, source: str = "manual", notes: str = "",
                    service_guess: dict | None = None, user=None) -> Deposit:
     if amount <= 0:
         raise AccountingError("مبلغ بیعانه باید مثبت باشد")
+    svc = db.get(Service, service_id) if service_id else None
     dep = Deposit(customer_id=customer.id, amount=amount, payment_account_id=payment_account.id,
                   received_at=received_at or local_now(), reference=reference, service_id=service_id,
-                  appointment_id=appointment_id, source=source, notes=notes, service_guess=service_guess or {})
+                  appointment_id=appointment_id, source=source, notes=notes, service_guess=service_guess or {},
+                  staff_id=default_staff_id(db, service_id, staff_id))
     db.add(dep)
     db.flush()
     post(db, f"دریافت بیعانه از {customer.full_name}", [
         Leg(cash_account_for(db, payment_account), debit=amount, customer_id=customer.id),
-        Leg(account(db, DEPOSITS), credit=amount, customer_id=customer.id),
+        Leg(account(db, DEPOSITS), credit=amount, customer_id=customer.id, line_id=svc.line_id if svc else None, staff_id=dep.staff_id),
     ], "deposit", dep.id, at=dep.received_at)
     audit(db, "deposit.create", "deposit", dep.id, {"amount": amount, "customer": customer.id, "source": source}, user=user)
     bus.emit("deposit.created", {"id": dep.id, "customer_id": customer.id, "amount": amount, "source": source}, db=db)
@@ -235,7 +280,8 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
         qty = int(it.get("quantity") or 1)
         price = int(it["unit_price"] if it.get("unit_price") is not None else (svc.base_price if svc else 0))
         item = InvoiceItem(service_id=svc.id if svc else None, line_id=svc.line_id if svc else it.get("line_id"),
-                           staff_id=it.get("staff_id"), description=it.get("description") or (svc.name if svc else ""),
+                           staff_id=default_staff_id(db, svc.id if svc else None, it.get("staff_id")),
+                           description=it.get("description") or (svc.name if svc else ""),
                            quantity=qty, unit_price=price, discount=int(it.get("discount") or 0))
         if item.amount < 0:
             raise AccountingError("مبلغ آیتم منفی است")
@@ -261,6 +307,26 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
         name = line_names.get(line_id) or "سایر خدمات"
         legs.append(Leg(revenue_account_for_line(db, name), credit=gross - share, customer_id=customer.id, line_id=line_id))
     post(db, f"فاکتور {inv.number} - {customer.full_name}", legs, "invoice", inv.id, at=inv.issued_at)
+
+    # staff commission: each item's net (after its share of the invoice discount) x the staff member's percent.
+    # Booked as an expense of the salon and a liability to the staff member until it is paid out.
+    remaining_discount = discount
+    comm_legs: list[Leg] = []
+    for idx, item in enumerate(inv.items):
+        share = remaining_discount if idx == len(inv.items) - 1 else (discount * item.amount // inv.subtotal if inv.subtotal else 0)
+        remaining_discount -= share
+        item.net_amount = item.amount - share
+        person = db.get(Staff, item.staff_id) if item.staff_id else None
+        if person and person.commission_percent:
+            item.commission_percent = float(person.commission_percent)
+            item.commission_amount = int(round(item.net_amount * person.commission_percent / 100))
+            if item.commission_amount > 0:
+                comm_legs += [Leg(account(db, COMMISSION), debit=item.commission_amount, line_id=item.line_id, staff_id=person.id),
+                              Leg(account(db, STAFF_PAYABLE), credit=item.commission_amount, line_id=item.line_id, staff_id=person.id)]
+        else:
+            item.commission_percent, item.commission_amount = 0.0, 0
+    if comm_legs:
+        post(db, f"سهم پرسنل - فاکتور {inv.number}", comm_legs, "commission", inv.id, at=inv.issued_at)
 
     # apply customer deposits
     deposit_q = select(Deposit).where(Deposit.customer_id == customer.id, Deposit.status == "held")
@@ -340,10 +406,11 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None) -> Invo
         return inv
     if inv.paid:
         raise AccountingError("ابتدا پرداخت‌ها/بیعانه‌های این فاکتور را برگشت بزنید")
-    original = db.scalar(select(JournalEntry).where(JournalEntry.ref_type == "invoice", JournalEntry.ref_id == inv.id))
-    if original:
-        post(db, f"ابطال فاکتور {inv.number}", [
-            Leg(db.get(LedgerAccount, l.account_id), debit=l.credit, credit=l.debit, customer_id=l.customer_id, line_id=l.line_id)
+    for original in db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(["invoice", "commission"]),
+                                                         JournalEntry.ref_id == inv.id)):
+        post(db, f"ابطال {'فاکتور' if original.ref_type == 'invoice' else 'سهم پرسنل'} {inv.number}", [
+            Leg(db.get(LedgerAccount, l.account_id), debit=l.credit, credit=l.debit, customer_id=l.customer_id,
+                line_id=l.line_id, staff_id=l.staff_id)
             for l in original.lines
         ], "invoice_void", inv.id)
     inv.status = "void"

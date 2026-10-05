@@ -20,6 +20,8 @@ from ..models import (
     Payment,
     PaymentAccount,
     Service,
+    ServiceLine,
+    Staff,
 )
 from ..services import accounting, learning, scheduling, settings_store
 from ..services.accounting import AccountingError
@@ -63,7 +65,9 @@ class AppointmentIn(BaseModel):
 def _appt(db: Session, a: Appointment, customer: str | None = None) -> dict:
     svc = db.get(Service, a.service_id) if a.service_id else None
     deps = db.scalars(select(Deposit).where(Deposit.appointment_id == a.id)).all()
+    person = db.get(Staff, a.staff_id) if a.staff_id else None
     return {"id": a.id, "customer_id": a.customer_id, "customer": customer, "service_id": a.service_id,
+            "staff": person.full_name if person else None, "line": svc.line.name if svc else None,
             "service": svc.name if svc else None, "duration_minutes": a.duration_minutes or (svc.duration_minutes if svc else 60),
             "custom_duration": a.duration_minutes is not None,
             "staff_id": a.staff_id, "start_at": a.start_at.isoformat(timespec="minutes"), "status": a.status,
@@ -77,6 +81,7 @@ def _book(db: Session, customer: Customer, service_id: int | None, staff_id: int
     svc = db.get(Service, service_id) if service_id else None
     if svc and duration_minutes == svc.duration_minutes:
         duration_minutes = None  # same as the service default
+    staff_id = accounting.default_staff_id(db, service_id, staff_id)
     a = Appointment(customer_id=customer.id, service_id=service_id, staff_id=staff_id, start_at=start_at.replace(second=0, microsecond=0),
                     quoted_price=quoted_price if quoted_price is not None else (svc.base_price if svc else 0), notes=notes,
                     duration_minutes=duration_minutes)
@@ -187,9 +192,13 @@ def _dep(d: Deposit, name: str | None = None, db: Session | None = None) -> dict
     out = {"id": d.id, "customer_id": d.customer_id, "customer": name, "amount": d.amount, "status": d.status,
            "payment_account_id": d.payment_account_id, "service_id": d.service_id, "appointment_id": d.appointment_id,
            "received_at": d.received_at.isoformat(timespec="minutes"), "reference": d.reference, "source": d.source,
-           "applied_invoice_id": d.applied_invoice_id, "service_guess": d.service_guess, "notes": d.notes}
+           "applied_invoice_id": d.applied_invoice_id, "service_guess": d.service_guess, "notes": d.notes,
+           "staff_id": d.staff_id}
     if db is not None:
         svc = db.get(Service, d.service_id) if d.service_id else None
+        person = db.get(Staff, d.staff_id) if d.staff_id else None
+        out["staff"] = person.full_name if person else None
+        out["line"] = svc.line.name if svc else None
         appt = db.get(Appointment, d.appointment_id) if d.appointment_id else None
         out["service"] = svc.name if svc else None
         out["appointment_at"] = appt.start_at.isoformat(timespec="minutes") if appt else None
@@ -225,6 +234,7 @@ def create_deposit(body: DepositIn, db: Session = Depends(get_db), user=Depends(
     try:
         d = accounting.record_deposit(db, customer=c, amount=body.amount, payment_account=pa, received_at=body.received_at,
                                       reference=body.reference, service_id=service_id, appointment_id=appointment_id,
+                                      staff_id=body.staff_id,
                                       notes=body.notes, service_guess={"candidates": guess}, user=user)
     except AccountingError as exc:
         db.rollback()
@@ -302,12 +312,40 @@ class InvoiceIn(BaseModel):
     appointment_id: int | None = None
 
 
+_NAMES: dict[str, tuple[float, dict[int, str]]] = {}
+
+
+def _names(kind: str) -> dict[int, str]:
+    """Small 5-second cache of staff / line names so listing many invoices stays fast."""
+    import time
+
+    from ..core.db import SessionLocal
+    hit = _NAMES.get(kind)
+    if hit and time.monotonic() - hit[0] < 5:
+        return hit[1]
+    with SessionLocal() as db:
+        model = Staff if kind == "staff" else ServiceLine
+        names = {o.id: o.full_name if kind == "staff" else o.name for o in db.scalars(select(model))}
+    _NAMES[kind] = (time.monotonic(), names)
+    return names
+
+
+def _staff_names() -> dict[int, str]:
+    return _names("staff")
+
+
+def _line_names() -> dict[int, str]:
+    return _names("line")
+
+
 def _inv(i: Invoice, name: str | None = None) -> dict:
     return {"id": i.id, "number": i.number, "customer_id": i.customer_id, "customer": name, "issued_at": i.issued_at.isoformat(),
             "status": i.status, "subtotal": i.subtotal, "discount": i.discount, "total": i.total, "paid": i.paid,
             "due": i.total - i.paid, "source": i.source, "notes": i.notes,
             "items": [{"service_id": it.service_id, "line_id": it.line_id, "staff_id": it.staff_id, "description": it.description,
-                       "quantity": it.quantity, "unit_price": it.unit_price, "discount": it.discount, "amount": it.amount} for it in i.items]}
+                       "quantity": it.quantity, "unit_price": it.unit_price, "discount": it.discount, "amount": it.amount,
+                       "net_amount": it.net_amount, "commission_amount": it.commission_amount,
+                       "staff": _staff_names().get(it.staff_id), "line": _line_names().get(it.line_id)} for it in i.items]}
 
 
 @router.get("/invoices")

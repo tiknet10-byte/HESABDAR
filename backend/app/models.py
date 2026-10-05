@@ -170,6 +170,7 @@ class Deposit(TimestampMixin, Base):
     source: Mapped[str] = mapped_column(String(32), default="manual")
     applied_invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id"), nullable=True)
     service_guess: Mapped[dict] = mapped_column(JSON, default=dict)  # AI/learning suggestion
+    staff_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"), nullable=True)  # who will perform the service
     notes: Mapped[str] = mapped_column(Text, default="")
 
 
@@ -200,6 +201,9 @@ class InvoiceItem(Base):
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     unit_price: Mapped[int] = mapped_column(BigInteger)
     discount: Mapped[int] = mapped_column(BigInteger, default=0)
+    net_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # after invoice-level discount share
+    commission_percent: Mapped[float | None] = mapped_column(Float, nullable=True)  # staff % at issue time
+    commission_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # staff share (Rial)
     invoice: Mapped[Invoice] = relationship(back_populates="items")
 
     @property
@@ -260,6 +264,7 @@ class JournalLine(Base):
     credit: Mapped[int] = mapped_column(BigInteger, default=0)
     customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # service line dimension
+    staff_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # staff dimension (commissions, payouts)
     entry: Mapped[JournalEntry] = relationship(back_populates="lines")
 
 

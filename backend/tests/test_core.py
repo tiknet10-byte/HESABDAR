@@ -281,3 +281,27 @@ def test_backup_leaves_no_open_files(client, monkeypatch):
     r = client.post("/api/admin/reset", json={"scope": "transactions", "password": "Secret123", "confirm": "حذف"})
     assert r.status_code == 200, r.text
     assert leaks == []
+
+
+def test_staff_line_commission_and_payout(client, accounts):
+    line = client.post("/api/lines", json={"name": "آرایش دائم"}).json()
+    svc = client.post("/api/services", json={"line_id": line["id"], "name": "فیبروز ابرو", "base_price": 50_000_000}).json()
+    leila = client.post("/api/staff", json={"full_name": "لیلا تاجیک", "line_id": line["id"], "commission_percent": 40}).json()
+    assert [p["full_name"] for p in client.get(f"/api/staff?service_id={svc['id']}").json()] == ["لیلا تاجیک"]
+    # staff is picked automatically from the service's line (only one person in that line)
+    d = client.post("/api/deposits", json={"customer_name": "مشتری سهم", "customer_mobile": "09126660000", "amount": 10_000_000,
+                                           "payment_account_id": accounts["کارت پاسارگاد"], "service_id": svc["id"]}).json()
+    assert d["staff"] == "لیلا تاجیک" and d["line"] == "آرایش دائم"
+    inv = client.post("/api/invoices", json={"customer_id": d["customer_id"], "items": [{"service_id": svc["id"], "unit_price": 50_000_000}],
+                                             "discount": 10_000_000, "deposit_ids": [d["id"]],
+                                             "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 30_000_000}]}).json()
+    it = inv["items"][0]
+    assert it["staff"] == "لیلا تاجیک" and it["net_amount"] == 40_000_000 and it["commission_amount"] == 16_000_000
+    rep = client.get("/api/reports/staff-shares").json()
+    row = next(r for r in rep["staff"] if r["name"] == "لیلا تاجیک")
+    assert (row["revenue"], row["staff_share"], row["salon_share"], row["balance"]) == (40_000_000, 16_000_000, 24_000_000, 16_000_000)
+    assert next(l for l in rep["lines"] if l["name"] == "آرایش دائم")["salon_share"] == 24_000_000
+    r = client.post(f"/api/staff/{leila['id']}/payout", json={"amount": 6_000_000, "payment_account_id": accounts["کارت پاسارگاد"]}).json()
+    assert r["balance"] == 10_000_000
+    tb = client.get("/api/ledger/trial-balance").json()
+    assert tb["total_debit"] == tb["total_credit"]

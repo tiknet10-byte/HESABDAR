@@ -255,3 +255,61 @@ def invoice_item_rows(db: Session, start: date | None, end: date | None) -> list
                       .join(Invoice, Invoice.id == InvoiceItem.invoice_id).join(Customer, Customer.id == Invoice.customer_id)
                       .where(Invoice.issued_at.between(s, e), Invoice.status != "void")).all()
     return [dict(number=r[0], date=r[1].isoformat(), customer=r[2], service=r[3], qty=r[4], unit_price=r[5], discount=r[6]) for r in rows]
+
+
+def staff_shares(db: Session, start: date | None = None, end: date | None = None) -> dict:
+    """Who did what: revenue, staff share (commission) and salon share per staff member and per line.
+
+    Uses the commission recorded on each invoice item at issue time; older items without it fall back to
+    the staff member's current percent.
+    """
+    from ..services.accounting import STAFF_PAYABLE, account, staff_balance
+    from ..models import JournalEntry, JournalLine
+
+    s, e = _range(start, end)
+    staff = {p.id: p for p in db.scalars(select(Staff))}
+    lines = {l.id: l.name for l in db.scalars(select(ServiceLine))}
+    rows = db.execute(select(InvoiceItem, Invoice.subtotal, Invoice.total).join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+                      .where(Invoice.issued_at.between(s, e), Invoice.status != "void")).all()
+    per_staff: dict = {}
+    per_line: dict = {}
+    for it, subtotal, total in rows:
+        net = it.net_amount if it.net_amount is not None else (round(it.amount * total / subtotal) if subtotal else it.amount)
+        person = staff.get(it.staff_id)
+        if it.commission_amount is not None:
+            comm = it.commission_amount
+        else:
+            comm = round(net * (person.commission_percent or 0) / 100) if person else 0
+        key = it.staff_id or 0
+        r = per_staff.setdefault(key, {"staff_id": it.staff_id, "name": person.full_name if person else "بدون پرسنل",
+                                       "line": lines.get(person.line_id) if person and person.line_id else None,
+                                       "percent": person.commission_percent if person else 0,
+                                       "services": 0, "revenue": 0, "staff_share": 0, "salon_share": 0})
+        r["services"] += it.quantity
+        r["revenue"] += net
+        r["staff_share"] += comm
+        r["salon_share"] += net - comm
+        lk = it.line_id or 0
+        lr = per_line.setdefault(lk, {"line_id": it.line_id, "name": lines.get(it.line_id, "سایر"), "services": 0,
+                                      "revenue": 0, "staff_share": 0, "salon_share": 0})
+        lr["services"] += it.quantity
+        lr["revenue"] += net
+        lr["staff_share"] += comm
+        lr["salon_share"] += net - comm
+    # payouts in the period and outstanding balances
+    payable = account(db, STAFF_PAYABLE)
+    paid = dict(db.execute(select(JournalLine.staff_id, func.sum(JournalLine.debit))
+                           .join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+                           .where(JournalLine.account_id == payable.id, JournalEntry.ref_type == "staff_payout",
+                                  JournalEntry.at.between(s, e)).group_by(JournalLine.staff_id)).all())
+    for pid, p in staff.items():
+        if p.is_active and pid not in per_staff:
+            per_staff[pid] = {"staff_id": pid, "name": p.full_name, "line": lines.get(p.line_id), "percent": p.commission_percent,
+                              "services": 0, "revenue": 0, "staff_share": 0, "salon_share": 0}
+    for r in per_staff.values():
+        r["paid"] = int(paid.get(r["staff_id"]) or 0) if r["staff_id"] else 0
+        r["balance"] = staff_balance(db, r["staff_id"]) if r["staff_id"] else 0
+    staff_rows = sorted(per_staff.values(), key=lambda x: -x["revenue"])
+    totals = {k: sum(r[k] for r in staff_rows) for k in ("revenue", "staff_share", "salon_share", "paid", "balance")}
+    return {"period": {"start": s.date().isoformat(), "end": e.date().isoformat()}, "staff": staff_rows,
+            "lines": sorted(per_line.values(), key=lambda x: -x["revenue"]), "totals": totals}

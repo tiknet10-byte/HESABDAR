@@ -109,6 +109,7 @@ def create_line(body: LineIn, db: Session = Depends(get_db), user=Depends(requir
     db.flush()
     accounting.revenue_account_for_line(db, l.name)
     audit(db, "line.create", "line", l.id, body.model_dump(), user=user)
+    _names_changed()
     db.commit()
     return _line(l)
 
@@ -123,6 +124,7 @@ def update_line(lid: int, body: LineIn, db: Session = Depends(get_db), user=Depe
     for k, v in body.model_dump().items():
         setattr(l, k, v)
     audit(db, "line.update", "line", l.id, body.model_dump(), user=user)
+    _names_changed()
     db.commit()
     return _line(l)
 
@@ -140,6 +142,7 @@ def delete_line(lid: int, db: Session = Depends(get_db), user=Depends(require("s
     else:
         db.delete(l)
     audit(db, "line.delete", "line", lid, {"name": l.name, "archived": bool(used)}, user=user)
+    _names_changed()
     db.commit()
     return {"ok": True, "archived": bool(used)}
 
@@ -219,9 +222,35 @@ def classify(text: str, amount: int | None = None, customer_id: int | None = Non
 
 # ---------------------------------------------------------------- staff
 @router.get("/staff")
-def staff(db: Session = Depends(get_db), _=Depends(require("read"))):
-    return [{"id": p.id, "full_name": p.full_name, "mobile": p.mobile, "line_id": p.line_id,
-             "commission_percent": p.commission_percent, "is_active": p.is_active} for p in db.scalars(select(Staff).order_by(Staff.id))]
+def staff(line_id: int | None = None, service_id: int | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Staff list; filter by line, or by a service (= the staff of that service's line)."""
+    if service_id:
+        svc = db.get(Service, service_id)
+        line_id = svc.line_id if svc else None
+    q = select(Staff).order_by(Staff.id)
+    if line_id:
+        q = q.where(Staff.line_id == line_id)
+    lines = {l.id: l.name for l in db.scalars(select(ServiceLine))}
+    return [{"id": p.id, "full_name": p.full_name, "mobile": p.mobile, "line_id": p.line_id, "line": lines.get(p.line_id),
+             "commission_percent": p.commission_percent, "is_active": p.is_active} for p in db.scalars(q)]
+
+
+class PayoutIn(BaseModel):
+    amount: int
+    payment_account_id: int
+    description: str = ""
+
+
+@router.post("/staff/{pid}/payout")
+def staff_payout(pid: int, body: PayoutIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+    p = db.get(Staff, pid) or _404()
+    pa = db.get(PaymentAccount, body.payment_account_id) or _404()
+    try:
+        accounting.pay_staff(db, p, body.amount, pa, description=body.description, user=user)
+    except accounting.AccountingError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return {"ok": True, "balance": accounting.staff_balance(db, pid)}
 
 
 @router.post("/staff")
@@ -230,6 +259,7 @@ def create_staff(body: StaffIn, db: Session = Depends(get_db), user=Depends(requ
     db.add(p)
     db.flush()
     audit(db, "staff.create", "staff", p.id, body.model_dump(), user=user)
+    _names_changed()
     db.commit()
     return {"id": p.id, **body.model_dump()}
 
@@ -240,6 +270,7 @@ def update_staff(pid: int, body: StaffIn, db: Session = Depends(get_db), user=De
     for k, v in body.model_dump().items():
         setattr(p, k, v)
     audit(db, "staff.update", "staff", p.id, body.model_dump(), user=user)
+    _names_changed()
     db.commit()
     return {"id": p.id, **body.model_dump()}
 
@@ -313,6 +344,11 @@ def update_account(aid: int, body: AccountIn, db: Session = Depends(get_db), use
     audit(db, "account.update", "payment_account", a.id, {"name": a.name}, user=user)
     db.commit()
     return _account(a)
+
+
+def _names_changed() -> None:
+    from .finance import _NAMES
+    _NAMES.clear()
 
 
 def _404():  # noqa: ANN202

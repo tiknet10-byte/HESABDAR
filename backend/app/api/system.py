@@ -39,6 +39,11 @@ def daily(start: date | None = None, end: date | None = None, db: Session = Depe
     return reports.daily_series(db, start, end)
 
 
+@router.get("/reports/staff-shares")
+def staff_shares(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), _=Depends(require("reports"))):
+    return reports.staff_shares(db, start, end)
+
+
 @router.get("/reports/forecast")
 def forecast(days: int = 30, db: Session = Depends(get_db), _=Depends(require("reports"))):
     return reports.forecast(db, min(days, 180))

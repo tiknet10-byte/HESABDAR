@@ -19,6 +19,7 @@ import Reconciliation from "./pages/Reconciliation";
 import Reports from "./pages/Reports";
 import Scan from "./pages/Scan";
 import SettingsPage from "./pages/Settings";
+import StaffShares from "./pages/StaffShares";
 import { Loading } from "./components/ui";
 
 function VersionBanner() {
@@ -91,6 +92,7 @@ function App() {
                 <Route path="scan" element={<Scan />} />
                 <Route path="assistant" element={<Assistant />} />
                 <Route path="reports" element={<Reports />} />
+                <Route path="staff" element={<StaffShares />} />
                 <Route path="expenses" element={<Expenses />} />
                 <Route path="ledger" element={<Ledger />} />
                 <Route path="settings" element={<SettingsPage />} />

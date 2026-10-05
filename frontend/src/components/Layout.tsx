@@ -1,6 +1,6 @@
 import {
   BarChart3, Bell, BookOpenCheck, Bot, CalendarClock, Camera, HandCoins, LayoutDashboard, LogOut, Menu, Moon, Receipt,
-  ScanLine, Settings, Sun, Users, Wallet, X,
+  ScanLine, Settings, Sun, Users, UsersRound, Wallet, X,
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
@@ -33,6 +33,7 @@ const NAV: { group: string; items: Item[] }[] = [
     group: "مالی و گزارش",
     items: [
       { to: "/reports", label: "گزارش و پیش‌بینی", icon: <BarChart3 size={19} />, perm: "reports" },
+      { to: "/staff", label: "پرسنل و سهم‌ها", icon: <UsersRound size={19} />, perm: "reports" },
       { to: "/expenses", label: "هزینه‌ها", icon: <Wallet size={19} />, perm: "finance" },
       { to: "/ledger", label: "دفاتر حسابداری", icon: <BookOpenCheck size={19} />, perm: "finance" },
     ],

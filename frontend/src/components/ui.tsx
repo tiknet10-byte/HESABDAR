@@ -44,7 +44,7 @@ export function Stat({ label, value, hint, icon, tone = "violet" }: { label: str
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="muted text-xs font-medium">{label}</div>
-          <div className="num mt-2 truncate text-xl font-extrabold sm:text-2xl">{value}</div>
+          <div className="num mt-2 text-lg font-extrabold leading-snug sm:text-xl xl:text-2xl">{value}</div>
           {hint && <div className="muted mt-1 text-xs">{hint}</div>}
         </div>
         {icon && <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br text-white shadow-lg ${tones[tone]}`}>{icon}</div>}

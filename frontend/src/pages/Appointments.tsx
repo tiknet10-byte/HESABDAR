@@ -2,6 +2,7 @@ import { CalendarClock, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import BookingFields from "../components/Booking";
+import StaffSelect from "../components/StaffSelect";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
 import { Badge, Card, Empty, Field, Loading, Modal, PageHeader } from "../components/ui";
 import { api } from "../lib/api";
@@ -12,7 +13,6 @@ import { faDigits, formatJ } from "../lib/jalali";
 function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => void }) {
   const toast = useToast();
   const services = useApi<any[]>("/api/services").data ?? [];
-  const staff = useApi<any[]>("/api/staff").data ?? [];
   const [cust, setCust] = useState<CustomerChoice>(initial ? { customer_id: initial.customer_id, label: initial.customer } : {});
   const [f, setF] = useState({ service_id: initial?.service_id ?? 0, staff_id: initial?.staff_id ?? 0, start_at: initial?.start_at ?? "", notes: initial?.notes ?? "",
     duration_minutes: initial?.custom_duration ? initial.duration_minutes : 0 });
@@ -56,10 +56,8 @@ function AppointmentForm({ initial, onDone }: { initial?: any; onDone: () => voi
           </select>
         </Field>
         <Field label="پرسنل">
-          <select className="input" value={f.staff_id} onChange={(e) => setF({ ...f, staff_id: Number(e.target.value) })}>
-            <option value={0}>هر پرسنل آزاد</option>
-            {staff.filter((p) => p.is_active).map((p) => <option key={p.id} value={p.id}>{p.full_name}</option>)}
-          </select>
+          <StaffSelect serviceId={f.service_id || undefined} value={f.staff_id || undefined} emptyLabel="هر پرسنل آزاد"
+            onChange={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))} />
         </Field>
       </div>
       <Field label="زمان نوبت">
@@ -116,7 +114,8 @@ export default function Appointments() {
                   <span className="num rounded-xl bg-violet-500/10 px-2 py-1 text-center font-bold leading-tight text-violet-700 dark:text-violet-300">{faDigits(a.start_at.slice(11, 16))}<span className="block text-[10px] font-semibold opacity-70">تا {faDigits(endTime(a.start_at, a.duration_minutes ?? 60))}</span></span>
                   <div>
                     <div className="font-semibold">{a.customer}</div>
-                    <div className="muted text-xs">{a.service ?? "—"} · {faDigits(a.duration_minutes ?? 60)} دقیقه · {money(a.quoted_price)}</div>
+                    <div className="muted text-xs">{a.line ? `${a.line} / ` : ""}{a.service ?? "—"} · {faDigits(a.duration_minutes ?? 60)} دقیقه · {money(a.quoted_price)}</div>
+                    {a.staff && <div className="text-xs font-semibold text-violet-600 dark:text-violet-300">پرسنل: {a.staff}</div>}
                     {(a.deposits ?? []).length > 0 && <div className="mt-0.5 text-xs text-emerald-600">بیعانه: {a.deposits.map((d: any) => money(d.amount)).join(" + ")}</div>}
                   </div>
                 </div>

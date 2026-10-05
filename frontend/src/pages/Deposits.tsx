@@ -2,6 +2,7 @@ import { CalendarPlus, HandCoins, Plus, Sparkles } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import BookingFields from "../components/Booking";
+import StaffSelect from "../components/StaffSelect";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
 import JalaliPicker from "../components/JalaliPicker";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Stat, Tabs } from "../components/ui";
@@ -13,7 +14,6 @@ import { formatJ, toLocalIso } from "../lib/jalali";
 function DepositForm({ onDone }: { onDone: () => void }) {
   const toast = useToast();
   const services = useApi<any[]>("/api/services").data ?? [];
-  const staff = useApi<any[]>("/api/staff").data ?? [];
   const accounts = useApi<any[]>("/api/accounts").data ?? [];
   const settings = useApi<any>("/api/settings").data;
   const [cust, setCust] = useState<CustomerChoice>({});
@@ -79,12 +79,18 @@ function DepositForm({ onDone }: { onDone: () => void }) {
           ))}
         </div>
       )}
-      <Field label="بیعانه برای کدام خدمت است؟">
-        <select className="input" value={f.service_id} onChange={(e) => setF({ ...f, service_id: Number(e.target.value) })}>
-          <option value={0}>نامشخص</option>
-          {services.map((s) => <option key={s.id} value={s.id}>{s.line} / {s.name}</option>)}
-        </select>
-      </Field>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="بیعانه برای کدام خدمت است؟">
+          <select className="input" value={f.service_id} onChange={(e) => setF({ ...f, service_id: Number(e.target.value) })}>
+            <option value={0}>نامشخص</option>
+            {services.map((s) => <option key={s.id} value={s.id}>{s.line} / {s.name}</option>)}
+          </select>
+        </Field>
+        <Field label="پرسنل انجام‌دهنده">
+          <StaffSelect serviceId={f.service_id || undefined} value={f.staff_id || undefined} emptyLabel="نامشخص"
+            onChange={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))} />
+        </Field>
+      </div>
 
       <div className="rounded-2xl p-4" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
         <label className="flex items-center gap-2 font-semibold">
@@ -94,10 +100,6 @@ function DepositForm({ onDone }: { onDone: () => void }) {
         {!book && <div className="muted mt-1 text-xs">{auto && f.service_id ? "نوبت‌دهی خودکار فعال است: اولین نوبت خالی به‌صورت خودکار رزرو می‌شود." : "می‌توانید بعداً از صفحه بیعانه‌ها یا نوبت‌ها، نوبت را تعیین و به این بیعانه وصل کنید."}</div>}
         {book && (
           <div className="mt-3 space-y-3">
-            <select className="input" value={f.staff_id} onChange={(e) => setF({ ...f, staff_id: Number(e.target.value) })}>
-              <option value={0}>پرسنل (اختیاری)</option>
-              {staff.filter((p) => p.is_active).map((p) => <option key={p.id} value={p.id}>{p.full_name}</option>)}
-            </select>
             <BookingFields serviceId={f.service_id || undefined} staffId={f.staff_id || undefined} value={bookAt} onChange={setBookAt}
               onStaff={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))} onDuration={setBookDur} />
           </div>
@@ -170,7 +172,7 @@ export default function Deposits() {
         <div className="overflow-x-auto">
           {!data ? <Loading /> : data.length === 0 ? <Empty /> : (
             <table className="table">
-              <thead><tr><th>مشتری</th><th>مبلغ</th><th>تاریخ دریافت</th><th>برای خدمت</th><th>نوبت</th><th>وضعیت</th><th></th></tr></thead>
+              <thead><tr><th>مشتری</th><th>مبلغ</th><th>تاریخ دریافت</th><th>برای خدمت</th><th>پرسنل</th><th>نوبت</th><th>وضعیت</th><th></th></tr></thead>
               <tbody>
                 {data.map((d) => (
                   <tr key={d.id}>
@@ -178,6 +180,7 @@ export default function Deposits() {
                     <td className="num font-semibold">{money(d.amount)}</td>
                     <td className="num text-xs">{formatJ(d.received_at)}</td>
                     <td>{d.service ?? (d.service_guess?.candidates?.[0] ? <span className="muted">حدس: {d.service_guess.candidates[0].service}</span> : <span className="muted">نامشخص</span>)}</td>
+                    <td className="text-xs">{d.staff ?? <span className="muted">—</span>}{d.line && <div className="muted">{d.line}</div>}</td>
                     <td className="text-xs">{d.appointment_at ? formatJ(d.appointment_at) : d.status === "held" ? <button className="btn btn-sm" onClick={() => setBooking(d)}><CalendarPlus size={14} />تعیین نوبت</button> : "—"}</td>
                     <td><Badge status={d.status} /></td>
                     <td className="whitespace-nowrap">

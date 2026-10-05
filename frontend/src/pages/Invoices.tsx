@@ -1,6 +1,7 @@
 import { AlertTriangle, Plus, Printer, Receipt, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import StaffSelect from "../components/StaffSelect";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Tabs } from "../components/ui";
 import { api } from "../lib/api";
@@ -14,7 +15,6 @@ type Pay = { payment_account_id: number; amount: number };
 export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => void; preset?: CustomerChoice; appointmentId?: number }) {
   const toast = useToast();
   const services = useApi<any[]>("/api/services").data ?? [];
-  const staff = useApi<any[]>("/api/staff").data ?? [];
   const accounts = (useApi<any[]>("/api/accounts").data ?? []).filter((a) => a.is_active);
   const [cust, setCust] = useState<CustomerChoice>(preset ?? {});
   const [items, setItems] = useState<Item[]>([{ unit_price: 0, quantity: 1 }]);
@@ -95,10 +95,8 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
                 <optgroup key={line} label={line}>{list.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}</optgroup>
               ))}
             </select>
-            <select className="input col-span-6 sm:col-span-3" value={it.staff_id ?? ""} onChange={(e) => setItem(i, { staff_id: Number(e.target.value) || undefined })}>
-              <option value="">پرسنل</option>
-              {staff.map((p) => <option key={p.id} value={p.id}>{p.full_name}</option>)}
-            </select>
+            <StaffSelect className="input col-span-6 sm:col-span-3" serviceId={it.service_id} value={it.staff_id}
+              onChange={(id) => setItems((all) => all.map((x, j) => (j === i ? { ...x, staff_id: id } : x)))} />
             <div className="col-span-5 sm:col-span-3"><MoneyInput value={it.unit_price} onChange={(v) => setItem(i, { unit_price: v })} /></div>
             <button className="btn btn-ghost btn-sm col-span-1" onClick={() => setItems(items.filter((_, j) => j !== i))} aria-label="حذف"><Trash2 size={16} /></button>
           </div>
@@ -172,7 +170,12 @@ function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
       </div>
       <table className="table">
         <thead><tr><th>خدمت</th><th>مبلغ</th></tr></thead>
-        <tbody>{data.items.map((it: any, i: number) => <tr key={i}><td>{it.description}</td><td className="num">{money(it.amount)}</td></tr>)}</tbody>
+        <tbody>{data.items.map((it: any, i: number) => (
+          <tr key={i}>
+            <td>{it.description}<div className="muted text-xs">{[it.line, it.staff].filter(Boolean).join(" · ")}</div></td>
+            <td className="num">{money(it.amount)}{it.commission_amount ? <div className="muted text-xs">سهم پرسنل: {money(it.commission_amount)}</div> : null}</td>
+          </tr>
+        ))}</tbody>
       </table>
       <div className="space-y-1">
         {data.discount > 0 && <div className="flex justify-between"><span className="muted">تخفیف</span><span className="num">{money(data.discount)}</span></div>}
@@ -231,7 +234,7 @@ export default function Invoices() {
                     <td className="num font-semibold">{i.number}</td>
                     <td>{i.customer}</td>
                     <td className="muted num">{jdatetime(i.issued_at)}</td>
-                    <td className="max-w-56 truncate">{i.items.map((x: any) => x.description).join("، ")}</td>
+                    <td className="max-w-64 truncate">{i.items.map((x: any) => x.description + (x.staff ? ` (${x.staff})` : "")).join("، ")}</td>
                     <td className="num font-semibold">{money(i.total)}</td>
                     <td className="num">{i.due ? money(i.due) : "—"}</td>
                     <td><Badge status={i.status} /></td>
