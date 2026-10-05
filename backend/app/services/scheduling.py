@@ -6,7 +6,8 @@ A time is bookable only when ALL of these hold (the server enforces them; the UI
   * the service line still has capacity (= number of active staff in that line, at least 1);
   * the chosen staff member is free (also across other lines);
   * the customer has no other appointment at the same time.
-Appointments that are booked OR already done occupy their time; cancelled / no-show free it.
+Appointments that are booked OR already done occupy their time; cancelled / no-show free it, and so does an
+appointment settled earlier than its booked day (its reserved time is released for other customers).
 """
 from __future__ import annotations
 
@@ -52,8 +53,9 @@ class _Calendar:
         self.capacity = max(1, len(self.line_staff))
         self.line_services = set(db.scalars(select(Service.id).where(Service.line_id == svc.line_id)))
         cache: dict[int, int] = {}
-        q = select(Appointment).where(Appointment.status.in_(OCCUPYING), Appointment.start_at >= start - timedelta(days=1),
-                                      Appointment.start_at <= end)
+        # an appointment done earlier than booked (original_start_at set) is history: it holds no time any more
+        q = select(Appointment).where(Appointment.status.in_(OCCUPYING), Appointment.original_start_at.is_(None),
+                                      Appointment.start_at >= start - timedelta(days=1), Appointment.start_at <= end)
         if exclude_id:
             q = q.where(Appointment.id != exclude_id)
         self.intervals = [(a.start_at, a.start_at + timedelta(minutes=appointment_minutes(db, a, cache)), a) for a in db.scalars(q)]

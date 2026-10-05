@@ -34,10 +34,11 @@ from ..models import (
     ServiceLine,
     Setting,
     Staff,
+    WaitlistEntry,
 )
 
 # order matters (foreign keys): children first
-TRANSACTIONS = [InboundReceipt, BankTransaction, Payment, Deposit, InvoiceItem, Invoice, Appointment, Expense,
+TRANSACTIONS = [WaitlistEntry, InboundReceipt, BankTransaction, Payment, Deposit, InvoiceItem, Invoice, Appointment, Expense,
                 JournalLine, JournalEntry, Alert, ConversationMessage, ConversationState, ImportBatch]
 SCOPES = {
     "transactions": "همه تراکنش‌ها (فاکتور، بیعانه، دریافت، هزینه، نوبت، رسید، اسناد) - مشتریان، خدمات و تنظیمات می‌مانند",

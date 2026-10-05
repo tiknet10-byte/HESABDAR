@@ -11,12 +11,13 @@ type Props = {
   minuteStep?: number;
   clearable?: boolean;
   futureOnly?: boolean; // disable past days and, for today, past hours/minutes (bookings)
+  pastOnly?: boolean; // disable future days/times (money already received or paid)
 };
 
 const HOURS = Array.from({ length: 16 }, (_, i) => i + 7); // 07..22
 
 /** Persian (Jalali) date & time picker. */
-export default function JalaliPicker({ value, onChange, withTime = true, placeholder = "انتخاب تاریخ", minuteStep = 5, clearable, futureOnly }: Props) {
+export default function JalaliPicker({ value, onChange, withTime = true, placeholder = "انتخاب تاریخ", minuteStep = 5, clearable, futureOnly, pastOnly }: Props) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const pop = useRef<HTMLDivElement>(null);
@@ -84,14 +85,18 @@ export default function JalaliPicker({ value, onChange, withTime = true, placeho
 
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  // "past" here means "not allowed": before now for bookings, after now for money dates
   const dayIsPast = (jd: number) => {
-    if (!futureOnly) return false;
+    if (!futureOnly && !pastOnly) return false;
     const [gy, gm, gd] = toGregorian(view.jy, view.jm, jd);
-    return new Date(gy, gm - 1, gd).getTime() < startOfToday;
+    const t = new Date(gy, gm - 1, gd).getTime();
+    return futureOnly ? t < startOfToday : t > startOfToday;
   };
   const selIsToday = !!current && new Date(current.getFullYear(), current.getMonth(), current.getDate()).getTime() === startOfToday;
-  const hourIsPast = (h: number) => futureOnly && selIsToday && h < now.getHours();
-  const minuteIsPast = (m: number) => futureOnly && selIsToday && !!current && current.getHours() === now.getHours() && m < now.getMinutes();
+  const hourIsPast = (h: number) => selIsToday && (futureOnly ? h < now.getHours() : !!pastOnly && h > now.getHours());
+  const minuteIsPast = (m: number) => selIsToday && !!current && current.getHours() === now.getHours()
+    && (futureOnly ? m < now.getMinutes() : !!pastOnly && m > now.getMinutes());
+  const latest = () => new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), Math.floor(now.getMinutes() / minuteStep) * minuteStep);
   // first allowed time today, rounded up to the minute step
   const nextFree = () => {
     const d = new Date(now.getTime() + minuteStep * 60000);
@@ -105,6 +110,7 @@ export default function JalaliPicker({ value, onChange, withTime = true, placeho
     const mi = current ? current.getMinutes() : 0;
     let d = new Date(gy, gm - 1, gd, h, mi);
     if (futureOnly && d.getTime() < now.getTime()) d = nextFree();
+    if (pastOnly && d.getTime() > now.getTime()) d = latest();
     onChange(toLocalIso(d));
     if (!withTime) setOpen(false);
   };
@@ -112,6 +118,7 @@ export default function JalaliPicker({ value, onChange, withTime = true, placeho
     const d = current ?? new Date();
     let nd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h ?? d.getHours(), m ?? d.getMinutes());
     if (futureOnly && nd.getTime() < now.getTime()) nd = nextFree();
+    if (pastOnly && nd.getTime() > now.getTime()) nd = latest();
     onChange(toLocalIso(nd));
   };
   const minutes = Array.from({ length: 60 / minuteStep }, (_, i) => i * minuteStep);
@@ -148,7 +155,7 @@ export default function JalaliPicker({ value, onChange, withTime = true, placeho
                 const friday = i % 7 === 6;
                 const past = dayIsPast(d);
                 return (
-                  <button type="button" key={d} onClick={() => pick(d)} disabled={past} title={past ? "گذشته" : undefined}
+                  <button type="button" key={d} onClick={() => pick(d)} disabled={past} title={past ? (pastOnly ? "تاریخ آینده مجاز نیست" : "گذشته") : undefined}
                     className={`aspect-square rounded-xl text-sm font-semibold transition ${past ? "cursor-not-allowed opacity-25 line-through" : isSel ? "bg-gradient-to-br from-pink-500 to-violet-600 text-white shadow-md shadow-violet-500/30" : isToday ? "ring-2 ring-violet-400" : "hover:bg-violet-500/10"} ${!isSel && friday && !past ? "text-rose-500" : ""}`}>
                     {faDigits(d)}
                   </button>

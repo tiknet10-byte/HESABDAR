@@ -63,7 +63,7 @@ function DepositForm({ onDone }: { onDone: () => void }) {
         </Field>
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="تاریخ و ساعت دریافت"><JalaliPicker value={f.received_at} onChange={(v) => setF({ ...f, received_at: v })} /></Field>
+        <Field label="تاریخ و ساعت دریافت"><JalaliPicker pastOnly value={f.received_at} onChange={(v) => setF({ ...f, received_at: v })} /></Field>
         <Field label="شماره پیگیری"><input className="input num" dir="ltr" value={f.reference} onChange={(e) => setF({ ...f, reference: e.target.value })} /></Field>
       </div>
       <Field label="توضیحات / متن پیام مشتری" hint="سیستم از روی متن و مبلغ حدس می‌زند بیعانه برای کدام خدمت است.">

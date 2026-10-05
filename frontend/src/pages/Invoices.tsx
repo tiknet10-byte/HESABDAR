@@ -7,7 +7,8 @@ import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Tabs
 import { api } from "../lib/api";
 import { ACCOUNT_KINDS, jdatetime, money } from "../lib/format";
 import JalaliPicker from "../components/JalaliPicker";
-import { formatJ, parseLocal, toLocalIso } from "../lib/jalali";
+import { faDigits, formatJ, toLocalIso } from "../lib/jalali";
+import { announceFreed } from "../components/Waitlist";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
 
 type Item = { service_id?: number; description?: string; unit_price: number; quantity: number; staff_id?: number };
@@ -34,33 +35,66 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
     api<any[]>(`/api/appointments?customer_id=${cust.customer_id}&status=booked`).then(setAppts).catch(() => setAppts([]));
   }, [cust.customer_id]);
 
+  const day = (iso: string) => iso.slice(0, 10);
+  const sameDay = (a: any) => day(a.start_at) === day(issuedAt);
+  // default: only an appointment booked for the invoice's day is "done"; other days are kept (changing that needs confirmation)
   const smartDefault = (a: any): "done" | "keep" => {
-    if (appointmentId === a.id) return "done";
+    if (appointmentId) return appointmentId === a.id ? "done" : "keep";
+    if (!sameDay(a)) return "keep";
+    const today = appts.filter(sameDay).sort((x, y) => x.start_at.localeCompare(y.start_at));
+    if (today.length === 1) return "done";
     const services = new Set(items.map((i) => i.service_id).filter(Boolean));
-    if (services.has(a.service_id)) {
-      // only the earliest open appointment of a service is settled by this invoice
-      const first = appts.filter((x) => x.service_id === a.service_id).sort((x, y) => x.start_at.localeCompare(y.start_at))[0];
-      return first?.id === a.id ? "done" : "keep";
-    }
-    const matchedAny = appts.some((x) => services.has(x.service_id));
-    const near = appts.filter((x) => Math.abs(parseLocal(x.start_at).getTime() - parseLocal(issuedAt).getTime()) < 36 * 3600 * 1000);
-    return !matchedAny && near.length === 1 && near[0].id === a.id ? "done" : "keep";
+    return today.find((x) => services.has(x.service_id))?.id === a.id ? "done" : "keep";
   };
   const choice = (a: any) => override[a.id] ?? smartDefault(a);
-  const setChoice = (a: any, c: "done" | "keep") => {
-    setOverride((o) => ({ ...o, [a.id]: c }));
-    if (c === "done" && a.service_id && !items.some((i) => i.service_id === a.service_id)) {
-      const row = { service_id: a.service_id, description: a.service, unit_price: a.quoted_price, quantity: 1, staff_id: a.staff_id ?? undefined };
-      setItems((all) => (all.length === 1 && !all[0].service_id && !all[0].description ? [row] : [...all, row]));
-    }
-  };
   const doneIds = appts.filter((a) => choice(a) === "done").map((a) => a.id);
+  // appointments on another day than the invoice need an explicit "yes" (keyed by invoice day, so changing the date asks again)
+  const [confirmed, setConfirmed] = useState<string[]>([]);
+  const [ask, setAsk] = useState<{ list: any[]; then?: () => void } | null>(null);
+  const confirmKey = (a: any) => `${a.id}@${day(issuedAt)}`;
+  const needsConfirm = (a: any) => !sameDay(a) && !confirmed.includes(confirmKey(a));
+  const setChoice = (a: any, c: "done" | "keep") => {
+    if (c === "done" && needsConfirm(a)) return setAsk({ list: [a] });
+    setOverride((o) => ({ ...o, [a.id]: c }));
+  };
+
+  // a "done" appointment brings its service into the invoice (once); un-ticking removes a row it added
+  const [autoRows, setAutoRows] = useState<Record<number, number>>({}); // appointment id -> service id it added
+  const [seen, setSeen] = useState<number[]>([]);
+  const doneKey = doneIds.join(",");
+  useEffect(() => {
+    const fresh = appts.filter((a) => doneIds.includes(a.id) && !seen.includes(a.id));
+    const gone = Object.keys(autoRows).map(Number).filter((id) => !doneIds.includes(id));
+    if (!fresh.length && !gone.length) return;
+    setSeen((x) => [...x.filter((id) => !gone.includes(id)), ...fresh.map((a) => a.id)]);
+    const add = fresh.filter((a) => a.service_id && !items.some((i) => i.service_id === a.service_id));
+    setAutoRows((r) => {
+      const next = { ...r };
+      gone.forEach((id) => delete next[id]);
+      add.forEach((a) => (next[a.id] = a.service_id));
+      return next;
+    });
+    setItems((all) => {
+      let rows = all.filter((i) => i.service_id || i.description);
+      for (const id of gone) {
+        const k = rows.findIndex((i) => i.service_id === autoRows[id]);
+        if (k >= 0) rows = rows.filter((_, j) => j !== k);
+      }
+      rows = [...rows, ...add.map((a) => ({ service_id: a.service_id, description: a.service, unit_price: a.quoted_price, quantity: 1, staff_id: a.staff_id ?? undefined }))];
+      return rows.length ? rows : [{ unit_price: 0, quantity: 1 }];
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doneKey, appts]);
+  useEffect(() => {
+    setSeen([]);
+    setAutoRows({});
+    setConfirmed([]);
+  }, [cust.customer_id]);
 
   useEffect(() => {
     if (!appointmentId) return;
     api(`/api/appointments/${appointmentId}`).then((a) => {
       setCust({ customer_id: a.customer_id, label: `${a.customer}${a.customer_mobile ? " · " + a.customer_mobile : ""}` });
-      if (a.service_id) setItems([{ service_id: a.service_id, description: a.service, unit_price: a.quoted_price, quantity: 1, staff_id: a.staff_id ?? undefined }]);
       setPicked(a.deposits.filter((d: any) => d.status === "held").map((d: any) => d.id));
     }).catch(() => {});
   }, [appointmentId]);
@@ -96,14 +130,21 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   const setItem = (i: number, patch: Partial<Item>) => setItems(items.map((x, j) => (j === i ? { ...x, ...patch } : x)));
 
   async function save() {
+    const unconfirmed = appts.filter((a) => doneIds.includes(a.id) && needsConfirm(a));
+    if (unconfirmed.length) return setAsk({ list: unconfirmed, then: () => send() });
+    return send();
+  }
+
+  async function send() {
     setBusy(true);
     try {
       const inv = await api("/api/invoices", {
         body: { ...cust, items: items.filter((i) => i.service_id || i.description), discount, apply_deposits: selected.length > 0, deposit_ids: selected.map((d) => d.id),
           payments: pays.filter((p) => p.amount > 0), appointment_id: appointmentId ?? null, appointment_ids: doneIds, issued_at: issuedAt },
       });
-      toast(`فاکتور ${inv.number} ثبت شد${doneIds.length ? ` و ${doneIds.length} نوبت انجام‌شده ثبت شد` : ""}`);
+      toast(`فاکتور ${inv.number} ثبت شد${doneIds.length ? ` و ${faDigits(doneIds.length)} نوبت انجام‌شده ثبت شد` : ""}`);
       onDone();
+      announceFreed(inv.freed);
     } catch (e: any) {
       toast(e.message, "error");
     } finally {
@@ -115,19 +156,20 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
     <div className="space-y-5">
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="sm:col-span-2"><Field label="مشتری"><CustomerPicker value={cust} onChange={setCust} /></Field></div>
-        <Field label="تاریخ فاکتور"><JalaliPicker value={issuedAt} onChange={(v) => setIssuedAt(v || toLocalIso(new Date()))} /></Field>
+        <Field label="تاریخ فاکتور"><JalaliPicker pastOnly value={issuedAt} onChange={(v) => setIssuedAt(v || toLocalIso(new Date()))} /></Field>
       </div>
 
       {appts.length > 0 && (
         <div className="space-y-2 rounded-2xl border p-3 text-sm" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
           <div className="font-bold">نوبت‌های باز این مشتری</div>
-          <div className="muted text-xs">نوبتی که این فاکتور برای آن است «انجام شد» ثبت می‌شود؛ بقیه برای زمان خودشان حفظ می‌شوند.</div>
+          <div className="muted text-xs">نوبتی که این فاکتور برای آن است «انجام شد» ثبت می‌شود و خدمتش خودکار به فاکتور اضافه می‌شود؛ بقیه برای زمان خودشان حفظ می‌شوند. نوبت‌های روزهای دیگر فقط با تأیید شما انجام‌شده ثبت می‌شوند.</div>
           {appts.map((a) => {
             const c = choice(a);
             return (
               <div key={a.id} className={`flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-2 ${c === "done" ? "bg-emerald-500/10" : ""}`}>
                 <div>
                   <div className="font-semibold">{formatJ(a.start_at)}</div>
+                  {!sameDay(a) && <div className="text-[11px] font-semibold text-amber-600">⚠ روز دیگری غیر از تاریخ فاکتور{day(a.start_at) > day(issuedAt) ? " - اگر زودتر انجام شده، نوبتش آزاد می‌شود" : ""}</div>}
                   <div className="muted text-xs">{[a.line, a.service, a.staff].filter(Boolean).join(" · ")}{a.deposits?.length ? ` · بیعانه ${a.deposits.map((d: any) => money(d.amount)).join(" + ")}` : ""}</div>
                 </div>
                 <div className="flex gap-1">
@@ -214,6 +256,40 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
         {paid !== due && <div className="mt-1 flex justify-between text-amber-600"><span>مانده پس از دریافت</span><span className="num">{money(due - paid)}</span></div>}
       </div>
       <button className="btn btn-primary w-full py-3" disabled={busy || !subtotal || !(cust.customer_id || cust.customer_name || cust.customer_mobile)} onClick={save}>ثبت فاکتور</button>
+
+      <Modal open={!!ask} onClose={() => setAsk(null)} title="نوبت در روز دیگری است - تأیید کنید">
+        {ask && (
+          <div className="space-y-4 text-sm">
+            {ask.list.map((a) => {
+              const early = day(a.start_at) > day(issuedAt);
+              return (
+                <div key={a.id} className="space-y-1 rounded-2xl bg-amber-500/10 p-3">
+                  <div className="flex items-center gap-2 font-bold text-amber-700 dark:text-amber-300"><AlertTriangle size={16} />{a.service ?? "نوبت"}{a.staff ? ` · ${a.staff}` : ""}</div>
+                  <div>نوبت این مشتری برای <b>{formatJ(a.start_at)}</b> است، اما تاریخ فاکتور <b>{formatJ(issuedAt, false)}</b> است.</div>
+                  {early ? (
+                    <div>یعنی خدمت <b>زودتر از نوبت</b> انجام شده. با تأیید، نوبت <b>{formatJ(a.start_at, false)}</b> آزاد می‌شود تا به مشتری بعدی (مثلاً از لیست انتظار VIP) داده شود.</div>
+                  ) : (
+                    <div>این نوبت در گذشته بوده و هنوز «انجام شد» ثبت نشده؛ با تأیید، همان نوبت انجام‌شده و تسویه‌شده ثبت می‌شود.</div>
+                  )}
+                </div>
+              );
+            })}
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button className="btn btn-primary" onClick={() => {
+                const { list, then } = ask;
+                setConfirmed((c) => [...c, ...list.map(confirmKey)]);
+                setOverride((o) => ({ ...o, ...Object.fromEntries(list.map((a) => [a.id, "done" as const])) }));
+                setAsk(null);
+                if (then) setTimeout(then, 0);
+              }}>{ask.list.some((a) => day(a.start_at) > day(issuedAt)) ? "بله، انجام شد و نوبت آزاد شود" : "بله، همین نوبت انجام شد"}</button>
+              <button className="btn" onClick={() => {
+                setOverride((o) => ({ ...o, ...Object.fromEntries(ask.list.map((a) => [a.id, "keep" as const])) }));
+                setAsk(null);
+              }}>خیر، نوبت برای زمان خودش حفظ شود</button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

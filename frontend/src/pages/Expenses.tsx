@@ -47,7 +47,7 @@ export default function Expenses() {
           <Field label="دسته"><select className="input" value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>{CATS.map((c) => <option key={c}>{c}</option>)}</select></Field>
           <Field label="مبلغ"><MoneyInput value={f.amount} onChange={(v) => setF({ ...f, amount: v })} /></Field>
           <Field label="پرداخت از"><select className="input" value={f.payment_account_id || accounts[0]?.id} onChange={(e) => setF({ ...f, payment_account_id: Number(e.target.value) })}>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
-          <Field label="تاریخ"><JalaliPicker value={f.spent_at} onChange={(v) => setF({ ...f, spent_at: v })} /></Field>
+          <Field label="تاریخ"><JalaliPicker pastOnly value={f.spent_at} onChange={(v) => setF({ ...f, spent_at: v })} /></Field>
           <Field label="شرح"><input className="input" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></Field>
           <button className="btn btn-primary w-full" disabled={!f.amount} onClick={save}>ثبت</button>
         </div>

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import BookingFields, { type BookingState } from "../components/Booking";
 import StaffSelect from "../components/StaffSelect";
+import { announceFreed, WAITLIST_CHANGED, WaitlistPanel } from "../components/Waitlist";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
 import { Badge, Card, Empty, Field, Loading, Modal, PageHeader } from "../components/ui";
 import { api } from "../lib/api";
@@ -99,8 +100,20 @@ export default function Appointments() {
   const [edit, setEdit] = useState<any>(null);
   const groups = (data ?? []).reduce((g: Record<string, any[]>, a) => ((g[a.start_at.slice(0, 10)] ||= []).push(a), g), {});
 
-  async function setStatus(id: number, status: string) {
-    await api(`/api/appointments/${id}?status=${status}`, { method: "PATCH" });
+  const toast = useToast();
+  useEffect(() => {
+    window.addEventListener(WAITLIST_CHANGED, reload); // a freed time was given to a waiting customer
+    return () => window.removeEventListener(WAITLIST_CHANGED, reload);
+  }, [reload]);
+  async function setStatus(a: any, status: string) {
+    if (status === "cancelled" && !window.confirm(`نوبت ${a.customer} (${formatJ(a.start_at)}) لغو شود؟`)) return;
+    try {
+      const r = await api(`/api/appointments/${a.id}?status=${status}`, { method: "PATCH" });
+      toast(status === "cancelled" ? "نوبت لغو شد" : "ثبت شد");
+      announceFreed([r.freed]);
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
     reload();
   }
 
@@ -108,6 +121,7 @@ export default function Appointments() {
     <div className="space-y-5">
       <PageHeader title="نوبت‌ها" subtitle="رزروهای پیش رو؛ پس از انجام خدمت، فاکتور صادر و بیعانه کسر می‌شود" icon={<CalendarClock size={22} />}
         actions={<button className="btn btn-primary" onClick={() => setOpen(true)}><Plus size={16} />نوبت جدید</button>} />
+      <WaitlistPanel onBooked={reload} />
       {!data ? <Loading /> : data.length === 0 ? <Card><Empty text="نوبتی ثبت نشده" /></Card> : Object.entries(groups).map(([day, list]) => (
         <Card key={day} title={formatJ(day + "T12:00", false)}>
           <div className="space-y-2">
@@ -119,6 +133,7 @@ export default function Appointments() {
                     <div className="font-semibold">{a.customer}</div>
                     <div className="muted text-xs">{a.line ? `${a.line} / ` : ""}{a.service ?? "—"} · {faDigits(a.duration_minutes ?? 60)} دقیقه · {money(a.quoted_price)}</div>
                     {a.staff && <div className="text-xs font-semibold text-violet-600 dark:text-violet-300">پرسنل: {a.staff}</div>}
+                    {a.original_start_at && <div className="text-xs text-amber-600">زودتر انجام شد؛ نوبت اصلی {formatJ(a.original_start_at)} آزاد شد</div>}
                     {(a.deposits ?? []).length > 0 && <div className="mt-0.5 text-xs text-emerald-600">بیعانه: {a.deposits.map((d: any) => money(d.amount)).join(" + ")}</div>}
                   </div>
                 </div>
@@ -129,8 +144,8 @@ export default function Appointments() {
                     <>
                       <Link className="btn btn-sm btn-primary" to={`/invoices?new=1&appointment=${a.id}`}>صدور فاکتور</Link>
                       <button className="btn btn-sm" onClick={() => setEdit(a)}>تغییر زمان</button>
-                      <button className="btn btn-sm" onClick={() => setStatus(a.id, "no_show")}>نیامد</button>
-                      <button className="btn btn-sm" onClick={() => setStatus(a.id, "cancelled")}>لغو</button>
+                      <button className="btn btn-sm" onClick={() => setStatus(a, "no_show")}>نیامد</button>
+                      <button className="btn btn-sm" onClick={() => setStatus(a, "cancelled")}>لغو</button>
                     </>
                   )}
                 </div>

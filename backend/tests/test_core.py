@@ -314,6 +314,7 @@ def _future_slot(client, service_id, days):
 
 
 def test_invoice_settles_customer_appointment_and_date(client, accounts, services):
+    from datetime import datetime, timedelta
     svc = services["مانیکور"]
     a1 = client.post("/api/appointments", json={"customer_name": "میلاد تهمتن", "customer_mobile": "09171353630", "service_id": svc["id"],
                                                 "start_at": _future_slot(client, svc["id"], 1)}).json()
@@ -321,14 +322,62 @@ def test_invoice_settles_customer_appointment_and_date(client, accounts, service
                                                 "start_at": _future_slot(client, svc["id"], 15)}).json()
     mine = client.get(f"/api/appointments?customer_id={a1['customer_id']}&status=booked").json()
     assert [x["id"] for x in mine] == [a1["id"], a2["id"]]
-    inv = client.post("/api/invoices", json={"customer_id": a1["customer_id"], "issued_at": "2026-10-05T18:30:00",
-                                             "items": [{"service_id": svc["id"], "unit_price": 3_000_000}], "appointment_ids": [a1["id"]],
-                                             "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 3_000_000}]}).json()
-    assert inv["issued_at"].startswith("2026-10-05T18:30")
+    body = {"customer_id": a1["customer_id"], "items": [{"service_id": svc["id"], "unit_price": 3_000_000}], "appointment_ids": [a1["id"]],
+            "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 3_000_000}]}
+    # money cannot be received in the future
+    future = client.post("/api/invoices", json={**body, "issued_at": (datetime.now() + timedelta(days=1)).isoformat()})
+    assert future.status_code == 400 and "آینده" in future.json()["detail"]
+    issued = (datetime.now() - timedelta(minutes=30)).replace(second=0, microsecond=0)
+    inv = client.post("/api/invoices", json={**body, "issued_at": issued.isoformat()}).json()
+    assert inv["issued_at"].startswith(issued.isoformat()[:16])
     left = client.get(f"/api/appointments?customer_id={a1['customer_id']}&status=booked").json()
     assert [x["id"] for x in left] == [a2["id"]]  # the other appointment is kept for its own time
     done = client.get(f"/api/appointments/{a1['id']}").json()
     assert done["status"] == "done" and done["invoice_id"] == inv["id"]
+    # done a day early: it moves to when it really happened and its reserved time is free again
+    assert done["original_start_at"] == a1["start_at"] and done["start_at"] == issued.isoformat()[:16]
+    assert [f["start_at"] for f in inv["freed"]] == [a1["start_at"]]
+    chk = client.get(f"/api/appointments/check?service_id={svc['id']}&start_at={a1['start_at']}"
+                     + (f"&staff_id={a1['staff_id']}" if a1["staff_id"] else "")).json()
+    assert chk["ok"], chk
+
+
+def test_money_dates_cannot_be_in_the_future(client, accounts):
+    from datetime import datetime, timedelta
+    tomorrow = (datetime.now() + timedelta(days=1)).isoformat()
+    r = client.post("/api/deposits", json={"customer_name": "تست تاریخ", "customer_mobile": "09125550000", "amount": 1_000_000,
+                                           "payment_account_id": accounts["کارتخوان ملت"], "received_at": tomorrow})
+    assert r.status_code == 400 and "آینده" in r.json()["detail"]
+    r = client.post("/api/expenses", json={"category": "اجاره", "amount": 1_000_000, "payment_account_id": accounts["کارتخوان ملت"],
+                                           "spent_at": tomorrow})
+    assert r.status_code == 400
+    yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+    r = client.post("/api/deposits", json={"customer_name": "تست تاریخ", "customer_mobile": "09125550000", "amount": 1_000_000,
+                                           "payment_account_id": accounts["کارتخوان ملت"], "received_at": yesterday})
+    assert r.status_code == 200
+
+
+def test_cancel_offers_time_to_vip_waitlist(client, services):
+    svc = services["مانیکور"]
+    when = _future_slot(client, svc["id"], 4)
+    a = client.post("/api/appointments", json={"customer_name": "کنسلی", "customer_mobile": "09126660001", "service_id": svc["id"],
+                                               "start_at": when}).json()
+    normal = client.post("/api/waitlist", json={"customer_name": "منتظر عادی", "customer_mobile": "09126660002",
+                                                "service_id": svc["id"], "vip": False}).json()
+    vip = client.post("/api/waitlist", json={"customer_name": "منتظر ویژه", "customer_mobile": "09126660003",
+                                             "service_id": svc["id"], "vip": True}).json()
+    assert client.post("/api/waitlist", json={"customer_id": vip["customer_id"], "service_id": svc["id"]}).status_code == 409
+    r = client.patch(f"/api/appointments/{a['id']}?status=cancelled").json()
+    assert r["freed"]["start_at"] == when and r["freed"]["waiting"] >= 2
+    offers = client.get(f"/api/waitlist/offers?start_at={when}&service_id={svc['id']}").json()
+    ids = [o["id"] for o in offers]
+    assert ids.index(vip["id"]) < ids.index(normal["id"]) and offers[ids.index(vip["id"])]["fits"]
+    booked = client.post(f"/api/waitlist/{vip['id']}/book", json={"start_at": when})
+    assert booked.status_code == 200 and booked.json()["customer_id"] == vip["customer_id"]
+    assert vip["id"] not in [w["id"] for w in client.get("/api/waitlist").json()]
+    # the time is taken again
+    again = client.post(f"/api/waitlist/{normal['id']}/book", json={"start_at": when, "staff_id": booked.json()["staff_id"]})
+    assert again.status_code == 409 or booked.json()["staff_id"] is None
 
 
 def test_booking_rules_are_strict(client, accounts):

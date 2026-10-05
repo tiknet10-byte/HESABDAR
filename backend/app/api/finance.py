@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
@@ -22,6 +22,8 @@ from ..models import (
     Service,
     ServiceLine,
     Staff,
+    WaitlistEntry,
+    local_now,
 )
 from ..services import accounting, learning, scheduling, settings_store
 from ..services.accounting import AccountingError
@@ -73,6 +75,7 @@ def _appt(db: Session, a: Appointment, customer: str | None = None) -> dict:
             "custom_duration": a.duration_minutes is not None,
             "staff_id": a.staff_id, "start_at": a.start_at.isoformat(timespec="minutes"), "status": a.status,
             "quoted_price": a.quoted_price, "notes": a.notes, "invoice_id": a.invoice_id,
+            "original_start_at": a.original_start_at.isoformat(timespec="minutes") if a.original_start_at else None,
             "deposits": [{"id": d.id, "amount": d.amount, "status": d.status, "received_at": d.received_at.isoformat(timespec="minutes")}
                          for d in deps]}
 
@@ -123,7 +126,7 @@ def appointments(start: date | None = None, end: date | None = None, customer_id
     out = [_appt(db, a, n) for a, n in rows]
     # flag overlaps that already exist in the data (e.g. created before the strict rules), so they can be fixed
     active = [(x, datetime.fromisoformat(x["start_at"]), datetime.fromisoformat(x["start_at"]) + timedelta(minutes=x["duration_minutes"] or 60))
-              for x in out if x["status"] in scheduling.OCCUPYING]
+              for x in out if x["status"] in scheduling.OCCUPYING and not x["original_start_at"]]
     for i, (x, s1, e1) in enumerate(active):
         for y, s2, e2 in active[i + 1:]:
             if s2 >= e1:
@@ -217,10 +220,24 @@ def update_appointment(aid: int, status: str, db: Session = Depends(get_db), use
         # re-activating a cancelled / no-show appointment takes its slot back: it must still be free and in the future
         _ensure_bookable(db, a.service_id, a.staff_id, a.start_at, customer_id=a.customer_id, duration_minutes=a.duration_minutes,
                          exclude_id=a.id)
+    was_booked = a.status == "booked"
     a.status = status
     audit(db, "appointment.status", "appointment", a.id, {"status": status}, user=user)
     db.commit()
-    return {"ok": True}
+    # a cancelled future appointment frees its time: tell the UI so it can offer it to the waiting (VIP) list
+    freed = _freed_slot(db, a, a.start_at) if status == "cancelled" and was_booked else None
+    return {"ok": True, "freed": freed}
+
+
+def _freed_slot(db: Session, a: Appointment, start_at: datetime) -> dict | None:
+    """The slot an appointment no longer uses, if it is still in the future and someone is waiting."""
+    if start_at < local_now():
+        return None
+    waiting = db.scalar(select(func.count(WaitlistEntry.id)).where(WaitlistEntry.status == "waiting")) or 0
+    svc = db.get(Service, a.service_id) if a.service_id else None
+    return {"appointment_id": a.id, "start_at": start_at.isoformat(timespec="minutes"), "service_id": a.service_id,
+            "service": svc.name if svc else None, "staff_id": a.staff_id,
+            "duration_minutes": scheduling.appointment_minutes(db, a), "waiting": waiting}
 
 
 # ---------------------------------------------------------------- deposits
@@ -448,15 +465,25 @@ def create_invoice(body: InvoiceIn, db: Session = Depends(get_db), user=Depends(
     except AccountingError as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
-    for aid in {*body.appointment_ids, *([body.appointment_id] if body.appointment_id else [])}:
+    freed: list[dict] = []
+    done_at = inv.issued_at.replace(second=0, microsecond=0)
+    for aid in sorted({*body.appointment_ids, *([body.appointment_id] if body.appointment_id else [])}):
         a = db.get(Appointment, aid)
         if a and a.customer_id == c.id and a.status == "booked":
             a.status = "done"
             a.invoice_id = inv.id
-            audit(db, "appointment.done_by_invoice", "appointment", a.id, {"invoice": inv.number}, user=user)
+            if a.start_at.date() > done_at.date():
+                # done earlier than the booked day: record when it really happened and release the reserved time
+                a.original_start_at = a.start_at
+                a.start_at = done_at
+                slot = _freed_slot(db, a, a.original_start_at)
+                if slot:
+                    freed.append(slot)
+            audit(db, "appointment.done_by_invoice", "appointment", a.id,
+                  {"invoice": inv.number, "released": a.original_start_at.isoformat() if a.original_start_at else None}, user=user)
     learning.refresh_price_stats(db)
     db.commit()
-    return _inv(inv, c.full_name)
+    return {**_inv(inv, c.full_name), "freed": freed}
 
 
 @router.get("/invoices/{iid}")
@@ -539,3 +566,122 @@ def journal(limit: int = 200, db: Session = Depends(get_db), _=Depends(require("
                     "lines": [{"account": f"{accs[l.account_id][0]} {accs[l.account_id][1]}", "debit": l.debit, "credit": l.credit}
                               for l in e.lines]})
     return out
+
+
+# ---------------------------------------------------------------- waiting list (VIP)
+class WaitlistIn(BaseModel):
+    customer_id: int | None = None
+    customer_name: str | None = None
+    customer_mobile: str | None = None
+    service_id: int | None = None
+    staff_id: int | None = None
+    vip: bool = True
+    preference: str = ""
+
+
+class WaitlistUpdate(BaseModel):
+    service_id: int | None = None
+    staff_id: int | None = None
+    vip: bool | None = None
+    preference: str | None = None
+
+
+class WaitlistBookIn(BaseModel):
+    start_at: datetime
+    service_id: int | None = None
+    staff_id: int | None = None
+    duration_minutes: int | None = None
+    allow_outside_hours: bool = False
+
+
+def _wait(db: Session, w: WaitlistEntry) -> dict:
+    c = db.get(Customer, w.customer_id)
+    svc = db.get(Service, w.service_id) if w.service_id else None
+    person = db.get(Staff, w.staff_id) if w.staff_id else None
+    return {"id": w.id, "customer_id": w.customer_id, "customer": c.full_name if c else None, "customer_mobile": c.mobile if c else None,
+            "service_id": w.service_id, "service": svc.name if svc else None, "line": svc.line.name if svc else None,
+            "line_id": svc.line_id if svc else None, "staff_id": w.staff_id, "staff": person.full_name if person else None,
+            "vip": w.vip, "preference": w.preference, "status": w.status, "appointment_id": w.appointment_id,
+            "created_at": w.created_at.isoformat(timespec="minutes")}
+
+
+@router.get("/waitlist")
+def waitlist(status: str = "waiting", db: Session = Depends(get_db), _=Depends(require("read"))):
+    q = select(WaitlistEntry).order_by(WaitlistEntry.vip.desc(), WaitlistEntry.created_at)
+    if status != "all":
+        q = q.where(WaitlistEntry.status == status)
+    return [_wait(db, w) for w in db.scalars(q.limit(500))]
+
+
+@router.post("/waitlist")
+def add_waitlist(body: WaitlistIn, db: Session = Depends(get_db), user=Depends(require("write"))):
+    c = _customer(db, body.customer_id, body.customer_name, body.customer_mobile, user)
+    dup = db.scalar(select(WaitlistEntry).where(WaitlistEntry.customer_id == c.id, WaitlistEntry.status == "waiting",
+                                                WaitlistEntry.service_id == body.service_id))
+    if dup:
+        raise HTTPException(409, "این مشتری برای همین خدمت در لیست انتظار هست")
+    w = WaitlistEntry(customer_id=c.id, service_id=body.service_id, staff_id=body.staff_id, vip=body.vip, preference=body.preference)
+    db.add(w)
+    db.flush()
+    audit(db, "waitlist.add", "waitlist", w.id, {"customer": c.id}, user=user)
+    db.commit()
+    return _wait(db, w)
+
+
+@router.put("/waitlist/{wid}")
+def edit_waitlist(wid: int, body: WaitlistUpdate, db: Session = Depends(get_db), user=Depends(require("write"))):
+    w = _get(db, WaitlistEntry, wid, "ردیف لیست انتظار")
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(w, k, v)
+    audit(db, "waitlist.edit", "waitlist", w.id, {}, user=user)
+    db.commit()
+    return _wait(db, w)
+
+
+@router.delete("/waitlist/{wid}")
+def remove_waitlist(wid: int, db: Session = Depends(get_db), user=Depends(require("write"))):
+    w = _get(db, WaitlistEntry, wid, "ردیف لیست انتظار")
+    w.status = "removed"
+    audit(db, "waitlist.remove", "waitlist", w.id, {}, user=user)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/waitlist/offers")
+def waitlist_offers(start_at: datetime, service_id: int | None = None, staff_id: int | None = None, duration: int | None = None,
+                    db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Waiting customers ranked for a freed time: VIP first, then same service, then same line, then who waited longest.
+    Each one says whether the time really fits them (their own service length, staff and other appointments)."""
+    freed_svc = db.get(Service, service_id) if service_id else None
+    out = []
+    for w in db.scalars(select(WaitlistEntry).where(WaitlistEntry.status == "waiting")):
+        svc_id = w.service_id or service_id
+        svc = db.get(Service, svc_id) if svc_id else None
+        same_service = bool(service_id and svc_id == service_id)
+        same_line = bool(freed_svc and svc and svc.line_id == freed_svc.line_id)
+        staff = w.staff_id or (staff_id if same_line else None)
+        minutes = duration if same_service and duration else None
+        errors = scheduling.validate_slot(db, svc_id, staff, start_at, duration_minutes=minutes, customer_id=w.customer_id)
+        out.append({**_wait(db, w), "fits": not errors, "reason": " | ".join(e["message"] for e in errors),
+                    "same_service": same_service, "same_line": same_line, "offer_service_id": svc_id,
+                    "offer_service": svc.name if svc else None, "offer_staff_id": staff,
+                    "offer_duration": minutes or (svc.duration_minutes if svc else None),
+                    "overridable": bool(errors) and all(e["overridable"] for e in errors)})
+    out.sort(key=lambda x: (not x["fits"], not x["vip"], not x["same_service"], not x["same_line"], x["created_at"]))
+    return out
+
+
+@router.post("/waitlist/{wid}/book")
+def book_from_waitlist(wid: int, body: WaitlistBookIn, db: Session = Depends(get_db), user=Depends(require("write"))):
+    w = _get(db, WaitlistEntry, wid, "ردیف لیست انتظار")
+    if w.status != "waiting":
+        raise HTTPException(400, "این مشتری دیگر در لیست انتظار نیست")
+    c = _get(db, Customer, w.customer_id, "مشتری")
+    a = _book(db, c, body.service_id or w.service_id, body.staff_id or w.staff_id, body.start_at,
+              "از لیست انتظار" + (" (VIP)" if w.vip else ""), user, duration_minutes=body.duration_minutes,
+              allow_outside_hours=body.allow_outside_hours)
+    w.status = "booked"
+    w.appointment_id = a.id
+    audit(db, "waitlist.book", "waitlist", w.id, {"appointment": a.id}, user=user)
+    db.commit()
+    return _appt(db, a, c.full_name)

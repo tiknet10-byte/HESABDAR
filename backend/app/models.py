@@ -153,7 +153,23 @@ class Appointment(TimestampMixin, Base):
     quoted_price: Mapped[int] = mapped_column(BigInteger, default=0)
     duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None -> service's default duration
     invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id"), nullable=True)  # invoice that settled it
+    # when a service is done on another day than booked, start_at moves to when it was really done and the
+    # originally reserved time is kept here (that slot is free again for other customers)
+    original_start_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
+
+
+class WaitlistEntry(TimestampMixin, Base):
+    """Customers (often VIP) waiting for the earliest free time - offered first when someone cancels."""
+    __tablename__ = "waitlist"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id"), nullable=True)
+    staff_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"), nullable=True)
+    vip: Mapped[bool] = mapped_column(Boolean, default=True)
+    preference: Mapped[str] = mapped_column(Text, default="")  # e.g. "only mornings", "not Fridays"
+    status: Mapped[str] = mapped_column(String(16), default="waiting", index=True)  # waiting|booked|removed
+    appointment_id: Mapped[int | None] = mapped_column(ForeignKey("appointments.id"), nullable=True)
 
 
 class Deposit(TimestampMixin, Base):

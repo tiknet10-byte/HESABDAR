@@ -7,7 +7,7 @@ guarantees the books always balance (sum of debits == sum of credits).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -162,6 +162,7 @@ def pay_staff(db: Session, staff: Staff, amount: int, payment_account: PaymentAc
     """Settle (part of) a staff member's earned commission."""
     if amount <= 0:
         raise AccountingError("مبلغ پرداخت باید مثبت باشد")
+    ensure_not_future(paid_at, "تاریخ پرداخت")
     entry = post(db, f"پرداخت سهم {staff.full_name}" + (f" - {description}" if description else ""), [
         Leg(account(db, STAFF_PAYABLE), debit=amount, staff_id=staff.id, line_id=staff.line_id),
         Leg(cash_account_for(db, payment_account), credit=amount, staff_id=staff.id),
@@ -210,6 +211,16 @@ def find_or_create_customer(db: Session, full_name: str | None, mobile: str | No
     return c, True
 
 
+
+FUTURE_GRACE = timedelta(minutes=10)  # tolerate small clock differences between devices
+
+
+def ensure_not_future(at: datetime | None, label: str = "تاریخ دریافت") -> None:
+    """Money that has been received/paid can only be dated now or in the past."""
+    if at is not None and at.replace(tzinfo=None) > local_now() + FUTURE_GRACE:
+        raise AccountingError(f"{label} نمی‌تواند در آینده باشد؛ تاریخ امروز یا قبل از آن را انتخاب کنید")
+
+
 # --------------------------------------------------------------------- deposits
 def record_deposit(db: Session, *, customer: Customer, amount: int, payment_account: PaymentAccount,
                    received_at: datetime | None = None, reference: str | None = None, service_id: int | None = None,
@@ -218,6 +229,7 @@ def record_deposit(db: Session, *, customer: Customer, amount: int, payment_acco
                    service_guess: dict | None = None, user=None) -> Deposit:
     if amount <= 0:
         raise AccountingError("مبلغ بیعانه باید مثبت باشد")
+    ensure_not_future(received_at, "تاریخ دریافت بیعانه")
     svc = db.get(Service, service_id) if service_id else None
     dep = Deposit(customer_id=customer.id, amount=amount, payment_account_id=payment_account.id,
                   received_at=received_at or local_now(), reference=reference, service_id=service_id,
@@ -271,6 +283,7 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     payments: [{payment_account_id, amount, reference?}]"""
     if not items:
         raise AccountingError("فاکتور بدون آیتم قابل ثبت نیست")
+    ensure_not_future(issued_at, "تاریخ فاکتور")
     inv = Invoice(number=next_invoice_number(db), customer_id=customer.id, issued_at=issued_at or local_now(),
                   discount=discount, source=source, notes=notes)
     revenue_by_line: dict[int | None, int] = {}
@@ -377,6 +390,7 @@ def record_payment(db: Session, *, payment_account: PaymentAccount, amount: int,
         raise AccountingError("حساب دریافت مشخص نیست")
     if amount <= 0:
         raise AccountingError("مبلغ پرداخت باید مثبت باشد")
+    ensure_not_future(paid_at, "تاریخ دریافت")
     customer_id = invoice.customer_id if invoice else (customer.id if customer else None)
     if invoice is not None:
         if invoice.status == "void":
@@ -423,6 +437,7 @@ def record_expense(db: Session, *, category: str, amount: int, payment_account: 
                    spent_at: datetime | None = None, description: str = "", staff_id: int | None = None, user=None) -> Expense:
     if amount <= 0:
         raise AccountingError("مبلغ هزینه باید مثبت باشد")
+    ensure_not_future(spent_at, "تاریخ پرداخت هزینه")
     exp = Expense(category=category, amount=amount, payment_account_id=payment_account.id,
                   spent_at=spent_at or local_now(), description=description, staff_id=staff_id)
     db.add(exp)

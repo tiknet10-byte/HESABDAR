@@ -6,6 +6,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { api } from "../lib/api";
 import ErrorBoundary from "./ErrorBoundary";
+import { FreedSlotHost } from "./Waitlist";
 import { can, useAuth } from "../lib/hooks";
 import { jlong, ROLES } from "../lib/format";
 
@@ -145,6 +146,7 @@ export default function Layout() {
           <ErrorBoundary key={loc.pathname + loc.search}>
             <Outlet />
           </ErrorBoundary>
+          <FreedSlotHost />
         </main>
       </div>
     </div>
