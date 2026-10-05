@@ -22,7 +22,7 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   const [items, setItems] = useState<Item[]>([{ unit_price: 0, quantity: 1 }]);
   const [discount, setDiscount] = useState(0);
   const [pays, setPays] = useState<Pay[]>([]);
-  const [picked, setPicked] = useState<number[] | null>(null); // selected deposit ids (null = not initialised)
+  const [depOverride, setDepOverride] = useState<Record<number, boolean>>({}); // deposits the user ticked/unticked by hand
   const [check, setCheck] = useState<{ warnings: string[]; held_deposits: any[] }>({ warnings: [], held_deposits: [] });
   const [issuedAt, setIssuedAt] = useState(toLocalIso(new Date()));
   const [appts, setAppts] = useState<any[]>([]);
@@ -95,20 +95,25 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
     if (!appointmentId) return;
     api(`/api/appointments/${appointmentId}`).then((a) => {
       setCust({ customer_id: a.customer_id, label: `${a.customer}${a.customer_mobile ? " · " + a.customer_mobile : ""}` });
-      setPicked(a.deposits.filter((d: any) => d.status === "held").map((d: any) => d.id));
     }).catch(() => {});
   }, [appointmentId]);
 
-  useEffect(() => {
-    // by default every held deposit of the customer is applied; the user can untick any of them
-    if (picked === null && check.held_deposits.length) setPicked(check.held_deposits.map((d) => d.id));
-  }, [check.held_deposits, picked]);
-  useEffect(() => setPicked(appointmentId ? picked : null), [cust.customer_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // deposits follow the appointments: a deposit taken for an appointment is applied only when that appointment is
+  // settled by this invoice; a deposit without appointment is applied when its service is on the invoice (or it has none)
+  const invoiced = new Set(items.map((i) => i.service_id).filter(Boolean));
+  const depAppt = (d: any) => appts.find((a) => a.id === d.appointment_id);
+  const depDefault = (d: any) => {
+    const a = depAppt(d);
+    if (a) return doneIds.includes(a.id);
+    return d.service_id ? invoiced.has(d.service_id) : true;
+  };
+  const isPicked = (d: any) => depOverride[d.id] ?? depDefault(d);
+  useEffect(() => setDepOverride({}), [cust.customer_id, doneKey]);
   const [busy, setBusy] = useState(false);
 
   const subtotal = items.reduce((s, i) => s + i.unit_price * i.quantity, 0);
   const total = Math.max(0, subtotal - discount);
-  const selected = check.held_deposits.filter((d) => (picked ?? []).includes(d.id));
+  const selected = check.held_deposits.filter(isPicked);
   const heldSum = selected.reduce((s, d) => s + d.amount, 0);
   const due = Math.max(0, total - Math.min(heldSum, total));
   const paid = pays.reduce((s, p) => s + p.amount, 0);
@@ -221,16 +226,23 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
       </div>
       {check.held_deposits.length > 0 && (
         <div className="space-y-2 rounded-2xl bg-emerald-500/10 p-3 text-sm">
-          <div className="font-bold">بیعانه‌های باز این مشتری (هر کدام که باید از این فاکتور کسر شود را انتخاب کنید):</div>
-          {check.held_deposits.map((d) => (
-            <label key={d.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl px-2 py-1.5 hover:bg-emerald-500/10">
-              <input type="checkbox" checked={(picked ?? []).includes(d.id)} onChange={(e) => setPicked(e.target.checked ? [...(picked ?? []), d.id] : (picked ?? []).filter((x) => x !== d.id))} />
+          <div className="font-bold">بیعانه‌های باز این مشتری</div>
+          <div className="muted text-xs">بیعانهٔ هر نوبت فقط وقتی کسر می‌شود که همان نوبت «انجام شد» باشد؛ بیعانهٔ نوبت‌های حفظ‌شده برای خودشان می‌ماند. در صورت نیاز دستی تغییر دهید.</div>
+          {check.held_deposits.map((d) => {
+            const a = depAppt(d);
+            const kept = !!a && !doneIds.includes(a.id);
+            return (
+            <label key={d.id} className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl px-2 py-1.5 hover:bg-emerald-500/10 ${isPicked(d) ? "" : "opacity-60"}`}>
+              <input type="checkbox" checked={isPicked(d)} onChange={(e) => setDepOverride((o) => ({ ...o, [d.id]: e.target.checked }))} />
               <span className="num font-bold">{money(d.amount)}</span>
               <span className="muted text-xs">دریافت: {formatJ(d.received_at)}</span>
               <span className="text-xs">خدمت: <b>{d.service ?? "نامشخص"}</b></span>
               {d.appointment_at && <span className="text-xs text-violet-600 dark:text-violet-300">نوبت: {formatJ(d.appointment_at)}</span>}
+              {a && <span className={`badge ${kept ? "bg-violet-500/10 text-violet-600 dark:text-violet-300" : "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"}`}>{kept ? "نوبتش حفظ می‌شود" : "نوبتش انجام شد"}</span>}
+              {kept && isPicked(d) && <span className="w-full text-xs font-semibold text-amber-600">⚠ این بیعانه برای نوبتی است که حفظ می‌شود؛ اگر کسر شود، آن نوبت بدون بیعانه می‌ماند.</span>}
             </label>
-          ))}
+            );
+          })}
         </div>
       )}
 
