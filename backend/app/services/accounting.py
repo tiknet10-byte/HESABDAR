@@ -86,12 +86,25 @@ def _child(db: Session, parent: str, name: str, typ: str) -> LedgerAccount:
     acc = db.scalar(select(LedgerAccount).where(LedgerAccount.parent_code == parent, LedgerAccount.name == name))
     if acc:
         return acc
-    codes = [int(c) for c in db.scalars(select(LedgerAccount.code).where(LedgerAccount.parent_code == parent)) if c.isdigit()]
-    code = str(max(codes) + 1 if codes else int(parent) + 1)
+    code = _next_child_code(db, parent)
     acc = LedgerAccount(code=code, name=name, type=typ, parent_code=parent)
     db.add(acc)
     db.flush()
     return acc
+
+
+def _next_child_code(db: Session, parent: str) -> str:
+    """Next free code under parent (1100 -> 1101, 1102 ...). Never collides with another account's code:
+    after 99 children of 1100 the plain sequence would reach 1200 (receivables), so it continues as 1100-100."""
+    taken = set(db.scalars(select(LedgerAccount.code)))
+    base = int(parent)
+    for n in range(1, 100):
+        if str(base + n) not in taken:
+            return str(base + n)
+    n = 100
+    while f"{parent}-{n}" in taken:
+        n += 1
+    return f"{parent}-{n}"
 
 
 def cash_account_for(db: Session, pa: PaymentAccount) -> LedgerAccount:
@@ -452,19 +465,50 @@ def record_expense(db: Session, *, category: str, amount: int, payment_account: 
 
 
 # --------------------------------------------------------------------- balances
+DEBIT_NATURE = ("asset", "expense")
+
+
+def natural_balance(typ: str, debit: int, credit: int) -> int:
+    """Balance on the account's normal side: assets/expenses grow with debits, the rest with credits."""
+    return debit - credit if typ in DEBIT_NATURE else credit - debit
+
+
 def trial_balance(db: Session) -> list[dict]:
+    """Two-column trial balance: turnover (sum of debits / credits) and the closing balance split into
+    a debit-balance or credit-balance column (only one of them is non-zero per account)."""
     rows = db.execute(
-        select(LedgerAccount.code, LedgerAccount.name, LedgerAccount.type,
+        select(LedgerAccount.id, LedgerAccount.code, LedgerAccount.name, LedgerAccount.type, LedgerAccount.parent_code,
                func.coalesce(func.sum(JournalLine.debit), 0), func.coalesce(func.sum(JournalLine.credit), 0))
         .join(JournalLine, JournalLine.account_id == LedgerAccount.id, isouter=True)
         .group_by(LedgerAccount.id).order_by(LedgerAccount.code)
     ).all()
     out = []
-    for code, name, typ, dr, cr in rows:
+    for aid, code, name, typ, parent, dr, cr in rows:
+        dr, cr = int(dr), int(cr)
         if dr or cr:
-            balance = dr - cr if typ in ("asset", "expense") else cr - dr
-            out.append({"code": code, "name": name, "type": typ, "debit": int(dr), "credit": int(cr), "balance": int(balance)})
+            net = dr - cr
+            out.append({"id": aid, "code": code, "name": name, "type": typ, "parent": parent, "debit": dr, "credit": cr,
+                        "balance": natural_balance(typ, dr, cr),
+                        "debit_balance": net if net > 0 else 0, "credit_balance": -net if net < 0 else 0})
     return out
+
+
+def ledger_summary(rows: list[dict]) -> dict:
+    """Totals for the ledger page.
+
+    turnover_*: every posting adds the same amount to both sides, so these always grow (a 10m expense adds
+    10m to both). balance_*: closing balances - an expense paid in cash moves 10m from cash to expense, so
+    these stay the same; they only grow when the business really gets bigger (e.g. a new sale)."""
+    by_type = {t: sum(r["balance"] for r in rows if r["type"] == t) for t in ("asset", "liability", "equity", "revenue", "expense")}
+    return {
+        "turnover_debit": sum(r["debit"] for r in rows),
+        "turnover_credit": sum(r["credit"] for r in rows),
+        "balance_debit": sum(r["debit_balance"] for r in rows),
+        "balance_credit": sum(r["credit_balance"] for r in rows),
+        "by_type": by_type,
+        "cash": sum(r["balance"] for r in rows if r["parent"] == CASH_PARENT),
+        "net_profit": by_type["revenue"] - by_type["expense"],
+    }
 
 
 def customer_balance(db: Session, customer_id: int) -> dict:
@@ -485,9 +529,85 @@ def account_balances(db: Session) -> list[dict]:
     out = []
     for pa in db.scalars(select(PaymentAccount).order_by(PaymentAccount.id)):
         acc = cash_account_for(db, pa)
-        dr, cr = db.execute(
-            select(func.coalesce(func.sum(JournalLine.debit), 0), func.coalesce(func.sum(JournalLine.credit), 0))
+        dr, cr, n = db.execute(
+            select(func.coalesce(func.sum(JournalLine.debit), 0), func.coalesce(func.sum(JournalLine.credit), 0),
+                   func.count(JournalLine.id))
             .where(JournalLine.account_id == acc.id)
         ).one()
-        out.append({"id": pa.id, "name": pa.name, "kind": pa.kind, "bank_name": pa.bank_name, "balance": int(dr) - int(cr)})
+        out.append({"id": pa.id, "name": pa.name, "kind": pa.kind, "bank_name": pa.bank_name, "is_active": pa.is_active,
+                    "ledger_account_id": acc.id, "code": acc.code, "total_in": int(dr), "total_out": int(cr),
+                    "count": int(n), "balance": int(dr) - int(cr)})
+    return out
+
+
+REF_LABELS = {
+    "deposit": "بیعانه", "deposit_apply": "تسویه بیعانه", "invoice": "فاکتور فروش", "invoice_void": "ابطال فاکتور",
+    "payment": "دریافت وجه", "expense": "هزینه", "commission": "سهم پرسنل", "staff_payout": "پرداخت به پرسنل",
+}
+
+
+def account_statement(db: Session, acc: LedgerAccount, start: datetime | None = None, end: datetime | None = None) -> dict:
+    """Every posting to one ledger account, oldest first, with the running balance after each one.
+    For a cash box / bank / POS account debit = money in, credit = money out."""
+    def _sums(*conds) -> tuple[int, int]:  # noqa: ANN002
+        dr, cr = db.execute(select(func.coalesce(func.sum(JournalLine.debit), 0), func.coalesce(func.sum(JournalLine.credit), 0))
+                            .join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+                            .where(JournalLine.account_id == acc.id, *conds)).one()
+        return int(dr), int(cr)
+
+    opening = natural_balance(acc.type, *_sums(JournalEntry.at < start)) if start else 0
+    q = (select(JournalLine, JournalEntry).join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+         .where(JournalLine.account_id == acc.id).order_by(JournalEntry.at, JournalEntry.id, JournalLine.id))
+    if start:
+        q = q.where(JournalEntry.at >= start)
+    if end:
+        q = q.where(JournalEntry.at < end)
+    pairs = db.execute(q).all()
+
+    entry_ids = {e.id for _, e in pairs}
+    names = {a.id: (a.code, a.name) for a in db.scalars(select(LedgerAccount))}
+    others: dict[int, list[str]] = {}
+    if entry_ids:
+        for l in db.scalars(select(JournalLine).where(JournalLine.entry_id.in_(entry_ids), JournalLine.account_id != acc.id)):
+            nm = names.get(l.account_id, ("", "?"))[1]
+            if nm not in others.setdefault(l.entry_id, []):
+                others[l.entry_id].append(nm)
+    cust_ids = {l.customer_id for l, _ in pairs if l.customer_id}
+    staff_ids = {l.staff_id for l, _ in pairs if l.staff_id}
+    customers = {c.id: c.full_name for c in db.scalars(select(Customer).where(Customer.id.in_(cust_ids)))} if cust_ids else {}
+    staff = {s.id: s.full_name for s in db.scalars(select(Staff).where(Staff.id.in_(staff_ids)))} if staff_ids else {}
+    details = _ref_details(db, [e for _, e in pairs])
+
+    rows, running, total_dr, total_cr = [], opening, 0, 0
+    for l, e in pairs:
+        running += natural_balance(acc.type, l.debit, l.credit)
+        total_dr += l.debit
+        total_cr += l.credit
+        rows.append({"entry_id": e.id, "at": e.at.isoformat(), "description": e.description, "ref_type": e.ref_type,
+                     "ref_id": e.ref_id, "ref_label": REF_LABELS.get(e.ref_type, "سند دستی"),
+                     "detail": details.get((e.ref_type, e.ref_id), ""), "counterpart": "، ".join(others.get(e.id, [])),
+                     "customer": customers.get(l.customer_id), "staff": staff.get(l.staff_id),
+                     "debit": l.debit, "credit": l.credit, "balance": running})
+    return {"account": {"id": acc.id, "code": acc.code, "name": acc.name, "type": acc.type},
+            "opening": opening, "total_debit": total_dr, "total_credit": total_cr, "closing": running,
+            "count": len(rows), "rows": rows}
+
+
+def _ref_details(db: Session, entries: list[JournalEntry]) -> dict[tuple[str, int | None], str]:
+    """Short human detail for each source document (expense note, payment/deposit tracking number, invoice no.)."""
+    ids: dict[str, set[int]] = {}
+    for e in entries:
+        if e.ref_id:
+            ids.setdefault(e.ref_type, set()).add(e.ref_id)
+    out: dict[tuple[str, int | None], str] = {}
+    for x in db.scalars(select(Expense).where(Expense.id.in_(ids.get("expense", set())))):
+        out[("expense", x.id)] = x.description or ""
+    for x in db.scalars(select(Payment).where(Payment.id.in_(ids.get("payment", set())))):
+        out[("payment", x.id)] = f"پیگیری {x.reference}" if x.reference else ""
+    for x in db.scalars(select(Deposit).where(Deposit.id.in_(ids.get("deposit", set()) | ids.get("deposit_apply", set())))):
+        d = f"پیگیری {x.reference}" if x.reference else ""
+        out[("deposit", x.id)] = out[("deposit_apply", x.id)] = d
+    for x in db.scalars(select(Invoice).where(Invoice.id.in_(ids.get("invoice", set()) | ids.get("invoice_void", set()) | ids.get("commission", set())))):
+        for t in ("invoice", "invoice_void", "commission"):
+            out[(t, x.id)] = x.number
     return out

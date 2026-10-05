@@ -1,6 +1,6 @@
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { STATUS, fromRial, unitLabel } from "../lib/format";
 
 export function PageHeader({ title, subtitle, icon, actions }: { title: string; subtitle?: string; icon?: ReactNode; actions?: ReactNode }) {
@@ -32,7 +32,77 @@ export function Card({ title, actions, children, className = "", pad = true }: {
   );
 }
 
-export function Stat({ label, value, hint, icon, tone = "violet" }: { label: string; value: ReactNode; hint?: ReactNode; icon?: ReactNode; tone?: "violet" | "pink" | "emerald" | "amber" | "sky" }) {
+/** A small "!" button that explains a card. Opens on hover (desktop) or tap/click (mobile); the bubble is
+ * rendered at <body> so cards with overflow-hidden don't clip it. */
+export function HelpTip({ children, title }: { children: ReactNode; title?: string }) {
+  const [hover, setHover] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const btn = useRef<HTMLButtonElement>(null);
+  const bubble = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; width: number; above: boolean } | null>(null);
+  const open = hover || pinned;
+  useLayoutEffect(() => {
+    if (!open || !btn.current) return;
+    const place = () => {
+      const r = btn.current!.getBoundingClientRect();
+      const width = Math.min(300, window.innerWidth - 16);
+      const left = Math.max(8, Math.min(r.left + r.width / 2 - width / 2, window.innerWidth - width - 8));
+      const above = r.bottom + 180 > window.innerHeight && r.top > 200;
+      setPos({ top: above ? r.top - 8 : r.bottom + 8, left, width, above });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+  useEffect(() => {
+    if (!pinned) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === "Escape" : !btn.current?.contains(e.target as Node) && !bubble.current?.contains(e.target as Node)) setPinned(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [pinned]);
+  return (
+    <>
+      <button
+        ref={btn}
+        type="button"
+        aria-label="راهنما"
+        aria-expanded={open}
+        onClick={(e) => { e.stopPropagation(); setPinned((p) => !p); }}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        className={`inline-grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[11px] font-black leading-none transition ${open ? "border-violet-500 bg-violet-500 text-white" : "border-violet-400/60 text-violet-500 hover:bg-violet-500/10"}`}
+      >
+        !
+      </button>
+      {open && pos && createPortal(
+        <div
+          ref={bubble}
+          role="tooltip"
+          onMouseEnter={() => setHover(true)}
+          onMouseLeave={() => setHover(false)}
+          className="fade-up fixed z-[60] rounded-2xl border p-3 text-xs leading-6 shadow-xl"
+          style={{ top: pos.top, left: pos.left, width: pos.width, transform: pos.above ? "translateY(-100%)" : undefined, background: "var(--surface-solid)", borderColor: "var(--border)" }}
+        >
+          {title && <div className="mb-1 font-bold text-violet-600 dark:text-violet-300">{title}</div>}
+          <div className="space-y-1">{children}</div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+export function Stat({ label, value, hint, icon, tone = "violet", help, onClick }: { label: string; value: ReactNode; hint?: ReactNode; icon?: ReactNode; tone?: "violet" | "pink" | "emerald" | "amber" | "sky"; help?: ReactNode; onClick?: () => void }) {
   const tones: Record<string, string> = {
     violet: "from-violet-500 to-purple-600 shadow-violet-500/30",
     pink: "from-pink-500 to-rose-500 shadow-pink-500/30",
@@ -41,10 +111,10 @@ export function Stat({ label, value, hint, icon, tone = "violet" }: { label: str
     sky: "from-sky-500 to-indigo-500 shadow-sky-500/30",
   };
   return (
-    <div className="card fade-up relative overflow-hidden p-5">
+    <div className={`card fade-up relative overflow-hidden p-5 ${onClick ? "cursor-pointer transition hover:-translate-y-0.5" : ""}`} onClick={onClick}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="muted text-xs font-medium">{label}</div>
+          <div className="muted flex items-center gap-1.5 text-xs font-medium">{label}{help && <HelpTip title={label}>{help}</HelpTip>}</div>
           <div className="num mt-2 text-lg font-extrabold leading-snug sm:text-xl xl:text-2xl">{value}</div>
           {hint && <div className="muted mt-1 text-xs">{hint}</div>}
         </div>

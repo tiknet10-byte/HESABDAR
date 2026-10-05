@@ -459,3 +459,54 @@ def test_line_calendar_shows_empty_partial_full_days(client):
     listed = client.get(f"/api/appointments?line_id={line['id']}&start={day.date()}&end={day.date()}").json()
     assert len(listed) == 2 and listed[0]["customer_mobile"] == "09130000001"
     client.put("/api/settings", json={"booking.open": "10:00", "booking.close": "20:00"})
+
+
+def test_ledger_balances_and_account_statement(client, accounts):
+    """An expense paid in cash moves money between accounts: turnover grows on both sides, closing balances don't."""
+    cash_id = accounts["صندوق نقدی"]
+    r = client.post("/api/deposits", json={"customer_name": "مشتری دفاتر", "customer_mobile": "09351112233",
+                                           "amount": 300_000_000, "payment_account_id": cash_id})
+    assert r.status_code == 200, r.text
+    before = client.get("/api/ledger/trial-balance").json()
+    r = client.post("/api/expenses", json={"category": "تست دفاتر", "amount": 100_000_000, "payment_account_id": cash_id, "description": "قبض برق"})
+    assert r.status_code == 200, r.text
+    after = client.get("/api/ledger/trial-balance").json()
+    assert after["turnover_debit"] - before["turnover_debit"] == 100_000_000
+    assert after["turnover_debit"] == after["turnover_credit"]
+    assert after["balance_debit"] == after["balance_credit"]
+    # cash goes down by exactly the expense; profit drops by it too
+    assert after["cash"] - before["cash"] == -100_000_000
+    assert after["net_profit"] - before["net_profit"] == -100_000_000
+    assert after["balance_debit"] == before["balance_debit"]  # cash still positive -> closing totals unchanged
+    for r_ in after["rows"]:
+        assert r_["debit"] - r_["credit"] == r_["debit_balance"] - r_["credit_balance"]
+    a = after["by_type"]
+    assert a["asset"] + a["expense"] == a["liability"] + a["equity"] + a["revenue"]
+
+    bal2 = {b["id"]: b for b in client.get("/api/accounts/balances").json()}[cash_id]
+    st = client.get(f"/api/ledger/accounts/{bal2['ledger_account_id']}/statement").json()
+    assert st["closing"] == bal2["balance"] == st["total_debit"] - st["total_credit"]
+    assert st["count"] == bal2["count"]
+    running = 0
+    for row in st["rows"]:
+        running += row["debit"] - row["credit"]
+        assert row["balance"] == running
+    last = st["rows"][-1]
+    assert last["credit"] == 100_000_000 and last["ref_type"] == "expense" and last["detail"] == "قبض برق"
+    assert "تست دفاتر" in last["counterpart"]
+
+    j = client.get("/api/ledger/journal?ref_type=expense&limit=5").json()
+    assert j["total"] >= 1 and all(e["amount"] == e["credit_total"] for e in j["entries"])
+    assert j["entries"][0]["lines"][0]["debit"] > 0  # debit lines come first
+
+
+def test_child_account_codes_never_collide():
+    from app.core.db import SessionLocal
+    from app.services import accounting
+    with SessionLocal() as db:
+        codes = set()
+        for i in range(105):
+            codes.add(accounting.expense_account(db, f"دسته تستی {i}").code)
+        assert len(codes) == 105 and accounting.COMMISSION not in codes
+        assert accounting.account(db, accounting.COMMISSION).name == "پورسانت پرسنل"
+        db.rollback()

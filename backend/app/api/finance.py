@@ -563,18 +563,59 @@ def create_expense(body: ExpenseIn, db: Session = Depends(get_db), user=Depends(
 @router.get("/ledger/trial-balance")
 def trial_balance(db: Session = Depends(get_db), _=Depends(require("finance"))):
     rows = accounting.trial_balance(db)
-    return {"rows": rows, "total_debit": sum(r["debit"] for r in rows), "total_credit": sum(r["credit"] for r in rows)}
+    summary = accounting.ledger_summary(rows)
+    return {"rows": rows, "total_debit": summary["turnover_debit"], "total_credit": summary["turnover_credit"],
+            "entries": db.scalar(select(func.count(JournalEntry.id))) or 0, **summary}
+
+
+def _day_range(start: date | None, end: date | None) -> tuple[datetime | None, datetime | None]:
+    """Inclusive day range -> [start 00:00, day after end 00:00)."""
+    return (datetime.combine(start, datetime.min.time()) if start else None,
+            datetime.combine(end + timedelta(days=1), datetime.min.time()) if end else None)
 
 
 @router.get("/ledger/journal")
-def journal(limit: int = 200, db: Session = Depends(get_db), _=Depends(require("finance"))):
-    accs = {a.id: (a.code, a.name) for a in db.scalars(select(LedgerAccount))}
+def journal(limit: int = 200, offset: int = 0, start: date | None = None, end: date | None = None,
+            ref_type: str | None = None, q: str | None = None,
+            db: Session = Depends(get_db), _=Depends(require("finance"))):
+    accs = {a.id: a for a in db.scalars(select(LedgerAccount))}
+    qs = select(JournalEntry)
+    t0, t1 = _day_range(start, end)
+    if t0:
+        qs = qs.where(JournalEntry.at >= t0)
+    if t1:
+        qs = qs.where(JournalEntry.at < t1)
+    if ref_type:
+        qs = qs.where(JournalEntry.ref_type.in_(ref_type.split(",")))
+    if q and q.strip():
+        qs = qs.where(JournalEntry.description.contains(q.strip()))
+    total = db.scalar(select(func.count()).select_from(qs.subquery())) or 0
+    entries = list(db.scalars(qs.order_by(JournalEntry.at.desc(), JournalEntry.id.desc())
+                              .offset(max(offset, 0)).limit(max(1, min(limit, 1000)))))
+    cust_ids = {l.customer_id for e in entries for l in e.lines if l.customer_id}
+    customers = {c.id: c.full_name for c in db.scalars(select(Customer).where(Customer.id.in_(cust_ids)))} if cust_ids else {}
+    details = accounting._ref_details(db, entries)
     out = []
-    for e in db.scalars(select(JournalEntry).order_by(JournalEntry.id.desc()).limit(min(limit, 1000))):
+    for e in entries:
+        # traditional journal layout: debit lines first, then credit lines
+        lines = sorted(e.lines, key=lambda l: (0 if l.debit else 1, l.id))
+        cust = next((customers[l.customer_id] for l in lines if l.customer_id in customers), None)
         out.append({"id": e.id, "at": e.at.isoformat(), "description": e.description, "ref_type": e.ref_type, "ref_id": e.ref_id,
-                    "lines": [{"account": f"{accs[l.account_id][0]} {accs[l.account_id][1]}", "debit": l.debit, "credit": l.credit}
-                              for l in e.lines]})
-    return out
+                    "ref_label": accounting.REF_LABELS.get(e.ref_type, "سند دستی"), "detail": details.get((e.ref_type, e.ref_id), ""),
+                    "customer": cust, "amount": sum(l.debit for l in lines), "credit_total": sum(l.credit for l in lines),
+                    "lines": [{"account_id": l.account_id, "code": accs[l.account_id].code, "name": accs[l.account_id].name,
+                               "type": accs[l.account_id].type, "parent": accs[l.account_id].parent_code, "account": f"{accs[l.account_id].code} {accs[l.account_id].name}",
+                               "debit": l.debit, "credit": l.credit} for l in lines]})
+    return {"total": total, "offset": offset, "entries": out}
+
+
+@router.get("/ledger/accounts/{account_id}/statement")
+def account_statement(account_id: int, start: date | None = None, end: date | None = None,
+                      db: Session = Depends(get_db), _=Depends(require("finance"))):
+    """Turnover of one ledger account (a cash box, bank, card, POS or any other account)."""
+    acc = _get(db, LedgerAccount, account_id, "حساب")
+    t0, t1 = _day_range(start, end)
+    return accounting.account_statement(db, acc, t0, t1)
 
 
 # ---------------------------------------------------------------- waiting list (VIP)
