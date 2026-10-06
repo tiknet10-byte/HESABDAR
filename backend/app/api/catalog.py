@@ -14,6 +14,7 @@ from ..models import (
     Appointment,
     Deposit,
     Expense,
+    Invoice,
     InvoiceItem,
     JournalLine,
     LedgerAccount,
@@ -238,6 +239,33 @@ def delete_service(sid: int, db: Session = Depends(get_db), user=Depends(require
     audit(db, "service.delete", "service", sid, {"archived": archived, "line_removed": line_removed}, user=user)
     db.commit()
     return {"ok": True, "archived": archived, "line_removed": line_removed}
+
+
+@router.get("/services/usage")
+def services_usage(db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Per service: sales on invoices here and in the service history brought over from the previous software
+    (done appointments without an invoice - the same split the revenue report uses). Services never sold are absent."""
+    amt = func.coalesce(InvoiceItem.net_amount, InvoiceItem.unit_price * InvoiceItem.quantity - InvoiceItem.discount)
+    out: dict[int, dict] = {}
+
+    def row(sid: int) -> dict:
+        return out.setdefault(sid, {"service_id": sid, "invoices": 0, "invoice_amount": 0, "invoice_last": None,
+                                    "old": 0, "old_amount": 0, "old_last": None})
+
+    q = (select(InvoiceItem.service_id, func.count(func.distinct(InvoiceItem.invoice_id)), func.sum(amt), func.max(Invoice.issued_at))
+         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+         .where(InvoiceItem.service_id.is_not(None), Invoice.status != "void")
+         .group_by(InvoiceItem.service_id))
+    for sid, n, total, last in db.execute(q):
+        r = row(sid)
+        r["invoices"], r["invoice_amount"], r["invoice_last"] = int(n or 0), int(total or 0), last
+    q = (select(Appointment.service_id, func.count(Appointment.id), func.sum(Appointment.quoted_price), func.max(Appointment.start_at))
+         .where(Appointment.service_id.is_not(None), Appointment.status == "done", Appointment.invoice_id.is_(None))
+         .group_by(Appointment.service_id))
+    for sid, n, total, last in db.execute(q):
+        r = row(sid)
+        r["old"], r["old_amount"], r["old_last"] = int(n or 0), int(total or 0), last
+    return list(out.values())
 
 
 @router.get("/services/classify")

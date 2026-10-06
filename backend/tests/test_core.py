@@ -920,6 +920,12 @@ def test_revenue_by_line_staff_service_with_previous_software(client, accounts):
     d = client.get(f"/api/reports/revenue/staff/{boss['id']}").json()
     assert d["totals"]["revenue"] == 7_000_000 and d["records_total"] == 3
     assert {x["source"] for x in d["records"]} == {"old", "new"} and d["records"][0]["source"] == "new"
+    # settings > services: which services were ever sold (here or in the previous software)
+    s3 = client.post("/api/services", json={"line_id": line["id"], "name": "خدمت گزارش بی‌فروش"}).json()
+    u = {x["service_id"]: x for x in client.get("/api/services/usage").json()}
+    assert u[s1["id"]]["invoices"] == 1 and u[s1["id"]]["invoice_amount"] == 1_000_000 and u[s1["id"]]["old"] == 0
+    assert u[s2["id"]]["invoices"] == 0 and u[s2["id"]]["old"] == 2 and u[s2["id"]]["old_amount"] == 6_000_000
+    assert s3["id"] not in u
 
 
 def test_void_mistake_cancels_on_original_date_and_day_details(client, accounts, services):

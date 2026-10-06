@@ -7,7 +7,7 @@ import JalaliPicker from "../components/JalaliPicker";
 import { toLocalIso } from "../lib/jalali";
 import { type ReactNode, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader } from "../components/ui";
+import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Tabs } from "../components/ui";
 import { api, download } from "../lib/api";
 import { ACCOUNT_KINDS, jdatetime, money, num, ROLES } from "../lib/format";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
@@ -71,6 +71,20 @@ function General() {
 
 const LINE_COLORS = ["#f472b6", "#a78bfa", "#34d399", "#fbbf24", "#fb7185", "#60a5fa", "#f97316", "#14b8a6"];
 
+/** Has this service ever been sold - on invoices here and/or in the previous software's history? */
+function SalesHistory({ u, loading }: { u?: any; loading: boolean }) {
+  if (loading) return <span className="muted text-xs">…</span>;
+  if (!u) return <span className="badge whitespace-nowrap bg-slate-500/10 text-slate-500" title="نه در این سیستم و نه در نرم‌افزار قبلی فروشی ثبت نشده">بدون هیچ فاکتور</span>;
+  return (
+    <div className="flex flex-col items-start gap-1">
+      {u.invoices > 0 && <span className="badge whitespace-nowrap bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
+        title={`جمع ${money(u.invoice_amount)} · آخرین: ${jdatetime(u.invoice_last)}`}>{num(u.invoices)} فاکتور</span>}
+      {u.old > 0 && <span className="badge whitespace-nowrap bg-sky-500/10 text-sky-600 dark:text-sky-300"
+        title={`جمع ${money(u.old_amount)} · آخرین: ${jdatetime(u.old_last)}`}>{num(u.old)} در سیستم قبلی</span>}
+    </div>
+  );
+}
+
 const catalogLineKey = "hesabdar:catalog-line";
 const toEnDigits = (s: string) => s.replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))).replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d))).replace(/ي/g, "ی").replace(/ك/g, "ک");
 
@@ -91,8 +105,10 @@ function Catalog() {
   const lines = useApi<any[]>("/api/lines");
   const services = useApi<any[]>("/api/services");
   const staff = useApi<any[]>("/api/staff");
+  const usage = useApi<any[]>("/api/services/usage");
   const [edit, setEdit] = useState<any>(null);
   const [line, setLine] = useState<any>(null);
+  const [sold, setSold] = useState<"all" | "sold" | "unsold">("all");
   const [busy, setBusy] = useState(false);
   const [q, setQ] = useState("");
   // the selected line (0 = all lines); remembered between visits
@@ -103,7 +119,7 @@ function Catalog() {
     setSelectedState(id);
     try { localStorage.setItem(catalogLineKey, String(id)); } catch { /* storage unavailable */ }
   };
-  const reload = () => { lines.reload(); services.reload(); };
+  const reload = () => { lines.reload(); services.reload(); usage.reload(); };
 
   const allLines = lines.data ?? [];
   const allServices = services.data ?? [];
@@ -119,8 +135,12 @@ function Catalog() {
   const staffCount = countBy((staff.data ?? []).filter((p) => p.is_active !== false));
   const lineStaff = (staff.data ?? []).filter((p) => current && p.line_id === current.id && p.is_active !== false);
 
+  const usageOf: Record<number, any> = Object.fromEntries((usage.data ?? []).map((u) => [u.service_id, u]));
+  const everSold = (s: any) => !!usageOf[s.id];
+  const inLine = allServices.filter((s) => !current || s.line_id === current.id);
+  const soldCount = inLine.filter(everSold).length;
   const needle = toEnDigits(q.trim().toLowerCase());
-  const shown = allServices.filter((s) => (!current || s.line_id === current.id) && (!needle
+  const shown = inLine.filter((s) => (sold === "all" || (sold === "sold") === everSold(s)) && (!needle
     || toEnDigits(`${s.code ?? ""} ${s.name} ${(s.aliases ?? []).join(" ")} ${current ? "" : s.line ?? ""}`).toLowerCase().includes(needle)));
   const lineColor = (id: number) => allLines.find((l) => l.id === id)?.color ?? "#a78bfa";
 
@@ -216,7 +236,7 @@ function Catalog() {
   if (!lines.data || !services.data) return <Loading />;
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[16rem_1fr]">
+    <div className="grid gap-4 xl:grid-cols-[16rem_minmax(0,1fr)]">
       <Card title="لاین‌ها" actions={<button className="btn btn-sm" onClick={() => setLine({ name: "", color: LINE_COLORS[allLines.length % LINE_COLORS.length] })}><Plus size={14} />لاین جدید</button>}>
         <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 xl:mx-0 xl:flex-col xl:overflow-visible xl:px-0">
           {lineButton(0, "همه لاین‌ها", "#8b5cf6", allServices.length)}
@@ -239,6 +259,11 @@ function Catalog() {
         }>
         <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
           <input className="input max-w-xs py-1.5 text-sm" placeholder={current ? "جستجو در خدمات این لاین (نام، کد، نام دیگر)…" : "جستجوی خدمت (نام، کد، لاین، نام دیگر)…"} value={q} onChange={(e) => setQ(e.target.value)} />
+          <Tabs value={sold} onChange={setSold} items={[
+            { value: "all", label: <>همه <span className="num muted text-xs">{num(inLine.length)}</span></> },
+            { value: "sold", label: <>دارای فاکتور <span className="num muted text-xs">{num(soldCount)}</span></> },
+            { value: "unsold", label: <>بدون هیچ فاکتور <span className="num muted text-xs">{num(inLine.length - soldCount)}</span></> },
+          ]} />
           {current && (
             <span className="muted flex flex-wrap items-center gap-1 text-xs">
               <Users size={13} />
@@ -250,7 +275,7 @@ function Catalog() {
         {shown.length ? (
           <div className="mt-3 overflow-x-auto">
             <table className="table">
-              <thead><tr><th>کد</th>{!current && <th>لاین</th>}<th>خدمت</th><th>مدت انجام</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th></th></tr></thead>
+              <thead><tr><th>کد</th>{!current && <th>لاین</th>}<th>خدمت</th><th>سابقه فروش</th><th>مدت انجام</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th></th></tr></thead>
               <tbody>{shown.map((s) => (
                 <tr key={s.id} className="cursor-pointer" onDoubleClick={() => setEdit({ ...s, aliases: (s.aliases ?? []).join("، ") })}>
                   <td className="num font-bold text-violet-600 dark:text-violet-300">{s.code}</td>
@@ -259,6 +284,7 @@ function Catalog() {
                     <div className="font-semibold">{s.name}</div>
                     {s.aliases?.length > 0 && <div className="muted max-w-[16rem] truncate text-xs" title={s.aliases.join("، ")}>{s.aliases.join("، ")}</div>}
                   </td>
+                  <td><SalesHistory u={usageOf[s.id]} loading={!usage.data} /></td>
                   <td onDoubleClick={(e) => e.stopPropagation()}>
                     <span className="flex items-center gap-1">
                       <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
@@ -282,7 +308,7 @@ function Catalog() {
             </table>
           </div>
         ) : (
-          <Empty icon={<Scissors size={28} />} text={q ? "خدمتی با این جستجو پیدا نشد" : current ? "این لاین هنوز خدمتی ندارد؛ با «خدمت جدید در این لاین» اضافه کنید" : "هنوز خدمتی تعریف نشده"} />
+          <Empty icon={<Scissors size={28} />} text={q ? "خدمتی با این جستجو پیدا نشد" : sold === "unsold" ? "همه خدمات این بخش حداقل یک فاکتور دارند" : sold === "sold" ? "هیچ خدمتی در این بخش فاکتور ندارد" : current ? "این لاین هنوز خدمتی ندارد؛ با «خدمت جدید در این لاین» اضافه کنید" : "هنوز خدمتی تعریف نشده"} />
         )}
         {shown.length > 0 && (
           <p className="muted px-5 pb-4 text-xs">{num(shown.length)} خدمت · برای ویرایش روی ردیف دوبار کلیک کنید · مدت انجام را مستقیم در جدول تغییر دهید (Enter = ذخیره)</p>
