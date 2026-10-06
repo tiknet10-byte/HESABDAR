@@ -920,3 +920,24 @@ def test_revenue_by_line_staff_service_with_previous_software(client, accounts):
     d = client.get(f"/api/reports/revenue/staff/{boss['id']}").json()
     assert d["totals"]["revenue"] == 7_000_000 and d["records_total"] == 3
     assert {x["source"] for x in d["records"]} == {"old", "new"} and d["records"][0]["source"] == "new"
+
+
+def test_void_mistake_cancels_on_original_date_and_day_details(client, accounts, services):
+    from datetime import date, datetime, timedelta
+    svc = services["مانیکور"]
+    acc = accounts["کارتخوان ملت"]
+    c = client.post("/api/customers", json={"full_name": "ابطال روز قبل", "mobile": "09125557700"}).json()
+    yesterday = (datetime.now() - timedelta(days=1)).replace(hour=11, minute=0, second=0, microsecond=0)
+    inv = client.post("/api/invoices", json={"customer_id": c["id"], "items": [{"service_id": svc["id"], "unit_price": 2_000_000}],
+                                             "apply_deposits": False, "issued_at": yesterday.isoformat(),
+                                             "payments": [{"payment_account_id": acc, "amount": 2_000_000}]}).json()
+    today_before = client.get("/api/dashboard/day").json()["money_total"]
+    y = (date.today() - timedelta(days=1)).isoformat()
+    y_before = client.get("/api/dashboard/day", params={"day": y}).json()["money_total"]
+    # default void = the invoice was a mistake: its payment is cancelled on its own date, today is untouched
+    assert client.post(f"/api/invoices/{inv['id']}/void").status_code == 200
+    assert client.get("/api/dashboard/day").json()["money_total"] == today_before
+    assert client.get("/api/dashboard/day", params={"day": y}).json()["money_total"] == y_before - 2_000_000
+    # day details lists invoices, money and customers
+    d = client.get("/api/dashboard/day", params={"day": y}).json()
+    assert any(r["kind"] == "void_cancel" for r in d["money"]) and any(i["number"] == inv["number"] for i in d["invoices"])

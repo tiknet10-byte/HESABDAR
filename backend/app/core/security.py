@@ -22,6 +22,7 @@ PERMISSIONS: dict[str, set[str]] = {
     "finance": {"owner", "admin", "accountant", "ai_agent"},
     "reports": {"owner", "admin", "accountant", "ai_agent"},
     "settings": {"owner", "admin"},
+    "void": {"owner", "admin"},  # cancelling an invoice: management only
     "users": {"owner"},
     "backup": {"owner", "admin"},
     "plugins": {"owner", "admin"},

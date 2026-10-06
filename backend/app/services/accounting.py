@@ -468,20 +468,22 @@ def record_payment(db: Session, *, payment_account: PaymentAccount, amount: int,
     return pay
 
 
-def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payments: str = "refund") -> Invoice:
+def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payments: str = "cancel") -> Invoice:
     """Cancel an invoice completely and correctly, also when it was (partly) paid:
 
     * the invoice and staff-commission entries are reversed;
     * deposits used on it become open (held) again for the customer;
-    * money received on it is either refunded (payments="refund") or kept for the customer as a new open
-      deposit (payments="deposit");
+    * money received on it is either cancelled on its own date (payments="cancel": the invoice was a mistake,
+      the payment never really happened - that day's receipts go back to what they really were), refunded today
+      (payments="refund": money given back to the customer now) or kept for the customer as a new open deposit
+      (payments="deposit");
     * appointments it settled are booked again (at their original time when that is still free).
     """
     from ..models import Appointment
 
     if inv.status == "void":
         return inv
-    if payments not in ("refund", "deposit"):
+    if payments not in ("cancel", "refund", "deposit"):
         raise AccountingError("نحوهٔ برگشت وجه نامعتبر است")
     for original in db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(["invoice", "commission"]),
                                                          JournalEntry.ref_id == inv.id)):
@@ -501,15 +503,17 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payment
     # money received on it
     for pay in list(db.scalars(select(Payment).where(Payment.invoice_id == inv.id, Payment.amount > 0))):
         pa = db.get(PaymentAccount, pay.payment_account_id)
-        if payments == "refund":
+        if payments in ("refund", "cancel"):
+            mistake = payments == "cancel"
+            when = pay.paid_at if mistake else local_now()
             back = Payment(invoice_id=inv.id, customer_id=pay.customer_id, payment_account_id=pay.payment_account_id,
-                           amount=-pay.amount, reference=pay.reference, paid_at=local_now(), source="refund")
+                           amount=-pay.amount, reference=pay.reference, paid_at=when, source="void_cancel" if mistake else "refund")
             db.add(back)
             db.flush()
-            post(db, f"استرداد وجه فاکتور باطل‌شده {inv.number}", [
+            post(db, f"{'لغو دریافت' if mistake else 'استرداد وجه'} فاکتور باطل‌شده {inv.number}", [
                 Leg(account(db, AR), debit=pay.amount, customer_id=pay.customer_id),
                 Leg(cash_account_for(db, pa), credit=pay.amount, customer_id=pay.customer_id),
-            ], "payment", back.id)
+            ], "payment", back.id, at=when)
         else:
             credit = Deposit(customer_id=inv.customer_id, amount=pay.amount, payment_account_id=pay.payment_account_id,
                              received_at=pay.paid_at, reference=pay.reference, source="void_credit",

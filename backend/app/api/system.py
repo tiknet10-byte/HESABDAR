@@ -98,6 +98,12 @@ def dashboard(db: Session = Depends(get_db), user=Depends(current_user)):
     return out
 
 
+@router.get("/dashboard/day")
+def dashboard_day(day: date | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Details behind the dashboard's today cards (sales, money received, customers)."""
+    return reports.day_details(db, day)
+
+
 # ---------------------------------------------------------------- alerts
 @router.get("/alerts")
 def alerts(db: Session = Depends(get_db), _=Depends(require("read"))):

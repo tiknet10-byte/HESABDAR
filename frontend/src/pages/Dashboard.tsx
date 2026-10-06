@@ -1,7 +1,8 @@
 import { AlertTriangle, Banknote, CalendarClock, CalendarX, ClipboardList, Clock, HandCoins, Lightbulb, Receipt, ScanLine, TrendingDown, TrendingUp, Users } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Badge, Card, Loading, PageHeader, Stat } from "../components/ui";
+import { Badge, Card, Loading, Modal, PageHeader, Stat, Tabs } from "../components/ui";
+import { useState } from "react";
 import { axis, brand, colorMap, grid, tooltipStyle } from "../lib/chart";
 import { cmoney, compactMoney, jshort, money, num } from "../lib/format";
 import { useApi, useAuth } from "../lib/hooks";
@@ -11,6 +12,65 @@ function growth(now: number, before: number) {
   if (!before) return null;
   const pct = Math.round(((now - before) / before) * 100);
   return { pct, up: pct >= 0 };
+}
+
+const MONEY_KIND: Record<string, { label: string; cls: string }> = {
+  payment: { label: "دریافت فاکتور", cls: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" },
+  deposit: { label: "بیعانه", cls: "bg-violet-500/10 text-violet-700 dark:text-violet-300" },
+  refund: { label: "استرداد", cls: "bg-rose-500/10 text-rose-700 dark:text-rose-300" },
+  void_cancel: { label: "لغو (فاکتور باطل)", cls: "bg-zinc-500/10 text-zinc-500" },
+};
+
+/** What is behind the 'today' cards: invoices, money movements and customers of the day. */
+function DayDetails({ initial }: { initial: "sales" | "money" | "customers" }) {
+  const [tab, setTab] = useState(initial);
+  const { data } = useApi<any>("/api/dashboard/day");
+  if (!data) return <Loading />;
+  return (
+    <div className="space-y-4 text-sm">
+      <Tabs value={tab} onChange={setTab} items={[
+        { value: "sales", label: `فروش (${faDigits(data.invoice_count)})` },
+        { value: "money", label: `دریافت و پرداخت (${faDigits(data.money.length)})` },
+        { value: "customers", label: `مشتریان (${faDigits(data.customers.length)})` },
+      ]} />
+      {tab === "sales" && (data.invoices.length === 0 ? <div className="muted">امروز فاکتوری صادر نشده است.</div> : (
+        <>
+          <div className="rounded-xl bg-pink-500/10 px-3 py-2 font-bold">جمع فروش امروز: <span className="num">{money(data.sales)}</span></div>
+          <div className="space-y-1.5">{data.invoices.map((i: any) => (
+            <Link key={i.id} to={`/invoices?period=today`} className={`flex items-center justify-between gap-2 rounded-xl px-3 py-2 hover:bg-violet-500/5 ${i.status === "void" ? "opacity-50 line-through" : ""}`} style={{ background: "var(--surface)" }}>
+              <span><span className="num ml-2 text-xs font-bold">{i.number}</span><b>{i.customer}</b><span className="muted text-xs"> · {i.items.join("، ")}</span></span>
+              <span className="flex items-center gap-2"><span className="num muted text-xs">{faDigits(i.at.slice(11, 16))}</span><b className="num">{money(i.total)}</b><Badge status={i.status} /></span>
+            </Link>
+          ))}</div>
+        </>
+      ))}
+      {tab === "money" && (data.money.length === 0 ? <div className="muted">امروز پولی دریافت یا پرداخت نشده است.</div> : (
+        <>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {data.by_account.map((a: any) => (
+              <div key={a.name} className="flex justify-between rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}><span>{a.name}</span><b className={`num ${a.value < 0 ? "text-rose-600" : ""}`}>{money(a.value)}</b></div>
+            ))}
+          </div>
+          <div className="rounded-xl bg-emerald-500/10 px-3 py-2 font-bold">جمع خالص امروز: <span className="num">{money(data.money_total)}</span></div>
+          <div className="space-y-1.5">{data.money.map((r: any, k: number) => (
+            <div key={k} className="flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}>
+              <span className="flex items-center gap-2"><span className={`badge ${MONEY_KIND[r.kind]?.cls}`}>{MONEY_KIND[r.kind]?.label}</span><b>{r.customer}</b>{r.ref && <span className="num muted text-xs">{r.ref}</span>}</span>
+              <span className="flex items-center gap-2"><span className="muted text-xs">{r.account}</span><span className="num muted text-xs">{faDigits(r.at.slice(11, 16))}</span><b className={`num ${r.amount < 0 ? "text-rose-600" : ""}`}>{money(r.amount)}</b></span>
+            </div>
+          ))}</div>
+        </>
+      ))}
+      {tab === "customers" && (data.customers.length === 0 ? <div className="muted">امروز مشتری‌ای مراجعه یا ثبت نشده است.</div> : (
+        <div className="space-y-1.5">{data.customers.map((c: any) => (
+          <Link key={c.id} to={`/customers?q=${encodeURIComponent(c.code || c.name)}`} className="flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-2 hover:bg-violet-500/5" style={{ background: "var(--surface)" }}>
+            <span><b>{c.name}</b> {c.code && <span className="num muted text-xs">کد {c.code}</span>}{c.new && <span className="badge mr-2 bg-emerald-500/10 text-emerald-600">جدید</span>}
+              <span className="muted block text-xs">{c.services.length ? c.services.join("، ") : c.appointment ? (c.appointment.time_unknown ? "نوبت امروز (ساعت نامشخص)" : `نوبت ساعت ${faDigits(c.appointment.at.slice(11, 16))}`) : "ثبت‌نام امروز"}</span></span>
+            <span className="flex items-center gap-2">{c.appointment && <Badge status={c.appointment.status} />}{c.total > 0 && <b className="num">{money(c.total)}</b>}</span>
+          </Link>
+        ))}</div>
+      ))}
+    </div>
+  );
 }
 
 function Agenda({ a }: { a: any }) {
@@ -74,6 +134,7 @@ function Agenda({ a }: { a: any }) {
 export default function Dashboard() {
   const { user } = useAuth();
   const { data } = useApi<any>("/api/dashboard");
+  const [detail, setDetail] = useState<null | "sales" | "money" | "customers">(null);
   const lines = useApi<any[]>("/api/lines");
   if (!data) return <Loading />;
   const t = data.today;
@@ -87,10 +148,10 @@ export default function Dashboard() {
         actions={<><Link to="/invoices?new=1" className="btn btn-primary"><Receipt size={16} />فاکتور جدید</Link><Link to="/deposits?new=1" className="btn"><HandCoins size={16} />ثبت بیعانه</Link></>} />
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Link to="/invoices?period=today"><Stat label="فروش امروز" value={cmoney(t.revenue)} hint={`${num(t.invoice_count)} فاکتور`} icon={<Receipt size={20} />} tone="pink" /></Link>
-        <Stat label="دریافتی امروز" value={cmoney(t.cash_in)} hint={`از فاکتورها ${compactMoney(t.cash_in - t.deposits_received)} · بیعانه ${compactMoney(t.deposits_received)}`} icon={<Banknote size={20} />} tone="emerald" />
+        <button className="text-right" onClick={() => setDetail("sales")}><Stat label="فروش امروز" value={cmoney(t.revenue)} hint={`${num(t.invoice_count)} فاکتور · برای جزئیات کلیک کنید`} icon={<Receipt size={20} />} tone="pink" /></button>
+        <button className="text-right" onClick={() => setDetail("money")}><Stat label="دریافتی امروز" value={cmoney(t.cash_in)} hint={`از فاکتورها ${compactMoney(t.cash_in - t.deposits_received)} · بیعانه ${compactMoney(t.deposits_received)}`} icon={<Banknote size={20} />} tone="emerald" /></button>
         <Link to="/deposits"><Stat label="بیعانه‌های باز" value={cmoney(t.deposits_held)} hint={`${num(t.deposits_held_count)} مورد`} icon={<HandCoins size={20} />} tone="amber" /></Link>
-        <Stat label="مشتریان امروز" value={num(t.customers_served)} hint={`${num(t.new_customers)} مشتری جدید · ${num(data.agenda?.today?.length ?? 0)} نوبت امروز`} icon={<Users size={20} />} tone="sky" />
+        <button className="text-right" onClick={() => setDetail("customers")}><Stat label="مشتریان امروز" value={num(t.customers_served)} hint={`${num(t.new_customers)} مشتری جدید · ${num(data.agenda?.today?.length ?? 0)} نوبت امروز`} icon={<Users size={20} />} tone="sky" /></button>
       </div>
 
       {data.agenda && <Agenda a={data.agenda} />}
@@ -190,6 +251,9 @@ export default function Dashboard() {
           </div>
         </>
       )}
+      <Modal open={!!detail} onClose={() => setDetail(null)} title="جزئیات امروز" wide>
+        {detail && <DayDetails initial={detail} />}
+      </Modal>
     </div>
   );
 }

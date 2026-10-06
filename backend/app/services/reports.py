@@ -536,3 +536,56 @@ def staff_revenue_detail(db: Session, staff_id: int, start: date | None = None, 
     records.sort(key=lambda x: x["at"], reverse=True)
     return {**summary, "staff": person.full_name if person else "بدون پرسنل", "records_total": len(records),
             "records": records[offset:offset + limit]}
+
+
+def day_details(db: Session, day: date | None = None) -> dict:
+    """Behind the dashboard's 'today' cards: the day's invoices, every money movement and the customers served."""
+    day = day or date.today()
+    s, e = datetime.combine(day, datetime.min.time()), datetime.combine(day, datetime.max.time())
+    accounts = {a.id: a.name for a in db.scalars(select(PaymentAccount))}
+    ids = select(Invoice.customer_id).where(Invoice.issued_at.between(s, e)).union(
+        select(Payment.customer_id).where(Payment.paid_at.between(s, e)),
+        select(Deposit.customer_id).where(Deposit.received_at.between(s, e)),
+        select(Appointment.customer_id).where(Appointment.start_at.between(s, e)),
+        select(Customer.id).where(Customer.created_at.between(s, e)))
+    names = {c.id: (c.full_name, c.legacy_code, c.mobile) for c in db.scalars(select(Customer).where(Customer.id.in_(ids)))}
+    invs = db.scalars(select(Invoice).where(Invoice.issued_at.between(s, e)).options(selectinload(Invoice.items))
+                      .order_by(Invoice.issued_at)).all()
+    invoices = [{"id": i.id, "number": i.number, "at": i.issued_at.isoformat(timespec="minutes"), "customer": names.get(i.customer_id, ("",))[0],
+                 "items": [it.description for it in i.items], "total": i.total, "paid": i.paid, "status": i.status} for i in invs]
+    money_rows = []
+    for p in db.scalars(select(Payment).where(Payment.paid_at.between(s, e)).order_by(Payment.paid_at)):
+        kind = {"refund": "refund", "void_cancel": "void_cancel"}.get(p.source, "payment")
+        inv = db.get(Invoice, p.invoice_id) if p.invoice_id else None
+        money_rows.append({"at": p.paid_at.isoformat(timespec="minutes"), "kind": kind, "amount": p.amount,
+                           "account": accounts.get(p.payment_account_id), "customer": names.get(p.customer_id, ("",))[0],
+                           "ref": inv.number if inv else None})
+    for d in db.scalars(select(Deposit).where(Deposit.received_at.between(s, e), REAL_DEPOSIT).order_by(Deposit.received_at)):
+        money_rows.append({"at": d.received_at.isoformat(timespec="minutes"), "kind": "deposit", "amount": d.amount,
+                           "account": accounts.get(d.payment_account_id), "customer": names.get(d.customer_id, ("",))[0], "ref": None})
+    money_rows.sort(key=lambda x: x["at"])
+    by_account: dict[str, int] = defaultdict(int)
+    for r in money_rows:
+        by_account[r["account"] or "?"] += r["amount"]
+    # customers: invoiced today, or with an appointment today, or registered today
+    served: dict[int, dict] = {}
+    for i in invs:
+        if i.status == "void":
+            continue
+        c = served.setdefault(i.customer_id, {"id": i.customer_id, "services": [], "total": 0, "appointment": None})
+        c["services"] += [it.description for it in i.items]
+        c["total"] += i.total
+    for a in db.scalars(select(Appointment).where(Appointment.start_at.between(s, e), Appointment.status.in_(("booked", "done", "no_show")))):
+        c = served.setdefault(a.customer_id, {"id": a.customer_id, "services": [], "total": 0, "appointment": None})
+        c["appointment"] = {"at": a.start_at.isoformat(timespec="minutes"), "status": a.status, "time_unknown": bool(a.time_unknown)}
+    new_ids = set(db.scalars(select(Customer.id).where(Customer.created_at.between(s, e), Customer.source != "import")))
+    for cid in new_ids:
+        served.setdefault(cid, {"id": cid, "services": [], "total": 0, "appointment": None})
+    customers = [{**c, "name": names.get(c["id"], ("",))[0], "code": names.get(c["id"], ("", None))[1],
+                  "mobile": names.get(c["id"], ("", None, None))[2], "new": c["id"] in new_ids} for c in served.values()]
+    customers.sort(key=lambda x: (-x["total"], x["name"]))
+    valid = [i for i in invs if i.status != "void"]
+    return {"date": day.isoformat(), "invoices": invoices, "sales": sum(i.total for i in valid), "invoice_count": len(valid),
+            "money": money_rows, "money_total": sum(r["amount"] for r in money_rows),
+            "by_account": sorted(({"name": k, "value": v} for k, v in by_account.items()), key=lambda x: -x["value"]),
+            "customers": customers}

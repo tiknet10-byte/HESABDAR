@@ -34,6 +34,7 @@ const PERMS: Record<string, string[]> = {
   finance: ["owner", "admin", "accountant", "ai_agent"],
   reports: ["owner", "admin", "accountant", "ai_agent"],
   settings: ["owner", "admin"],
+  void: ["owner", "admin"],
   users: ["owner"],
   backup: ["owner", "admin"],
   write: ["owner", "admin", "accountant", "receptionist", "ai_agent"],

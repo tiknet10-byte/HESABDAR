@@ -313,7 +313,7 @@ function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
   const accounts = useApi<any[]>("/api/accounts").data ?? [];
   const [pay, setPay] = useState<Pay>({ payment_account_id: 0, amount: 0 });
   const [voiding, setVoiding] = useState(false);
-  const [payBack, setPayBack] = useState<"refund" | "deposit">("refund");
+  const [payBack, setPayBack] = useState<"cancel" | "refund" | "deposit">("cancel");
   const [reason, setReason] = useState("");
   if (!data) return <Loading />;
   const accName = (aid: number) => accounts.find((a) => a.id === aid)?.name ?? aid;
@@ -369,7 +369,7 @@ function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
           }}>ثبت</button>
         </div>
       )}
-      {can(user, "finance") && data.status !== "void" && (
+      {can(user, "void") && data.status !== "void" && (
         voiding ? (
           <div className="space-y-2 rounded-2xl bg-rose-500/10 p-3">
             <div className="font-bold text-rose-700 dark:text-rose-300">ابطال فاکتور {data.number}</div>
@@ -377,7 +377,8 @@ function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
             {cashPaid > 0 && (
               <div className="space-y-1">
                 <div className="text-xs font-bold">وجه دریافتی ({money(cashPaid)}):</div>
-                <label className="flex items-center gap-2 text-xs"><input type="radio" checked={payBack === "refund"} onChange={() => setPayBack("refund")} />به مشتری برگردانده شد (از همان حساب)</label>
+                <label className="flex items-center gap-2 text-xs"><input type="radio" checked={payBack === "cancel"} onChange={() => setPayBack("cancel")} />فاکتور اشتباه ثبت شده بود؛ این پول واقعاً دریافت نشده (دریافت در همان تاریخ خودش لغو می‌شود)</label>
+                <label className="flex items-center gap-2 text-xs"><input type="radio" checked={payBack === "refund"} onChange={() => setPayBack("refund")} />پول دریافت شده بود و امروز به مشتری برگردانده شد (از همان حساب)</label>
                 <label className="flex items-center gap-2 text-xs"><input type="radio" checked={payBack === "deposit"} onChange={() => setPayBack("deposit")} />نزد سالن بماند و بیعانهٔ باز مشتری شود</label>
               </div>
             )}

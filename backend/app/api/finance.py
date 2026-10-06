@@ -705,7 +705,7 @@ def pay_invoice(iid: int, body: PayIn, db: Session = Depends(get_db), user=Depen
 
 
 @router.post("/invoices/{iid}/void")
-def void(iid: int, reason: str = "", payments: str = "refund", db: Session = Depends(get_db), user=Depends(require("finance"))):
+def void(iid: int, reason: str = "", payments: str = "cancel", db: Session = Depends(get_db), user=Depends(require("void"))):
     i = _get(db, Invoice, iid, "فاکتور")
     try:
         accounting.void_invoice(db, i, reason, user=user, payments=payments)
