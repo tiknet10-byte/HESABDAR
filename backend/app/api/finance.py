@@ -15,6 +15,7 @@ from ..models import (
     Deposit,
     Expense,
     Invoice,
+    InvoiceItem,
     JournalEntry,
     LedgerAccount,
     Payment,
@@ -357,8 +358,10 @@ def deposits_search(q: str = "", status: str = "held", sort: str = "received_des
              "appointment": [appt.c.start_at.is_(None), appt.c.start_at], "customer": [Customer.full_name],
              "code": [func.cast(Customer.legacy_code, Integer)]}[sort if sort in DEPOSIT_SORTS else "received_desc"]
     rows = db.execute(stmt.order_by(*order, Deposit.id.desc()).limit(min(limit, 200)).offset(max(offset, 0))).all()
-    names = {"service": _names("service"), "staff": _staff_names(), "account": {a.id: a.name for a in db.scalars(select(PaymentAccount))}}
-    line_of = {s.id: s.line.name for s in db.scalars(select(Service))}
+    svcs = list(db.scalars(select(Service)))
+    names = {"service": {x.id: x.name for x in svcs}, "staff": _staff_names(),
+             "account": {a.id: a.name for a in db.scalars(select(PaymentAccount))}}
+    line_of = {x.id: x.line.name for x in svcs}
     items = []
     for d, name, code, mobile, at, astatus, unknown in rows:
         items.append({"id": d.id, "customer_id": d.customer_id, "customer": name, "code": code, "mobile": mobile, "amount": d.amount,
@@ -574,6 +577,60 @@ def invoices(start: date | None = None, end: date | None = None, status: str | N
     return [_inv(i, n) for i, n in db.execute(q).all()]
 
 
+INVOICE_SORTS = {"date_desc", "date_asc", "total_desc", "total_asc", "due_desc", "number_desc", "customer"}
+
+
+@router.get("/invoices/search")
+def invoices_search(q: str = "", status: str = "", sort: str = "date_desc", start: date | None = None, end: date | None = None,
+                    line_id: int | None = None, staff_id: int | None = None, account_id: int | None = None,
+                    limit: int = 50, offset: int = 0, db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Sales page: search by invoice number / customer code / name / mobile / service, filters, sorting, paging, totals."""
+    from sqlalchemy.orm import selectinload
+
+    stmt = select(Invoice, Customer.full_name, Customer.legacy_code, Customer.mobile).join(Customer, Customer.id == Invoice.customer_id)
+    if status == "unpaid":
+        stmt = stmt.where(Invoice.status.in_(("issued", "partial")))
+    elif status:
+        stmt = stmt.where(Invoice.status == status)
+    if q.strip():
+        code = to_en_digits(q).strip()
+        mob = normalize_mobile(q)
+        item_hit = select(InvoiceItem.invoice_id).where(fa_like(InvoiceItem.description, q))
+        stmt = stmt.where(or_(fa_like(Customer.full_name, q), Customer.legacy_code == code, Invoice.number.like(f"%{code}%"),
+                              Customer.mobile.like(f"%{mob or code}%"), Invoice.id.in_(item_hit)))
+    if start:
+        stmt = stmt.where(Invoice.issued_at >= datetime.combine(start, datetime.min.time()))
+    if end:
+        stmt = stmt.where(Invoice.issued_at <= datetime.combine(end, datetime.max.time()))
+    if line_id:
+        stmt = stmt.where(Invoice.id.in_(select(InvoiceItem.invoice_id).where(InvoiceItem.line_id == line_id)))
+    if staff_id:
+        stmt = stmt.where(Invoice.id.in_(select(InvoiceItem.invoice_id).where(InvoiceItem.staff_id == staff_id)))
+    if account_id:
+        stmt = stmt.where(Invoice.id.in_(select(Payment.invoice_id).where(Payment.payment_account_id == account_id)))
+    sub = stmt.subquery()
+    total, amount, paid = db.execute(select(func.count(), func.coalesce(func.sum(sub.c.total), 0), func.coalesce(func.sum(sub.c.paid), 0))
+                                     .where(sub.c.status != "void")).one()
+    count_all = db.scalar(select(func.count()).select_from(sub)) or 0
+    order = {"date_desc": [Invoice.issued_at.desc()], "date_asc": [Invoice.issued_at], "total_desc": [Invoice.total.desc()],
+             "total_asc": [Invoice.total], "due_desc": [(Invoice.total - Invoice.paid).desc()], "number_desc": [Invoice.id.desc()],
+             "customer": [Customer.full_name]}[sort if sort in INVOICE_SORTS else "date_desc"]
+    rows = db.execute(stmt.options(selectinload(Invoice.items)).order_by(*order, Invoice.id.desc())
+                      .limit(min(limit, 200)).offset(max(offset, 0))).all()
+    items = [{**_inv(i, n), "code": code, "mobile": mob} for i, n, code, mob in rows]
+    # headline numbers (independent of filters)
+    now = local_now()
+    day = datetime.combine(now.date(), datetime.min.time())
+    month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    week = day - timedelta(days=(now.weekday() + 2) % 7)  # Saturday
+    sums = lambda since: db.execute(select(func.count(Invoice.id), func.coalesce(func.sum(Invoice.total), 0))  # noqa: E731
+                                    .where(Invoice.issued_at >= since, Invoice.status != "void")).one()
+    unpaid = db.execute(select(func.count(Invoice.id), func.coalesce(func.sum(Invoice.total - Invoice.paid), 0))
+                        .where(Invoice.status.in_(("issued", "partial")))).one()
+    return {"total": count_all, "valid": total, "amount": int(amount), "paid": int(paid), "due": int(amount) - int(paid), "items": items,
+            "stats": {k: [v[0], int(v[1])] for k, v in {"today": sums(day), "week": sums(week), "month": sums(month), "unpaid": unpaid}.items()}}
+
+
 @router.post("/invoices/preview")
 def preview_invoice(body: InvoiceIn, db: Session = Depends(get_db), _=Depends(require("write"))):
     """Price sanity checks before saving (learned price ranges)."""
@@ -629,7 +686,7 @@ def get_invoice(iid: int, db: Session = Depends(get_db), _=Depends(require("read
     c = db.get(Customer, i.customer_id)
     pays = db.scalars(select(Payment).where(Payment.invoice_id == iid)).all()
     deps = db.scalars(select(Deposit).where(Deposit.applied_invoice_id == iid)).all()
-    return {**_inv(i, c.full_name), "customer_mobile": c.mobile,
+    return {**_inv(i, c.full_name), "customer_mobile": c.mobile, "customer_code": c.legacy_code,
             "payments": [{"id": p.id, "amount": p.amount, "account_id": p.payment_account_id, "paid_at": p.paid_at.isoformat(),
                           "reference": p.reference} for p in pays],
             "deposits": [_dep(d) for d in deps]}
@@ -648,10 +705,10 @@ def pay_invoice(iid: int, body: PayIn, db: Session = Depends(get_db), user=Depen
 
 
 @router.post("/invoices/{iid}/void")
-def void(iid: int, reason: str = "", db: Session = Depends(get_db), user=Depends(require("finance"))):
+def void(iid: int, reason: str = "", payments: str = "refund", db: Session = Depends(get_db), user=Depends(require("finance"))):
     i = _get(db, Invoice, iid, "فاکتور")
     try:
-        accounting.void_invoice(db, i, reason, user=user)
+        accounting.void_invoice(db, i, reason, user=user, payments=payments)
     except AccountingError as exc:
         raise HTTPException(400, str(exc)) from exc
     db.commit()

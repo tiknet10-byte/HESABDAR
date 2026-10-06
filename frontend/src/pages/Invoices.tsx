@@ -1,13 +1,13 @@
-import { AlertTriangle, Plus, Printer, Receipt, Trash2 } from "lucide-react";
+import { AlertTriangle, Plus, Printer, Receipt, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import StaffSelect from "../components/StaffSelect";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
-import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Tabs } from "../components/ui";
+import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Stat, Tabs } from "../components/ui";
 import { api } from "../lib/api";
-import { ACCOUNT_KINDS, jdatetime, money } from "../lib/format";
+import { ACCOUNT_KINDS, cmoney, jdatetime, money, num } from "../lib/format";
 import JalaliPicker from "../components/JalaliPicker";
-import { faDigits, formatJ, toLocalIso } from "../lib/jalali";
+import { faDigits, formatJ, toGregorian, toJalali, toLocalIso } from "../lib/jalali";
 import { announceFreed } from "../components/Waitlist";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
 
@@ -312,13 +312,33 @@ function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
   const { data, reload } = useApi<any>(`/api/invoices/${id}`);
   const accounts = useApi<any[]>("/api/accounts").data ?? [];
   const [pay, setPay] = useState<Pay>({ payment_account_id: 0, amount: 0 });
+  const [voiding, setVoiding] = useState(false);
+  const [payBack, setPayBack] = useState<"refund" | "deposit">("refund");
+  const [reason, setReason] = useState("");
   if (!data) return <Loading />;
   const accName = (aid: number) => accounts.find((a) => a.id === aid)?.name ?? aid;
+  const cashPaid = data.payments.filter((p: any) => p.amount > 0).reduce((t: number, p: any) => t + p.amount, 0);
+  async function doVoid() {
+    try {
+      await api(`/api/invoices/${id}/void?payments=${payBack}&reason=${encodeURIComponent(reason)}`, { method: "POST" });
+      toast("فاکتور باطل شد");
+      setVoiding(false);
+      reload();
+      onChange();
+    } catch (e: any) { toast(e.message, "error"); }
+  }
   return (
     <div className="space-y-4 text-sm">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div><div className="text-lg font-extrabold">{data.number}</div><div className="muted">{data.customer} · {jdatetime(data.issued_at)}</div></div>
-        <div className="flex gap-2"><Badge status={data.status} /><button className="btn btn-sm" onClick={() => window.print()}><Printer size={14} />چاپ</button></div>
+      <div className="flex flex-wrap items-start justify-between gap-2 rounded-2xl bg-gradient-to-l from-pink-500/10 to-violet-600/10 p-4">
+        <div>
+          <div className="num text-lg font-extrabold">{data.number}</div>
+          <div className="font-semibold">{data.customer} {data.customer_code && <span className="num muted text-xs">کد {data.customer_code}</span>}</div>
+          <div className="muted text-xs">{data.customer_mobile && <span className="num" dir="ltr">{data.customer_mobile} · </span>}{jdatetime(data.issued_at)}</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge status={data.status} />
+          <button className="btn btn-sm" onClick={() => window.open(`/print/invoice/${id}`, "_blank")}><Printer size={14} />چاپ</button>
+        </div>
       </div>
       <table className="table">
         <thead><tr><th>خدمت</th><th>مبلغ</th></tr></thead>
@@ -329,18 +349,19 @@ function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
           </tr>
         ))}</tbody>
       </table>
-      <div className="space-y-1">
-        {data.discount > 0 && <div className="flex justify-between"><span className="muted">تخفیف</span><span className="num">{money(data.discount)}</span></div>}
-        <div className="flex justify-between font-bold"><span>جمع</span><span className="num">{money(data.total)}</span></div>
-        {data.deposits.map((d: any) => <div key={d.id} className="flex justify-between text-emerald-600"><span>بیعانه #{d.id}</span><span className="num">{money(d.amount)}</span></div>)}
-        {data.payments.map((p: any) => <div key={p.id} className="flex justify-between"><span className="muted">{accName(p.account_id)}</span><span className="num">{money(p.amount)}</span></div>)}
-        <div className="flex justify-between font-bold text-amber-600"><span>مانده</span><span className="num">{money(data.due)}</span></div>
+      <div className="space-y-1 rounded-2xl p-3" style={{ background: "var(--surface)" }}>
+        {data.discount > 0 && <div className="flex justify-between"><span className="muted">تخفیف</span><span className="num">− {money(data.discount)}</span></div>}
+        <div className="flex justify-between font-bold"><span>جمع فاکتور</span><span className="num">{money(data.total)}</span></div>
+        {data.deposits.map((d: any) => <div key={d.id} className="flex justify-between text-emerald-600"><span>بیعانه ({formatJ(d.received_at, false)})</span><span className="num">{money(d.amount)}</span></div>)}
+        {data.payments.map((p: any) => <div key={p.id} className={`flex justify-between ${p.amount < 0 ? "text-rose-600" : ""}`}><span className="muted">{p.amount < 0 ? "استرداد · " : ""}{accName(p.account_id)}</span><span className="num">{money(p.amount)}</span></div>)}
+        {data.status !== "void" && <div className="flex justify-between font-bold text-amber-600"><span>مانده</span><span className="num">{money(data.due)}</span></div>}
       </div>
+      {data.notes && <div className="muted text-xs">توضیحات: {data.notes}</div>}
       {data.due > 0 && data.status !== "void" && (
         <div className="grid grid-cols-12 gap-2">
           <select className="input col-span-6" value={pay.payment_account_id} onChange={(e) => setPay({ ...pay, payment_account_id: Number(e.target.value) })}>
-            <option value={0}>حساب دریافت…</option>
-            {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            <option value={0}>دریافت مانده به حساب…</option>
+            {accounts.filter((a) => a.is_active).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </select>
           <div className="col-span-4"><MoneyInput value={pay.amount || data.due} onChange={(v) => setPay({ ...pay, amount: v })} /></div>
           <button className="btn btn-primary btn-sm col-span-2" disabled={!pay.payment_account_id} onClick={async () => {
@@ -348,47 +369,125 @@ function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
           }}>ثبت</button>
         </div>
       )}
-      {can(user, "finance") && data.status !== "void" && data.paid === 0 && (
-        <button className="btn btn-danger btn-sm" onClick={async () => {
-          if (!confirm("فاکتور باطل شود؟ (سند معکوس ثبت می‌شود)")) return;
-          try { await api(`/api/invoices/${id}/void`, { method: "POST" }); toast("فاکتور باطل شد"); reload(); onChange(); } catch (e: any) { toast(e.message, "error"); }
-        }}>ابطال فاکتور</button>
+      {can(user, "finance") && data.status !== "void" && (
+        voiding ? (
+          <div className="space-y-2 rounded-2xl bg-rose-500/10 p-3">
+            <div className="font-bold text-rose-700 dark:text-rose-300">ابطال فاکتور {data.number}</div>
+            <div className="text-xs">سند فاکتور و سهم پرسنل معکوس می‌شود{data.deposits.length ? "، بیعانه‌های کسرشده دوباره باز می‌شوند" : ""} و نوبت‌های این فاکتور دوباره «رزرو» می‌شوند.</div>
+            {cashPaid > 0 && (
+              <div className="space-y-1">
+                <div className="text-xs font-bold">وجه دریافتی ({money(cashPaid)}):</div>
+                <label className="flex items-center gap-2 text-xs"><input type="radio" checked={payBack === "refund"} onChange={() => setPayBack("refund")} />به مشتری برگردانده شد (از همان حساب)</label>
+                <label className="flex items-center gap-2 text-xs"><input type="radio" checked={payBack === "deposit"} onChange={() => setPayBack("deposit")} />نزد سالن بماند و بیعانهٔ باز مشتری شود</label>
+              </div>
+            )}
+            <input className="input" placeholder="دلیل ابطال (اختیاری)" value={reason} onChange={(e) => setReason(e.target.value)} />
+            <div className="flex gap-2">
+              <button className="btn btn-danger flex-1" onClick={doVoid}>تأیید ابطال</button>
+              <button className="btn" onClick={() => setVoiding(false)}>انصراف</button>
+            </div>
+          </div>
+        ) : <button className="btn btn-sm text-rose-600" onClick={() => setVoiding(true)}>ابطال فاکتور</button>
       )}
     </div>
   );
 }
 
+const STATUS_TABS = [
+  { value: "", label: "همه" }, { value: "unpaid", label: "دارای مانده" }, { value: "paid", label: "تسویه" }, { value: "void", label: "باطل" },
+];
+const SORTS = [
+  { v: "date_desc", l: "جدیدترین" }, { v: "date_asc", l: "قدیمی‌ترین" }, { v: "total_desc", l: "بیشترین مبلغ" },
+  { v: "total_asc", l: "کمترین مبلغ" }, { v: "due_desc", l: "بیشترین مانده" }, { v: "customer", l: "نام مشتری" },
+];
+const PERIODS = [{ v: "", l: "همهٔ تاریخ‌ها" }, { v: "today", l: "امروز" }, { v: "week", l: "این هفته" }, { v: "month", l: "این ماه" }, { v: "custom", l: "بازهٔ دلخواه" }];
+const PAGE = 50;
+
+function periodRange(p: string, from: string, to: string): [string, string] {
+  const d = new Date();
+  const iso = (x: Date) => toLocalIso(x).slice(0, 10);
+  if (p === "today") return [iso(d), iso(d)];
+  if (p === "week") { const s = new Date(d); s.setDate(d.getDate() - ((d.getDay() + 1) % 7)); return [iso(s), iso(d)]; }
+  if (p === "month") { const [jy, jm] = toJalali(d.getFullYear(), d.getMonth() + 1, d.getDate()); const [gy, gm, gd] = toGregorian(jy, jm, 1); return [iso(new Date(gy, gm - 1, gd)), iso(d)]; }
+  if (p === "custom") return [from.slice(0, 10), to.slice(0, 10)];
+  return ["", ""];
+}
+
 export default function Invoices() {
   const [params, setParams] = useSearchParams();
-  const [status, setStatus] = useState("");
-  const { data, reload } = useApi<any[]>(`/api/invoices${status ? `?status=${status}` : ""}`, [status]);
-  const [view, setView] = useState<number | null>(null);
+  const lines = useApi<any[]>("/api/lines").data ?? [];
+  const [status, setStatus] = useState(params.get("status") ?? "");
+  const [period, setPeriod] = useState(params.get("period") ?? "");
+  const [from, setFrom] = useState(toLocalIso(new Date()));
+  const [to, setTo] = useState(toLocalIso(new Date()));
+  const [sort, setSort] = useState("date_desc");
+  const [lineId, setLineId] = useState(0);
   const [q, setQ] = useState("");
-  const rows = useMemo(() => (data ?? []).filter((i) => !q || i.customer?.includes(q) || i.number.includes(q)), [data, q]);
+  const [dq, setDq] = useState("");
+  useEffect(() => { const t = setTimeout(() => setDq(q), 300); return () => clearTimeout(t); }, [q]);
+  const [page, setPage] = useState(0);
+  const [start, end] = periodRange(period, from, to);
+  useEffect(() => setPage(0), [status, period, sort, lineId, dq, start, end]);
+  const qs = new URLSearchParams({ q: dq, status, sort, limit: String(PAGE), offset: String(page * PAGE), ...(start ? { start, end } : {}), ...(lineId ? { line_id: String(lineId) } : {}) });
+  const { data, reload } = useApi<any>(`/api/invoices/search?${qs}`, [qs.toString()]);
+  const [view, setView] = useState<number | null>(null);
   const open = params.get("new") === "1";
+  const st = data?.stats;
+  const pages = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE));
 
   return (
-    <div>
+    <div className="space-y-5">
       <PageHeader title="فروش و فاکتور" subtitle="ثبت خدمات ارائه‌شده، کسر بیعانه و دریافت از چند کارتخوان" icon={<Receipt size={22} />}
         actions={<button className="btn btn-primary" onClick={() => setParams({ new: "1" })}><Plus size={16} />فاکتور جدید</button>} />
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <button className="text-right" onClick={() => { setPeriod("today"); setStatus(""); }}><Stat label="فروش امروز" value={st ? cmoney(st.today[1]) : "…"} hint={st && `${num(st.today[0])} فاکتور`} tone="pink" /></button>
+        <button className="text-right" onClick={() => { setPeriod("week"); setStatus(""); }}><Stat label="فروش این هفته" value={st ? cmoney(st.week[1]) : "…"} hint={st && `${num(st.week[0])} فاکتور`} tone="violet" /></button>
+        <button className="text-right" onClick={() => { setPeriod("month"); setStatus(""); }}><Stat label="فروش این ماه" value={st ? cmoney(st.month[1]) : "…"} hint={st && `${num(st.month[0])} فاکتور`} tone="sky" /></button>
+        <button className="text-right" onClick={() => { setPeriod(""); setStatus("unpaid"); }}><Stat label="مانده‌های دریافت‌نشده" value={st ? cmoney(st.unpaid[1]) : "…"} hint={st && `${num(st.unpaid[0])} فاکتور`} tone="amber" /></button>
+      </div>
       <Card pad={false}>
-        <div className="flex flex-wrap items-center justify-between gap-3 p-4">
-          <Tabs value={status} onChange={setStatus} items={[{ value: "", label: "همه" }, { value: "issued", label: "پرداخت‌نشده" }, { value: "partial", label: "جزئی" }, { value: "paid", label: "تسویه" }, { value: "void", label: "باطل" }]} />
-          <input className="input max-w-xs" placeholder="جستجو…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <div className="space-y-3 p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Tabs value={status} onChange={setStatus} items={STATUS_TABS} />
+            <div className="relative mr-auto">
+              <Search size={16} className="muted absolute right-3 top-1/2 -translate-y-1/2" />
+              <input className="input w-72 pr-9" placeholder="شماره فاکتور، کد، نام، موبایل یا خدمت…" value={q} onChange={(e) => setQ(e.target.value)} />
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {PERIODS.map((p) => (
+              <button key={p.v} onClick={() => setPeriod(p.v)}
+                className={`rounded-xl px-3 py-1.5 text-xs font-semibold ${period === p.v ? "bg-violet-600 text-white" : "border hover:bg-violet-500/10"}`}
+                style={period === p.v ? {} : { borderColor: "var(--border)" }}>{p.l}</button>
+            ))}
+            {period === "custom" && <>
+              <div className="w-44"><JalaliPicker pastOnly withTime={false} value={from} onChange={(v) => v && setFrom(v)} /></div>
+              <span className="muted text-xs">تا</span>
+              <div className="w-44"><JalaliPicker pastOnly withTime={false} value={to} onChange={(v) => v && setTo(v)} /></div>
+            </>}
+            <select className="input w-auto py-1.5 text-sm" value={lineId} onChange={(e) => setLineId(Number(e.target.value))} aria-label="لاین">
+              <option value={0}>همهٔ لاین‌ها</option>
+              {lines.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+            </select>
+            <select className="input w-auto py-1.5 text-sm" value={sort} onChange={(e) => setSort(e.target.value)} aria-label="مرتب‌سازی">
+              {SORTS.map((o) => <option key={o.v} value={o.v}>مرتب‌سازی: {o.l}</option>)}
+            </select>
+          </div>
         </div>
         <div className="overflow-x-auto">
-          {!data ? <Loading /> : rows.length === 0 ? <Empty /> : (
+          {!data ? <Loading /> : data.items.length === 0 ? <Empty text="فاکتوری با این شرایط پیدا نشد" /> : (
             <table className="table">
-              <thead><tr><th>شماره</th><th>مشتری</th><th>تاریخ</th><th>خدمات</th><th>مبلغ</th><th>مانده</th><th>وضعیت</th></tr></thead>
+              <thead><tr><th>شماره</th><th>کد</th><th>مشتری</th><th>تاریخ</th><th>خدمات</th><th>مبلغ</th><th>مانده</th><th>وضعیت</th></tr></thead>
               <tbody>
-                {rows.map((i) => (
-                  <tr key={i.id} className="cursor-pointer" onClick={() => setView(i.id)}>
+                {data.items.map((i: any) => (
+                  <tr key={i.id} className={`cursor-pointer ${i.status === "void" ? "opacity-50" : ""}`} onClick={() => setView(i.id)}>
                     <td className="num font-semibold">{i.number}</td>
-                    <td>{i.customer}</td>
-                    <td className="muted num">{jdatetime(i.issued_at)}</td>
-                    <td className="max-w-64 truncate">{i.items.map((x: any) => x.description + (x.staff ? ` (${x.staff})` : "")).join("، ")}</td>
+                    <td className="num muted">{i.code}</td>
+                    <td><div className="font-semibold">{i.customer}</div>{i.mobile && <div className="num muted text-xs" dir="ltr">{i.mobile}</div>}</td>
+                    <td className="muted num text-xs">{jdatetime(i.issued_at)}</td>
+                    <td className="max-w-64 truncate text-xs">{i.items.map((x: any) => x.description + (x.staff ? ` (${x.staff})` : "")).join("، ")}</td>
                     <td className="num font-semibold">{money(i.total)}</td>
-                    <td className="num">{i.due ? money(i.due) : "—"}</td>
+                    <td className="num">{i.due > 0 && i.status !== "void" ? <span className="text-amber-600">{money(i.due)}</span> : "—"}</td>
                     <td><Badge status={i.status} /></td>
                   </tr>
                 ))}
@@ -396,6 +495,18 @@ export default function Invoices() {
             </table>
           )}
         </div>
+        {data && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t p-3 text-sm" style={{ borderColor: "var(--border)" }}>
+            <span className="muted">{num(data.total)} فاکتور · فروش <b className="num">{money(data.amount)}</b> · دریافت‌شده <b className="num">{money(data.paid)}</b>{data.due > 0 && <> · مانده <b className="num text-amber-600">{money(data.due)}</b></>}</span>
+            {pages > 1 && (
+              <div className="flex items-center gap-2">
+                <button className="btn btn-sm" disabled={page === 0} onClick={() => setPage(page - 1)}>قبلی</button>
+                <span className="num">صفحهٔ {num(page + 1)} از {num(pages)}</span>
+                <button className="btn btn-sm" disabled={page + 1 >= pages} onClick={() => setPage(page + 1)}>بعدی</button>
+              </div>
+            )}
+          </div>
+        )}
       </Card>
       <Modal open={open} onClose={() => setParams({})} title="فاکتور جدید" wide>
         {open && <InvoiceForm key={params.get("appointment") ?? "new"} appointmentId={params.get("appointment") ? Number(params.get("appointment")) : undefined}

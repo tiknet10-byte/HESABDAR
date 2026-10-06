@@ -323,8 +323,8 @@ function DepositView({ id, onChange }: { id: number; onChange: () => void }) {
 export default function Deposits() {
   const [params, setParams] = useSearchParams();
   const lines = useApi<any[]>("/api/lines").data ?? [];
-  const [status, setStatus] = useState("held");
-  const [filter, setFilter] = useState("");
+  const [status, setStatus] = useState(params.get("status") ?? "held");
+  const [filter, setFilter] = useState(params.get("filter") ?? "");
   const [sort, setSort] = useState("received_desc");
   const [lineId, setLineId] = useState(0);
   const [q, setQ] = useState("");

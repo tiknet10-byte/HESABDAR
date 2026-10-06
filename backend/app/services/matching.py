@@ -147,7 +147,7 @@ def on_bank_transaction(db: Session, tx: BankTransaction) -> None:
     window = timedelta(hours=36)
     already = select(BankTransaction.matched_id).where(BankTransaction.matched_type == "deposit")
     dep = db.scalar(select(Deposit).where(
-        Deposit.payment_account_id == tx.payment_account_id, Deposit.amount == tx.amount,
+        Deposit.payment_account_id == tx.payment_account_id, Deposit.amount == tx.amount, Deposit.source != "import",
         Deposit.received_at.between(tx.occurred_at - window, tx.occurred_at + window), Deposit.id.not_in(already)))
     if dep:
         tx.status, tx.matched_type, tx.matched_id = "matched", "deposit", dep.id

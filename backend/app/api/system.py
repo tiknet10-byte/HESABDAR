@@ -6,7 +6,7 @@ import logging
 import io
 import shutil
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -73,9 +73,13 @@ def dashboard(db: Session = Depends(get_db), user=Depends(current_user)):
            "alerts": [{"id": a.id, "level": a.level, "title": a.title, "message": a.message, "at": a.at.isoformat()}
                       for a in db.scalars(select(Alert).where(Alert.is_read.is_(False)).order_by(Alert.at.desc()).limit(8))],
            "ai_available": claude.available()}
+    out["agenda"] = reports.agenda(db)
     from ..core.security import has_permission
     if has_permission(user.role, "reports"):
         out["month"] = reports.summary(db)
+        prev_end = today - timedelta(days=30)
+        prev = reports.summary(db, prev_end - timedelta(days=29), prev_end)
+        out["previous"] = {"revenue": prev["revenue"], "invoice_count": prev["invoice_count"], "customers_served": prev["customers_served"]}
         out["series"] = reports.daily_series(db)
         out["insights"] = reports.insights(db)
     return out

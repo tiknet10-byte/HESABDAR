@@ -19,6 +19,7 @@ import Reconciliation from "./pages/Reconciliation";
 import Reports from "./pages/Reports";
 import Scan from "./pages/Scan";
 import PrintAppointments from "./pages/PrintAppointments";
+import PrintInvoice from "./pages/PrintInvoice";
 import SettingsPage from "./pages/Settings";
 import StaffShares from "./pages/StaffShares";
 import { Loading } from "./components/ui";
@@ -84,6 +85,7 @@ function App() {
           <BrowserRouter>
             <Routes>
               <Route path="print/appointments" element={<PrintAppointments />} />
+              <Route path="print/invoice/:id" element={<PrintInvoice />} />
               <Route element={<Layout />}>
                 <Route index element={<Dashboard />} />
                 <Route path="invoices" element={<Invoices />} />

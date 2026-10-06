@@ -1,10 +1,75 @@
-import { AlertTriangle, Banknote, HandCoins, Lightbulb, Receipt, ScanLine, TrendingUp, Users } from "lucide-react";
+import { AlertTriangle, Banknote, CalendarClock, CalendarX, ClipboardList, Clock, HandCoins, Lightbulb, Receipt, ScanLine, TrendingDown, TrendingUp, Users } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Card, Loading, PageHeader, Stat } from "../components/ui";
+import { Badge, Card, Loading, PageHeader, Stat } from "../components/ui";
 import { axis, brand, colorMap, grid, tooltipStyle } from "../lib/chart";
 import { cmoney, compactMoney, jshort, money, num } from "../lib/format";
 import { useApi, useAuth } from "../lib/hooks";
+import { faDigits, formatJShort } from "../lib/jalali";
+
+function growth(now: number, before: number) {
+  if (!before) return null;
+  const pct = Math.round(((now - before) / before) * 100);
+  return { pct, up: pct >= 0 };
+}
+
+function Agenda({ a }: { a: any }) {
+  const todo = a.todo;
+  const items = [
+    { n: todo.overdue_deposits[0], amt: todo.overdue_deposits[1], text: "بیعانهٔ باز با نوبت گذشته", hint: "فاکتور، استرداد یا سوخت", to: "/deposits?filter=overdue", tone: "bg-rose-500/10 text-rose-700 dark:text-rose-300", icon: <HandCoins size={16} /> },
+    { n: todo.past_open_appointments, text: "نوبت گذشته که وضعیتش ثبت نشده", hint: "انجام شد / نیامد / لغو", to: "/appointments?tab=list", tone: "bg-amber-500/10 text-amber-700 dark:text-amber-300", icon: <CalendarX size={16} /> },
+    { n: todo.unpaid_invoices[0], amt: todo.unpaid_invoices[1], text: "فاکتور با مانده پرداخت‌نشده", hint: "پیگیری دریافت", to: "/invoices?status=unpaid", tone: "bg-orange-500/10 text-orange-700 dark:text-orange-300", icon: <Receipt size={16} /> },
+    { n: todo.deposits_without_appointment[0], amt: todo.deposits_without_appointment[1], text: "بیعانهٔ باز بدون نوبت", hint: "تعیین نوبت", to: "/deposits?filter=no_appointment", tone: "bg-violet-500/10 text-violet-700 dark:text-violet-300", icon: <CalendarClock size={16} /> },
+    { n: todo.unknown_time_appointments, text: "نوبت با ساعت نامشخص", hint: "تعیین ساعت", to: "/appointments?tab=list", tone: "bg-sky-500/10 text-sky-700 dark:text-sky-300", icon: <Clock size={16} /> },
+  ].filter((x) => x.n > 0);
+  return (
+    <div className="grid gap-4 lg:grid-cols-3">
+      <Card className="lg:col-span-2" title={<span className="flex items-center gap-2"><CalendarClock size={18} className="text-violet-500" />نوبت‌های امروز ({faDigits(a.today.length)})</span>}
+        actions={<Link to="/appointments" className="btn btn-sm">همهٔ نوبت‌ها</Link>}>
+        {a.today.length === 0 ? <div className="muted text-sm">امروز نوبتی ثبت نشده است.{a.tomorrow_count ? ` فردا ${faDigits(a.tomorrow_count)} نوبت دارید.` : ""}</div> : (
+          <div className="max-h-80 space-y-1.5 overflow-y-auto">
+            {a.today.map((x: any) => (
+              <div key={x.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-2 text-sm" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
+                <div className="flex items-center gap-3">
+                  <span className={`num rounded-lg px-2 py-1 text-xs font-bold ${x.time_unknown ? "bg-amber-500/15 text-amber-700" : "bg-violet-500/10 text-violet-700 dark:text-violet-300"}`}>{x.time_unknown ? "نامشخص" : faDigits(x.start_at.slice(11, 16))}</span>
+                  <div><div className="font-semibold">{x.customer}</div><div className="muted text-xs">{[x.line, x.service, x.staff].filter(Boolean).join(" · ")}</div></div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge status={x.status} />
+                  {x.status === "booked" && <Link className="btn btn-sm btn-primary" to={`/invoices?new=1&appointment=${x.id}`}>فاکتور</Link>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {a.upcoming.length > 0 && (
+          <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--border)" }}>
+            <div className="muted mb-1.5 text-xs font-bold">نوبت‌های بعدی{a.tomorrow_count ? ` · فردا ${faDigits(a.tomorrow_count)} نوبت` : ""}</div>
+            <div className="flex flex-wrap gap-1.5">
+              {a.upcoming.map((x: any) => (
+                <span key={x.id} className="rounded-xl border px-2.5 py-1 text-xs" style={{ borderColor: "var(--border)" }}>
+                  <b>{x.customer}</b> · {x.time_unknown ? formatJShort(x.start_at).split(" · ")[0] : formatJShort(x.start_at)}{x.service ? ` · ${x.service}` : ""}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </Card>
+      <Card title={<span className="flex items-center gap-2"><ClipboardList size={18} className="text-amber-500" />کارهای مانده</span>}>
+        {items.length === 0 ? <div className="rounded-2xl bg-emerald-500/10 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300">✓ همه چیز مرتب است؛ کار مانده‌ای نیست.</div> : (
+          <div className="space-y-2">
+            {items.map((x) => (
+              <Link key={x.text} to={x.to} className={`flex items-center justify-between gap-2 rounded-2xl px-3 py-2.5 text-sm transition hover:opacity-80 ${x.tone}`}>
+                <span className="flex items-center gap-2">{x.icon}<span><b className="num">{faDigits(x.n)}</b> {x.text}<span className="block text-[11px] opacity-75">{x.hint}</span></span></span>
+                {x.amt ? <span className="num text-xs font-bold">{compactMoney(x.amt)}</span> : null}
+              </Link>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -14,6 +79,7 @@ export default function Dashboard() {
   const t = data.today;
   const m = data.month;
   const lineColor = colorMap((lines.data ?? []).map((l) => l.name));
+  const g = m && data.previous ? growth(m.revenue, data.previous.revenue) : null;
 
   return (
     <div className="space-y-6">
@@ -21,11 +87,13 @@ export default function Dashboard() {
         actions={<><Link to="/invoices?new=1" className="btn btn-primary"><Receipt size={16} />فاکتور جدید</Link><Link to="/deposits?new=1" className="btn"><HandCoins size={16} />ثبت بیعانه</Link></>} />
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Stat label="فروش امروز" value={cmoney(t.revenue)} hint={`${num(t.invoice_count)} فاکتور`} icon={<Receipt size={20} />} tone="pink" />
-        <Stat label="دریافتی امروز" value={cmoney(t.cash_in)} hint={`بیعانه: ${compactMoney(t.deposits_received)}`} icon={<Banknote size={20} />} tone="emerald" />
-        <Stat label="بیعانه‌های باز" value={cmoney(t.deposits_held)} hint={`${num(t.deposits_held_count)} مورد`} icon={<HandCoins size={20} />} tone="amber" />
-        <Stat label="مشتریان امروز" value={num(t.customers_served)} hint={`${num(t.new_customers)} مشتری جدید`} icon={<Users size={20} />} tone="sky" />
+        <Link to="/invoices?period=today"><Stat label="فروش امروز" value={cmoney(t.revenue)} hint={`${num(t.invoice_count)} فاکتور`} icon={<Receipt size={20} />} tone="pink" /></Link>
+        <Stat label="دریافتی امروز" value={cmoney(t.cash_in)} hint={`از فاکتورها ${compactMoney(t.cash_in - t.deposits_received)} · بیعانه ${compactMoney(t.deposits_received)}`} icon={<Banknote size={20} />} tone="emerald" />
+        <Link to="/deposits"><Stat label="بیعانه‌های باز" value={cmoney(t.deposits_held)} hint={`${num(t.deposits_held_count)} مورد`} icon={<HandCoins size={20} />} tone="amber" /></Link>
+        <Stat label="مشتریان امروز" value={num(t.customers_served)} hint={`${num(t.new_customers)} مشتری جدید · ${num(data.agenda?.today?.length ?? 0)} نوبت امروز`} icon={<Users size={20} />} tone="sky" />
       </div>
+
+      {data.agenda && <Agenda a={data.agenda} />}
 
       {(data.reconciliation.receipts_mismatch > 0 || data.alerts.length > 0) && (
         <Card title={<span className="flex items-center gap-2"><AlertTriangle size={18} className="text-rose-500" />هشدارها</span>}
@@ -86,7 +154,8 @@ export default function Dashboard() {
           </div>
 
           <div className="grid gap-4 lg:grid-cols-3">
-            <Stat label="فروش ۳۰ روز" value={compactMoney(m.revenue)} hint={`میانگین هر فاکتور ${compactMoney(m.avg_ticket)}`} />
+            <Stat label="فروش ۳۰ روز" value={compactMoney(m.revenue)} icon={g ? (g.up ? <TrendingUp size={20} /> : <TrendingDown size={20} />) : undefined} tone={g && !g.up ? "pink" : "emerald"}
+              hint={<>{g && <b className={g.up ? "text-emerald-600" : "text-rose-600"}>{g.up ? "▲" : "▼"} {faDigits(Math.abs(g.pct))}٪ نسبت به ۳۰ روز قبل · </b>}میانگین هر فاکتور {compactMoney(m.avg_ticket)}</>} />
             <Stat label="سود خالص ۳۰ روز" value={compactMoney(m.net_profit)} hint={`هزینه‌ها ${compactMoney(m.expenses)}`} />
             <Stat label="مشتریان بازگشتی" value={`${num(m.returning_customers)} از ${num(m.customers_served)}`} hint={`${num(m.new_customers)} مشتری جدید`} />
           </div>

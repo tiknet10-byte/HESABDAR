@@ -775,3 +775,67 @@ def test_persian_ye_kaf_search_and_deposits_page(client, accounts, services):
     det = client.get(f"/api/deposits/{d2['id']}").json()
     assert det["status"] == "refunded" and len(det["timeline"]) == 2
     assert client.get("/api/deposits/search", params={"q": "مريم", "status": "refunded"}).json()["total"] == 1
+
+
+def test_invoices_search_and_dashboard_ignores_imported_money(client, accounts, services):
+    svc = services["مانیکور"]
+    c = client.post("/api/customers", json={"full_name": "علي فاکتوري", "mobile": "09124443322"}).json()
+    inv = client.post("/api/invoices", json={"customer_id": c["id"], "items": [{"service_id": svc["id"], "unit_price": 2_000_000}],
+                                             "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 500_000}]}).json()
+    r = client.get("/api/invoices/search", params={"q": "علی فاکتوری"}).json()
+    assert [x["id"] for x in r["items"]] == [inv["id"]] and r["items"][0]["code"] == c["code"]
+    assert r["amount"] == 2_000_000 and r["due"] == 1_500_000
+    assert inv["id"] in [x["id"] for x in client.get("/api/invoices/search", params={"q": "مانيکور"}).json()["items"]]
+    assert inv["id"] in [x["id"] for x in client.get("/api/invoices/search", params={"status": "unpaid"}).json()["items"]]
+    assert client.get("/api/invoices/search", params={"q": inv["number"]}).json()["total"] == 1
+    page = client.get("/api/invoices/search", params={"limit": 1}).json()
+    assert len(page["items"]) == 1 and page["stats"]["today"][0] >= 1 and page["stats"]["unpaid"][0] >= 1
+    # dashboard: an imported (old-system) deposit is not money received today
+    before = client.get("/api/dashboard").json()
+    rows = [["کد مشتری", "نام مشتری", "موبایل", "تاریخ پرداخت", "مبلغ بیعانه"], ["771100", "قدیمی داشبورد", "09124440011", "", 9_000_000]]
+    p = client.post("/api/import/legacy/preview", files={"file": ("d.xlsx", _xlsx(rows), "application/octet-stream")},
+                    data={"kind": "deposits", "unit": "rial"}).json()
+    client.post(f"/api/import/legacy/{p['id']}/commit", json={})
+    after = client.get("/api/dashboard").json()
+    assert after["today"]["cash_in"] == before["today"]["cash_in"]
+    assert after["today"]["new_customers"] == before["today"]["new_customers"]
+    assert after["today"]["deposits_held"] == before["today"]["deposits_held"] + 9_000_000
+    ag = after["agenda"]
+    assert "today" in ag and ag["todo"]["unpaid_invoices"][0] >= 1 and "previous" in after
+    # deposits page shows real service names
+    d = client.post("/api/deposits", json={"customer_id": c["id"], "amount": 1_000_000, "payment_account_id": accounts["کارتخوان ملت"],
+                                           "service_id": svc["id"]}).json()
+    found = [x for x in client.get("/api/deposits/search", params={"q": c["code"]}).json()["items"] if x["id"] == d["id"]][0]
+    assert found["service"] == "مانیکور" and found["line"]
+
+
+def test_void_paid_invoice_refund_or_keep_as_deposit(client, accounts, services):
+    svc = services["مانیکور"]
+    acc = accounts["کارتخوان ملت"]
+    c = client.post("/api/customers", json={"full_name": "ابطال آزمون", "mobile": "09125556600"}).json()
+    dep = client.post("/api/deposits", json={"customer_id": c["id"], "amount": 1_000_000, "payment_account_id": acc}).json()
+    when = _future_slot(client, svc["id"], 6)
+    appt = client.post("/api/appointments", json={"customer_id": c["id"], "service_id": svc["id"], "start_at": when}).json()
+    tb0 = client.get("/api/ledger/trial-balance").json()
+    inv = client.post("/api/invoices", json={"customer_id": c["id"], "items": [{"service_id": svc["id"], "unit_price": 3_000_000}],
+                                             "deposit_ids": [dep["id"]], "appointment_ids": [appt["id"]],
+                                             "payments": [{"payment_account_id": acc, "amount": 2_000_000}]}).json()
+    assert inv["status"] == "paid"
+    assert client.get(f"/api/appointments/{appt['id']}").json()["status"] == "done"
+    # a paid invoice can now be voided: money refunded, deposit open again, appointment booked again at its time
+    v = client.post(f"/api/invoices/{inv['id']}/void", params={"payments": "refund"})
+    assert v.status_code == 200 and v.json()["status"] == "void", v.text
+    assert client.get(f"/api/deposits/{dep['id']}").json()["status"] == "held"
+    a = client.get(f"/api/appointments/{appt['id']}").json()
+    assert a["status"] == "booked" and a["start_at"] == when and not a["invoice_id"]
+    tb1 = client.get("/api/ledger/trial-balance").json()
+    bal = lambda tb: {r["code"]: r["balance"] for r in tb["rows"]}  # noqa: E731
+    for code in ("1200", "2100"):  # receivables and deposits back where they were
+        assert bal(tb1).get(code, 0) == bal(tb0).get(code, 0), code
+    assert tb1["total_debit"] == tb1["total_credit"]
+    # keep the money as a deposit instead
+    inv2 = client.post("/api/invoices", json={"customer_id": c["id"], "items": [{"service_id": svc["id"], "unit_price": 1_500_000}],
+                                              "apply_deposits": False, "payments": [{"payment_account_id": acc, "amount": 1_500_000}]}).json()
+    client.post(f"/api/invoices/{inv2['id']}/void", params={"payments": "deposit"})
+    held = client.get(f"/api/deposits?status=held&customer_id={c['id']}").json()
+    assert sorted(d["amount"] for d in held) == [1_000_000, 1_500_000]

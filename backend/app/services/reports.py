@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from .textutil import toman
 from ..models import (
@@ -29,25 +29,37 @@ def _range(start: date | None, end: date | None) -> tuple[datetime, datetime]:
     return datetime.combine(start, datetime.min.time()), datetime.combine(end, datetime.max.time())
 
 
+# money that really came in during a period: deposits brought over from the previous software are opening
+# balances (received in the old system), so they never count as cash received here
+REAL_DEPOSIT = Deposit.source.not_in(("import", "void_credit"))  # void_credit: already counted as the invoice payment
+
+
 def summary(db: Session, start: date | None = None, end: date | None = None) -> dict:
     s, e = _range(start, end)
-    inv_q = select(Invoice).where(Invoice.issued_at.between(s, e), Invoice.status != "void")
+    inv_q = (select(Invoice).where(Invoice.issued_at.between(s, e), Invoice.status != "void")
+             .options(selectinload(Invoice.items)))
     invoices = db.scalars(inv_q).all()
     revenue = sum(i.total for i in invoices)
     discounts = sum(i.discount for i in invoices) + sum(it.discount for i in invoices for it in i.items)
     expenses = int(db.scalar(select(func.coalesce(func.sum(Expense.amount), 0)).where(Expense.spent_at.between(s, e))) or 0)
     received_payments = int(db.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.paid_at.between(s, e))) or 0)
-    received_deposits = int(db.scalar(select(func.coalesce(func.sum(Deposit.amount), 0)).where(Deposit.received_at.between(s, e))) or 0)
+    received_deposits = int(db.scalar(select(func.coalesce(func.sum(Deposit.amount), 0)).where(Deposit.received_at.between(s, e), REAL_DEPOSIT)) or 0)
     held = int(db.scalar(select(func.coalesce(func.sum(Deposit.amount), 0)).where(Deposit.status == "held")) or 0)
     held_count = db.scalar(select(func.count(Deposit.id)).where(Deposit.status == "held")) or 0
-    receivable = sum(i.total - i.paid for i in db.scalars(select(Invoice).where(Invoice.status.in_(["issued", "partial"]))))
+    receivable = int(db.scalar(select(func.coalesce(func.sum(Invoice.total - Invoice.paid), 0))
+                               .where(Invoice.status.in_(["issued", "partial"]))) or 0)
 
     customer_ids = {i.customer_id for i in invoices}
-    new_customers = db.scalar(select(func.count(Customer.id)).where(Customer.created_at.between(s, e))) or 0
-    returning = 0
-    for cid in customer_ids:
-        prev = db.scalar(select(func.count(Invoice.id)).where(Invoice.customer_id == cid, Invoice.issued_at < s, Invoice.status != "void"))
-        returning += 1 if prev else 0
+    # customers brought over from the previous software are not "new" on the day they were imported
+    new_customers = db.scalar(select(func.count(Customer.id)).where(Customer.created_at.between(s, e), Customer.source != "import")) or 0
+    # returning = had an earlier invoice here, or earlier services in the previous software's history
+    earlier = set()
+    if customer_ids:
+        earlier |= set(db.scalars(select(Invoice.customer_id).where(Invoice.customer_id.in_(customer_ids), Invoice.issued_at < s,
+                                                                    Invoice.status != "void")))
+        earlier |= set(db.scalars(select(Appointment.customer_id).where(Appointment.customer_id.in_(customer_ids),
+                                                                        Appointment.status == "done", Appointment.start_at < s)))
+    returning = len(earlier)
 
     by_line: dict[str, int] = defaultdict(int)
     by_service: dict[str, dict] = {}
@@ -70,7 +82,7 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
     by_account: dict[str, int] = defaultdict(int)
     for pid, amt in db.execute(select(Payment.payment_account_id, Payment.amount).where(Payment.paid_at.between(s, e))):
         by_account[accounts[pid].name if pid in accounts else "?"] += int(amt)
-    for pid, amt in db.execute(select(Deposit.payment_account_id, Deposit.amount).where(Deposit.received_at.between(s, e))):
+    for pid, amt in db.execute(select(Deposit.payment_account_id, Deposit.amount).where(Deposit.received_at.between(s, e), REAL_DEPOSIT)):
         by_account[accounts[pid].name if pid in accounts else "?"] += int(amt)
 
     expense_by_cat: dict[str, int] = defaultdict(int)
@@ -107,6 +119,48 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
     }
 
 
+def agenda(db: Session, now: datetime | None = None) -> dict:
+    """What needs attention today: today's appointments, the next ones, and open items to settle."""
+    from ..models import local_now
+
+    now = now or local_now()
+    day = datetime.combine(now.date(), datetime.min.time())
+    tomorrow = day + timedelta(days=1)
+    svc = {x.id: x for x in db.scalars(select(Service))}
+    staff = {p.id: p.full_name for p in db.scalars(select(Staff))}
+
+    def row(a: Appointment, cname: str) -> dict:
+        sv = svc.get(a.service_id)
+        return {"id": a.id, "start_at": a.start_at.isoformat(timespec="minutes"), "customer": cname, "customer_id": a.customer_id,
+                "service": sv.name if sv else None, "line": sv.line.name if sv else None, "staff": staff.get(a.staff_id),
+                "status": a.status, "time_unknown": bool(a.time_unknown),
+                "minutes": a.duration_minutes or (sv.duration_minutes if sv else 60)}
+
+    base = select(Appointment, Customer.full_name).join(Customer, Customer.id == Appointment.customer_id)
+    today = [row(a, n) for a, n in db.execute(base.where(Appointment.start_at >= day, Appointment.start_at < tomorrow,
+                                                          Appointment.status.in_(("booked", "done", "no_show")))
+                                                   .order_by(Appointment.time_unknown.is_(True), Appointment.start_at))]
+    upcoming = [row(a, n) for a, n in db.execute(base.where(Appointment.start_at >= tomorrow, Appointment.status == "booked")
+                                                      .order_by(Appointment.start_at).limit(6))]
+    count = lambda q: db.execute(q).one()  # noqa: E731
+    overdue = count(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
+                    .join(Appointment, Appointment.id == Deposit.appointment_id)
+                    .where(Deposit.status == "held", Appointment.start_at < day))
+    no_appt = count(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
+                    .where(Deposit.status == "held", Deposit.appointment_id.is_(None)))
+    unpaid = count(select(func.count(Invoice.id), func.coalesce(func.sum(Invoice.total - Invoice.paid), 0))
+                   .where(Invoice.status.in_(("issued", "partial"))))
+    past_open = db.scalar(select(func.count(Appointment.id)).where(Appointment.status == "booked", Appointment.start_at < day)) or 0
+    unknown_time = db.scalar(select(func.count(Appointment.id)).where(Appointment.status == "booked", Appointment.time_unknown.is_(True),
+                                                                     Appointment.start_at >= day)) or 0
+    tomorrow_n = db.scalar(select(func.count(Appointment.id)).where(Appointment.status == "booked", Appointment.start_at >= tomorrow,
+                                                                   Appointment.start_at < tomorrow + timedelta(days=1))) or 0
+    return {"today": today, "upcoming": upcoming, "tomorrow_count": tomorrow_n,
+            "todo": {"overdue_deposits": [overdue[0], int(overdue[1])], "deposits_without_appointment": [no_appt[0], int(no_appt[1])],
+                     "unpaid_invoices": [unpaid[0], int(unpaid[1])], "past_open_appointments": past_open,
+                     "unknown_time_appointments": unknown_time}}
+
+
 def daily_series(db: Session, start: date | None = None, end: date | None = None) -> list[dict]:
     s, e = _range(start, end)
     rev: dict[date, int] = defaultdict(int)
@@ -118,7 +172,7 @@ def daily_series(db: Session, start: date | None = None, end: date | None = None
         exp[at.date()] += int(amt)
     for at, amt in db.execute(select(Payment.paid_at, Payment.amount).where(Payment.paid_at.between(s, e))):
         cash[at.date()] += int(amt)
-    for at, amt in db.execute(select(Deposit.received_at, Deposit.amount).where(Deposit.received_at.between(s, e))):
+    for at, amt in db.execute(select(Deposit.received_at, Deposit.amount).where(Deposit.received_at.between(s, e), REAL_DEPOSIT)):
         cash[at.date()] += int(amt)
     out = []
     d = s.date()

@@ -466,11 +466,21 @@ def record_payment(db: Session, *, payment_account: PaymentAccount, amount: int,
     return pay
 
 
-def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None) -> Invoice:
+def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payments: str = "refund") -> Invoice:
+    """Cancel an invoice completely and correctly, also when it was (partly) paid:
+
+    * the invoice and staff-commission entries are reversed;
+    * deposits used on it become open (held) again for the customer;
+    * money received on it is either refunded (payments="refund") or kept for the customer as a new open
+      deposit (payments="deposit");
+    * appointments it settled are booked again (at their original time when that is still free).
+    """
+    from ..models import Appointment
+
     if inv.status == "void":
         return inv
-    if inv.paid:
-        raise AccountingError("ابتدا پرداخت‌ها/بیعانه‌های این فاکتور را برگشت بزنید")
+    if payments not in ("refund", "deposit"):
+        raise AccountingError("نحوهٔ برگشت وجه نامعتبر است")
     for original in db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(["invoice", "commission"]),
                                                          JournalEntry.ref_id == inv.id)):
         post(db, f"ابطال {'فاکتور' if original.ref_type == 'invoice' else 'سهم پرسنل'} {inv.number}", [
@@ -478,8 +488,50 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None) -> Invo
                 line_id=l.line_id, staff_id=l.staff_id)
             for l in original.lines
         ], "invoice_void", inv.id)
+    # deposits that paid part of it: back to open
+    for dep in db.scalars(select(Deposit).where(Deposit.applied_invoice_id == inv.id, Deposit.status == "applied")):
+        post(db, f"برگشت بیعانه از فاکتور باطل‌شده {inv.number}", [
+            Leg(account(db, AR), debit=dep.amount, customer_id=inv.customer_id),
+            Leg(account(db, DEPOSITS), credit=dep.amount, customer_id=inv.customer_id),
+        ], "deposit", dep.id)
+        dep.status = "held"
+        dep.applied_invoice_id = None
+    # money received on it
+    for pay in list(db.scalars(select(Payment).where(Payment.invoice_id == inv.id, Payment.amount > 0))):
+        pa = db.get(PaymentAccount, pay.payment_account_id)
+        if payments == "refund":
+            back = Payment(invoice_id=inv.id, customer_id=pay.customer_id, payment_account_id=pay.payment_account_id,
+                           amount=-pay.amount, reference=pay.reference, paid_at=local_now(), source="refund")
+            db.add(back)
+            db.flush()
+            post(db, f"استرداد وجه فاکتور باطل‌شده {inv.number}", [
+                Leg(account(db, AR), debit=pay.amount, customer_id=pay.customer_id),
+                Leg(cash_account_for(db, pa), credit=pay.amount, customer_id=pay.customer_id),
+            ], "payment", back.id)
+        else:
+            credit = Deposit(customer_id=inv.customer_id, amount=pay.amount, payment_account_id=pay.payment_account_id,
+                             received_at=pay.paid_at, reference=pay.reference, source="void_credit",
+                             notes=f"وجه فاکتور باطل‌شده {inv.number}")
+            db.add(credit)
+            db.flush()
+            post(db, f"انتقال وجه فاکتور باطل‌شده {inv.number} به بیعانه", [
+                Leg(account(db, AR), debit=pay.amount, customer_id=inv.customer_id),
+                Leg(account(db, DEPOSITS), credit=pay.amount, customer_id=inv.customer_id),
+            ], "deposit", credit.id)
+    inv.paid = 0
+    # appointments it settled are open again
+    from .scheduling import validate_slot
+
+    for a in db.scalars(select(Appointment).where(Appointment.invoice_id == inv.id)):
+        a.status = "booked"
+        a.invoice_id = None
+        if a.original_start_at:
+            if not validate_slot(db, a.service_id, a.staff_id, a.original_start_at, duration_minutes=a.duration_minutes,
+                                 exclude_id=a.id, customer_id=a.customer_id, allow_outside_hours=True):
+                a.start_at = a.original_start_at
+            a.original_start_at = None
     inv.status = "void"
-    audit(db, "invoice.void", "invoice", inv.id, {"reason": reason}, user=user)
+    audit(db, "invoice.void", "invoice", inv.id, {"reason": reason, "payments": payments}, user=user)
     return inv
 
 

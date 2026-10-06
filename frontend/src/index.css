@@ -114,6 +114,7 @@ body::before {
   html, body { background: #fff !important; color: #000 !important; }
   .a4-page { break-after: page; page-break-after: always; max-width: none !important; padding: 0 !important; margin: 0 !important; }
   .a4-page:last-child { break-after: auto; page-break-after: auto; }
+  .invoice-sheet { max-width: none !important; padding: 0 !important; margin: 0 !important; }
   .print-table thead { display: table-header-group; }
   .print-table tr { break-inside: avoid; page-break-inside: avoid; }
   .print-table th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
