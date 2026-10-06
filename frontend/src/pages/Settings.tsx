@@ -9,7 +9,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Tabs } from "../components/ui";
 import { api, download } from "../lib/api";
-import { ACCOUNT_KINDS, jdatetime, money, num, ROLES } from "../lib/format";
+import { ACCOUNT_KINDS, jdatetime, money, num, ROLES, unitLabel } from "../lib/format";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
 
 const WEEKDAYS = [{ v: 5, l: "شنبه" }, { v: 6, l: "یکشنبه" }, { v: 0, l: "دوشنبه" }, { v: 1, l: "سه‌شنبه" }, { v: 2, l: "چهارشنبه" }, { v: 3, l: "پنجشنبه" }, { v: 4, l: "جمعه" }];
@@ -223,10 +223,10 @@ function Catalog() {
     const active = selected === id;
     return (
       <button key={id} onClick={() => { setSelected(id); setQ(""); }}
-        className={`flex shrink-0 items-center gap-2 rounded-xl border px-3 py-2 text-right text-sm transition xl:w-full ${active ? "font-bold shadow-sm" : "hover:bg-violet-500/5"}`}
+        className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-right text-sm transition ${active ? "font-bold shadow-sm" : "hover:bg-violet-500/5"}`}
         style={{ borderColor: active ? color : "var(--border)", background: active ? color + "1f" : undefined }}>
         <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: color }} />
-        <span className="flex-1 truncate">{label}</span>
+        <span className="whitespace-nowrap">{label}</span>
         {extra}
         <span className="num muted rounded-md px-1.5 text-xs" style={{ background: "var(--surface)" }} title="تعداد خدمات">{num(count)}</span>
       </button>
@@ -236,15 +236,15 @@ function Catalog() {
   if (!lines.data || !services.data) return <Loading />;
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[16rem_minmax(0,1fr)]">
+    <div className="space-y-4">
       <Card title="لاین‌ها" actions={<button className="btn btn-sm" onClick={() => setLine({ name: "", color: LINE_COLORS[allLines.length % LINE_COLORS.length] })}><Plus size={14} />لاین جدید</button>}>
-        <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 xl:mx-0 xl:flex-col xl:overflow-visible xl:px-0">
+        <div className="flex flex-wrap gap-2">
           {lineButton(0, "همه لاین‌ها", "#8b5cf6", allServices.length)}
           {allLines.map((l) => lineButton(l.id, <>{l.code && <span className="num muted ml-1 text-xs">{l.code}</span>}{l.name}</>, l.color, serviceCount[l.id] ?? 0,
             staffCount[l.id] ? <span className="muted flex items-center gap-0.5 text-xs" title="پرسنل این لاین"><Users size={12} />{num(staffCount[l.id])}</span> : undefined))}
         </div>
         {!allLines.length && <Empty text="هنوز لاینی تعریف نشده؛ با «لاین جدید» شروع کنید" />}
-        <p className="muted mt-3 hidden text-xs leading-6 xl:block">کد هر خدمت = کد لاین + شماره (مثلاً لاین ۳ ← خدمت‌های ۳۰۱، ۳۰۲)؛ کدها خودکار داده می‌شوند و با تغییر نام عوض نمی‌شوند. با حذف آخرین خدمت یک لاین، خود لاین هم حذف می‌شود.</p>
+        <p className="muted mt-3 text-xs leading-6">برای دیدن خدمات هر لاین روی آن کلیک کنید. کد هر خدمت = کد لاین + شماره (مثلاً لاین ۳ ← خدمت‌های ۳۰۱، ۳۰۲)؛ کدها خودکار داده می‌شوند و با تغییر نام عوض نمی‌شوند. با حذف آخرین خدمت یک لاین، خود لاین هم حذف می‌شود.</p>
       </Card>
 
       <Card pad={false}
@@ -252,9 +252,9 @@ function Catalog() {
           ? <span className="flex items-center gap-2"><span className="h-3 w-3 rounded-full" style={{ background: current.color }} />{current.code && <span className="num muted text-sm">{current.code}</span>}خدمات {current.name}</span>
           : "همه خدمات"}
         actions={
-          <div className="flex gap-2">
-            {current && <button className="btn btn-sm" onClick={() => setLine({ ...current })} title="ویرایش یا حذف لاین"><Pencil size={14} />ویرایش لاین</button>}
-            <button className="btn btn-sm btn-primary" disabled={!allLines.length} onClick={newService}><Plus size={14} />خدمت جدید{current ? " در این لاین" : ""}</button>
+          <div className="flex shrink-0 gap-2">
+            {current && <button className="btn btn-sm" onClick={() => setLine({ ...current })} title="ویرایش یا حذف لاین"><Pencil size={14} /><span className="hidden sm:inline">ویرایش لاین</span></button>}
+            <button className="btn btn-sm btn-primary" disabled={!allLines.length} onClick={newService}><Plus size={14} />خدمت جدید{current && <span className="hidden sm:inline"> در این لاین</span>}</button>
           </div>
         }>
         <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
@@ -274,31 +274,36 @@ function Catalog() {
         </div>
         {shown.length ? (
           <div className="mt-3 overflow-x-auto">
-            <table className="table">
-              <thead><tr><th>کد</th>{!current && <th>لاین</th>}<th>خدمت</th><th>سابقه فروش</th><th>مدت انجام</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th></th></tr></thead>
+            <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
+              <thead><tr><th>کد</th><th>خدمت</th><th>سابقه فروش</th><th>مدت <span className="font-normal">(دقیقه)</span></th><th>قیمت پایه <span className="font-normal">({unitLabel()})</span></th><th>قیمت آموخته‌شده <span className="font-normal">({unitLabel()})</span></th><th>بیعانه <span className="font-normal">({unitLabel()})</span></th><th></th></tr></thead>
               <tbody>{shown.map((s) => (
                 <tr key={s.id} className="cursor-pointer" onDoubleClick={() => setEdit({ ...s, aliases: (s.aliases ?? []).join("، ") })}>
                   <td className="num font-bold text-violet-600 dark:text-violet-300">{s.code}</td>
-                  {!current && <td><button className="badge cursor-pointer whitespace-nowrap" style={{ background: lineColor(s.line_id) + "22", color: lineColor(s.line_id) }} onClick={() => setSelected(s.line_id)} title="نمایش خدمات این لاین">{s.line}</button></td>}
                   <td>
                     <div className="font-semibold">{s.name}</div>
-                    {s.aliases?.length > 0 && <div className="muted max-w-[16rem] truncate text-xs" title={s.aliases.join("، ")}>{s.aliases.join("، ")}</div>}
+                    <div className="flex items-center gap-1.5 text-xs">
+                      {!current && (
+                        <button className="flex shrink-0 items-center gap-1 whitespace-nowrap font-semibold hover:underline" style={{ color: lineColor(s.line_id) }}
+                          onClick={(e) => { e.stopPropagation(); setSelected(s.line_id); }} title="نمایش خدمات این لاین">
+                          <span className="h-2 w-2 rounded-full" style={{ background: lineColor(s.line_id) }} />{s.line}
+                        </button>
+                      )}
+                      {!current && s.aliases?.length > 0 && <span className="muted">·</span>}
+                      {s.aliases?.length > 0 && <span className="muted max-w-[14rem] truncate" title={s.aliases.join("، ")}>{s.aliases.join("، ")}</span>}
+                    </div>
                   </td>
                   <td><SalesHistory u={usageOf[s.id]} loading={!usage.data} /></td>
                   <td onDoubleClick={(e) => e.stopPropagation()}>
-                    <span className="flex items-center gap-1">
-                      <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
-                        className="input num w-20 py-1 text-sm" onBlur={(e) => saveDuration(s, Number(e.target.value))}
-                        onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
-                      <span className="muted text-xs">دقیقه</span>
-                    </span>
+                    <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
+                      className="input num w-16 px-2 py-1 text-sm" onBlur={(e) => saveDuration(s, Number(e.target.value))}
+                      onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
                   </td>
                   <td className="num whitespace-nowrap">
-                    {money(s.base_price)}
-                    {(s.min_price || s.max_price) && <div className="muted text-xs" title="بازه قیمت مجاز">{s.min_price ? money(s.min_price) : "…"} تا {s.max_price ? money(s.max_price) : "…"}</div>}
+                    {money(s.base_price, false)}
+                    {(s.min_price || s.max_price) && <div className="muted text-xs" title="بازه قیمت مجاز">{s.min_price ? money(s.min_price, false) : "…"} تا {s.max_price ? money(s.max_price, false) : "…"}</div>}
                   </td>
-                  <td className="num whitespace-nowrap">{s.learned_avg_price ? <>{money(s.learned_avg_price)} <span className="muted text-xs">({num(s.learned_count)})</span></> : "—"}</td>
-                  <td className="num whitespace-nowrap">{s.default_deposit ? money(s.default_deposit) : "—"}</td>
+                  <td className="num whitespace-nowrap">{s.learned_avg_price ? <>{money(s.learned_avg_price, false)} <span className="muted text-xs" title="تعداد فروش‌هایی که این میانگین از آن‌ها آموخته شده">({num(s.learned_count)})</span></> : "—"}</td>
+                  <td className="num whitespace-nowrap">{s.default_deposit ? money(s.default_deposit, false) : "—"}</td>
                   <td className="whitespace-nowrap">
                     <button className="btn btn-ghost btn-sm" onClick={() => setEdit({ ...s, aliases: (s.aliases ?? []).join("، ") })} title="ویرایش"><Pencil size={15} /></button>
                     <button className="btn btn-ghost btn-sm text-rose-500" onClick={() => deleteService(s)} title="حذف"><Trash2 size={15} /></button>
@@ -311,7 +316,7 @@ function Catalog() {
           <Empty icon={<Scissors size={28} />} text={q ? "خدمتی با این جستجو پیدا نشد" : sold === "unsold" ? "همه خدمات این بخش حداقل یک فاکتور دارند" : sold === "sold" ? "هیچ خدمتی در این بخش فاکتور ندارد" : current ? "این لاین هنوز خدمتی ندارد؛ با «خدمت جدید در این لاین» اضافه کنید" : "هنوز خدمتی تعریف نشده"} />
         )}
         {shown.length > 0 && (
-          <p className="muted px-5 pb-4 text-xs">{num(shown.length)} خدمت · برای ویرایش روی ردیف دوبار کلیک کنید · مدت انجام را مستقیم در جدول تغییر دهید (Enter = ذخیره)</p>
+          <p className="muted px-5 pb-4 text-xs">{num(shown.length)} خدمت · مبالغ به {unitLabel()} · برای ویرایش روی ردیف دوبار کلیک کنید · مدت انجام را مستقیم در جدول تغییر دهید (Enter = ذخیره)</p>
         )}
       </Card>
 
