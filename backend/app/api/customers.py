@@ -6,7 +6,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
-from ..models import Appointment, Customer, Deposit, Invoice, Payment
+from ..models import Appointment, Customer, Deposit, Invoice, Payment, Service, Staff
 from ..services import accounting
 from ..services.audit import audit
 from ..services.textutil import normalize_mobile
@@ -77,7 +77,44 @@ def get_customer(cid: int, db: Session = Depends(get_db), _=Depends(require("rea
                       "service_id": d.service_id, "source": d.source} for d in deposits],
         "payments": [{"id": p.id, "amount": p.amount, "paid_at": p.paid_at.isoformat(), "account_id": p.payment_account_id} for p in payments],
         "appointments": [{"id": a.id, "start_at": a.start_at.isoformat(), "status": a.status, "service_id": a.service_id} for a in appts],
+        "history": _service_history(db, invoices, appts),
+        "upcoming": [{"id": a.id, "start_at": a.start_at.isoformat(timespec="minutes"), "service": _svc_name(db, a.service_id),
+                      "staff": _staff_name(db, a.staff_id)} for a in reversed(appts) if a.status == "booked"],
     })
+
+
+def _svc_name(db: Session, sid: int | None) -> str | None:
+    s = db.get(Service, sid) if sid else None
+    return s.name if s else None
+
+
+def _staff_name(db: Session, pid: int | None) -> str | None:
+    p = db.get(Staff, pid) if pid else None
+    return p.full_name if p else None
+
+
+def _service_history(db: Session, invoices: list[Invoice], appts: list[Appointment]) -> list[dict]:
+    """Every service the customer received, newest first: invoice lines, plus completed appointments that have no
+    invoice here (e.g. history brought over from the previous software)."""
+    out = []
+    for i in invoices:
+        if i.status == "void":
+            continue
+        for it in i.items:
+            out.append({"date": i.issued_at.isoformat(timespec="minutes"), "service": it.description or _svc_name(db, it.service_id),
+                        "staff": _staff_name(db, it.staff_id), "amount": it.net_amount if it.net_amount is not None else it.unit_price * it.quantity - it.discount,
+                        "source": "invoice", "invoice_id": i.id, "invoice_number": i.number})
+    for a in appts:
+        if a.status != "done" or a.invoice_id:
+            continue
+        name = _svc_name(db, a.service_id)
+        if not name and "خدمت: " in (a.notes or ""):
+            name = a.notes.split("خدمت: ", 1)[1].split(" - ")[0]
+        out.append({"date": (a.start_at).isoformat(timespec="minutes"), "service": name or "—", "staff": _staff_name(db, a.staff_id),
+                    "amount": a.quoted_price or None, "source": "import" if (a.notes or "").startswith("انتقال از نرم‌افزار قبلی") else "appointment",
+                    "notes": a.notes})
+    out.sort(key=lambda x: x["date"], reverse=True)
+    return out
 
 
 @router.put("/{cid}")

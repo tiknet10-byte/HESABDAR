@@ -1,7 +1,8 @@
 import {
   AlertTriangle, Bell, BookOpen, Bot, Brain, CreditCard, Database, DatabaseBackup, KeyRound, Pencil, Plug, Plus, Scissors, Settings as Cog, ShieldCheck,
-  Save, Trash2, UserCog, Users, Wrench,
+  FileSpreadsheet, Save, Trash2, UserCog, Users, Wrench,
 } from "lucide-react";
+import LegacyImport from "../components/LegacyImport";
 import { type ReactNode, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader } from "../components/ui";
@@ -629,6 +630,7 @@ const TABS: { key: string; label: string; icon: ReactNode; perm?: string; el: ()
   { key: "backup", label: "پشتیبان‌گیری", icon: <DatabaseBackup size={16} />, perm: "backup", el: () => <Backups /> },
   { key: "alerts", label: "هشدارها", icon: <Bell size={16} />, el: () => <Alerts /> },
   { key: "security", label: "امنیت و ممیزی", icon: <ShieldCheck size={16} />, perm: "settings", el: () => <Security /> },
+  { key: "import", label: "انتقال از نرم‌افزار قبلی", icon: <FileSpreadsheet size={16} />, perm: "settings", el: () => <LegacyImport /> },
   { key: "data", label: "مدیریت داده‌ها", icon: <Database size={16} />, perm: "users", el: () => <DataManagement /> },
 ];
 

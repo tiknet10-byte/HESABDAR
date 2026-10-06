@@ -52,22 +52,47 @@ function CustomerView({ id }: { id: number }) {
       <div className="grid grid-cols-3 gap-2">
         <div className="rounded-2xl bg-emerald-500/10 p-3"><div className="muted text-xs">بیعانه نزد سالن</div><div className="num font-bold">{money(b.deposits_held)}</div></div>
         <div className="rounded-2xl bg-amber-500/10 p-3"><div className="muted text-xs">بدهی مشتری</div><div className="num font-bold">{money(b.receivable)}</div></div>
-        <div className="rounded-2xl bg-violet-500/10 p-3"><div className="muted text-xs">تعداد مراجعه</div><div className="num font-bold">{num(data.invoices.filter((i: any) => i.status !== "void").length)}</div></div>
+        <div className="rounded-2xl bg-violet-500/10 p-3"><div className="muted text-xs">تعداد مراجعه</div><div className="num font-bold">{num(new Set((data.history ?? []).map((h: any) => h.date.slice(0, 10))).size)}</div>{data.history?.[0] && <div className="muted text-[11px]">آخرین: {jdate(data.history[0].date)}</div>}</div>
       </div>
       {data.notes && <div className="rounded-2xl p-3" style={{ background: "var(--surface)" }}>{data.notes}</div>}
+      {data.upcoming?.length > 0 && (
+        <div>
+          <div className="mb-2 font-bold">نوبت‌های آینده</div>
+          {data.upcoming.map((a: any) => (
+            <div key={a.id} className="flex justify-between rounded-xl bg-violet-500/10 px-3 py-2"><span>{a.service ?? "—"}{a.staff ? ` · ${a.staff}` : ""}</span><span className="num">{jdatetime(a.start_at)}</span></div>
+          ))}
+        </div>
+      )}
       <div>
-        <div className="mb-2 font-bold">سوابق خدمات</div>
-        {data.invoices.length === 0 ? <div className="muted">بدون سابقه</div> : (
-          <div className="space-y-1.5">
-            {data.invoices.map((i: any) => (
-              <div key={i.id} className="flex items-center justify-between rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}>
-                <span><span className="muted num ml-2">{jdate(i.issued_at)}</span>{i.items.join("، ")}</span>
-                <span className="flex items-center gap-2"><span className="num font-semibold">{money(i.total)}</span><Badge status={i.status} /></span>
+        <div className="mb-2 font-bold">سوابق خدمات ({num(data.history?.length ?? 0)})</div>
+        {!data.history?.length ? <div className="muted">بدون سابقه</div> : (
+          <div className="max-h-80 space-y-1.5 overflow-y-auto">
+            {data.history.map((h: any, k: number) => (
+              <div key={k} className="flex items-center justify-between gap-2 rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}>
+                <span><span className="muted num ml-2">{jdate(h.date)}</span><b>{h.service}</b>{h.staff ? <span className="muted"> · {h.staff}</span> : null}</span>
+                <span className="flex items-center gap-2">
+                  {h.amount ? <span className="num text-xs">{money(h.amount)}</span> : null}
+                  {h.source === "import" ? <span className="badge bg-sky-500/10 text-sky-600 dark:text-sky-300">سیستم قبلی</span>
+                    : h.invoice_number ? <span className="badge bg-violet-500/10 text-violet-600 dark:text-violet-300">{h.invoice_number}</span> : null}
+                </span>
               </div>
             ))}
           </div>
         )}
       </div>
+      {data.invoices.length > 0 && (
+        <details>
+          <summary className="mb-2 cursor-pointer font-bold">فاکتورها ({num(data.invoices.length)})</summary>
+          <div className="space-y-1.5">
+            {data.invoices.map((i: any) => (
+              <div key={i.id} className="flex items-center justify-between rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}>
+                <span><span className="muted num ml-2">{jdate(i.issued_at)}</span>{i.number}</span>
+                <span className="flex items-center gap-2"><span className="num font-semibold">{money(i.total)}</span><Badge status={i.status} /></span>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
       {data.deposits.length > 0 && (
         <div>
           <div className="mb-2 font-bold">بیعانه‌ها</div>

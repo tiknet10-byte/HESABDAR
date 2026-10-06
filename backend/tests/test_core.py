@@ -510,3 +510,86 @@ def test_child_account_codes_never_collide():
         assert len(codes) == 105 and accounting.COMMISSION not in codes
         assert accounting.account(db, accounting.COMMISSION).name == "پورسانت پرسنل"
         db.rollback()
+
+
+def _xlsx(rows):
+    import io
+
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_legacy_import_history_deposits_and_undo(client, accounts, services):
+    from datetime import datetime, timedelta
+
+    from app.services.jalali import gregorian_to_jalali
+    j = lambda d: "%04d/%02d/%02d" % gregorian_to_jalali(d.year, d.month, d.day)  # noqa: E731
+    past, future = datetime.now() - timedelta(days=40), datetime.now() + timedelta(days=9)
+    # history export: title row above the header, mobile without its leading zero, Persian digits, unknown service
+    history = _xlsx([
+        ["گزارش سوابق مشتریان - نرم افزار چهره"],
+        ["ردیف", "نام و نام خانوادگی", "شماره همراه", "تاریخ مراجعه", "شرح خدمت", "آرایشگر", "مبلغ (ریال)"],
+        [1, "مینا قدیمی", 9121230001, j(past), "مانیکور", "", 2_000_000],
+        [2, "مینا قدیمی", 9121230001, j(past - timedelta(days=30)), "لیفت مژه ویژه", "", "۳,۵۰۰,۰۰۰"],
+        [3, "", "", "", "", "", ""],
+        [4, "بدون تاریخ", "09121230002", "", "مانیکور", "", 1],
+        ["جمع کل", "", "", "", "", "", 5_500_000],
+    ])
+    files = {"file": ("chehreh-history.xlsx", history, "application/octet-stream")}
+    p = client.post("/api/import/legacy/preview", files=files, data={"kind": "history", "unit": "rial"})
+    assert p.status_code == 200, p.text
+    pv = p.json()
+    assert pv["summary"]["ok"] == 2 and pv["summary"]["errors"] == 1 and pv["summary"]["new_customers"] == 1
+    assert [u["name"] for u in pv["unknown_services"]] == ["لیفت مژه ویژه"]
+    assert pv["sample"][0]["mobile"] == "09121230001"
+    r = client.post(f"/api/import/legacy/{pv['id']}/commit", json={"service_map": {"لیفت مژه ویژه": "new"}}).json()
+    assert r["result"]["appointments"] == 2 and r["result"]["customers_new"] == 1
+    cust = client.get("/api/customers?q=09121230001").json()["items"][0]
+    done = client.get(f"/api/appointments?customer_id={cust['id']}&status=done").json()
+    assert {a["service"] for a in done} == {"مانیکور", "لیفت مژه ویژه"}
+    assert any(a["start_at"][:10] == past.date().isoformat() for a in done)
+    hist = client.get(f"/api/customers/{cust['id']}").json()["history"]
+    assert [h["service"] for h in hist] == ["مانیکور", "لیفت مژه ویژه"] and hist[0]["source"] == "import"
+    # importing the same file again does not duplicate anything
+    p2 = client.post("/api/import/legacy/preview", files=files, data={"kind": "history", "unit": "rial"}).json()
+    again = client.post(f"/api/import/legacy/{p2['id']}/commit", json={"service_map": {"لیفت مژه ویژه": "new"}}).json()
+    assert again["result"]["appointments"] == 0 and again["result"]["skipped_duplicates"] == 2
+
+    # deposits for future appointments, amounts in Toman
+    cash_before = {a["code"]: a["balance"] for a in client.get("/api/ledger/trial-balance").json()["rows"]}
+    deposits = _xlsx([
+        ["نام مشتری", "موبایل", "تاریخ دریافت", "مبلغ بیعانه", "خدمت", "تاریخ نوبت", "ساعت نوبت"],
+        ["مینا قدیمی", "09121230001", j(datetime.now() - timedelta(days=3)), 500_000, "مانیکور", j(future), "15:30"],
+    ])
+    p3 = client.post("/api/import/legacy/preview", files={"file": ("dep.xlsx", deposits, "application/octet-stream")},
+                     data={"kind": "deposits", "unit": "toman"}).json()
+    assert p3["summary"]["amount"] == 5_000_000 and p3["summary"]["future_appointments"] == 1
+    c3 = client.post(f"/api/import/legacy/{p3['id']}/commit", json={}).json()
+    assert c3["result"]["deposits"] == 1 and c3["result"]["appointments"] == 1
+    held = client.get(f"/api/deposits?status=held&customer_id={cust['id']}").json()
+    assert held[0]["amount"] == 5_000_000 and held[0]["appointment_at"] == future.date().isoformat() + "T15:30"
+    tbj = client.get("/api/ledger/trial-balance").json()
+    tb = {a["code"]: a["balance"] for a in tbj["rows"]}
+    assert tb.get("3200") == -5_000_000 and tbj["total_debit"] == tbj["total_credit"]  # opening balance account, cash untouched
+    cash_codes = [c for c in tb if c.startswith("11") and c != "1100"]
+    assert all(tb[c] == cash_before.get(c) for c in cash_codes)
+
+    # undo the deposit import -> gone again, books still balance
+    u = client.post(f"/api/import/legacy/{p3['id']}/undo").json()
+    assert u["removed"]["deposits"] == 1 and u["removed"]["appointments"] == 1
+    assert client.get(f"/api/deposits?status=held&customer_id={cust['id']}").json() == []
+
+
+def test_legacy_import_rejects_old_xls_and_missing_columns(client):
+    r = client.post("/api/import/legacy/preview", files={"file": ("old.xls", b"\xd0\xcf\x11\xe0", "application/vnd.ms-excel")},
+                    data={"kind": "history"})
+    assert r.status_code == 400 and "xlsx" in r.json()["detail"]
+    bad = "نام مشتری,موبایل\nسارا,09120000000\n".encode()
+    r = client.post("/api/import/legacy/preview", files={"file": ("x.csv", bad, "text/csv")}, data={"kind": "deposits"})
+    assert r.status_code == 400 and "مبلغ" in r.json()["detail"]

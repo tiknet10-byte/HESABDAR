@@ -36,6 +36,7 @@ CASH_PARENT = "1100"
 AR = "1200"
 DEPOSITS = "2100"
 EQUITY = "3100"
+OPENING = "3200"  # opening balances brought over from the previous software
 REVENUE_PARENT = "4100"
 FORFEITED = "4800"
 EXPENSE_PARENT = "5100"
@@ -50,6 +51,7 @@ DEFAULT_CHART = [
     ("2200", "حقوق و پورسانت پرداختنی", "liability", "2000"),
     ("3000", "حقوق صاحبان سرمایه", "equity", None),
     (EQUITY, "سرمایه", "equity", "3000"),
+    (OPENING, "مانده افتتاحیه (انتقال از نرم‌افزار قبلی)", "equity", "3000"),
     ("4000", "درآمدها", "revenue", None),
     (REVENUE_PARENT, "درآمد خدمات", "revenue", "4000"),
     (FORFEITED, "درآمد بیعانه‌های سوخت‌شده", "revenue", "4000"),
