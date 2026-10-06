@@ -26,6 +26,7 @@ from ..models import (
     Deposit,
     ImportBatch,
     Invoice,
+    InvoiceItem,
     JournalEntry,
     Payment,
     PaymentAccount,
@@ -35,7 +36,7 @@ from ..models import (
     WaitlistEntry,
     local_now,
 )
-from . import accounting, scheduling
+from . import accounting, scheduling, service_catalog
 from .jalali import jalali_to_gregorian
 from .textutil import normalize_mobile, normalize_text, parse_amount, to_en_digits
 
@@ -352,7 +353,8 @@ def _mobile(value: object) -> str | None:
 class _Catalog:
     def __init__(self, db: Session):
         self.services: dict[str, int] = {}
-        for s in db.scalars(select(Service)):
+        # active services first: when an archived and an active service share a name, the active one is used
+        for s in db.scalars(select(Service).order_by(Service.is_active.desc(), Service.id)):
             for n in [s.name, *(s.aliases or [])]:
                 self.services.setdefault(_key(n), s.id)
             if s.line:  # "line / service" or "line - service" as written by some exports
@@ -506,10 +508,14 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
         parsed.append(row)
 
     unknown: dict[str, int] = {}
+    unknown_line: dict[str, dict[int, int]] = {}
     unknown_staff: dict[str, int] = {}
     for p in parsed:
         if p["service_name"] and not p["service_id"] and not p["errors"] and not p.get("customer_only"):
             unknown[p["service_name"]] = unknown.get(p["service_name"], 0) + 1
+            if p.get("line_id"):
+                per = unknown_line.setdefault(p["service_name"], {})
+                per[p["line_id"]] = per.get(p["line_id"], 0) + 1
         if p["staff_name"] and not p["staff_id"]:
             unknown_staff[p["staff_name"]] = unknown_staff.get(p["staff_name"], 0) + 1
     valid = [p for p in parsed if not p["errors"]]  # incl. lines used only for the customer's details
@@ -546,9 +552,20 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
                     "amount": sum(p["amount"] or 0 for p in ok), "first_date": dates[0] if dates else None,
                     "last_date": dates[-1] if dates else None,
                     "future_appointments": sum(1 for p in ok if p.get("appt_date") and p["appt_date"] >= now.isoformat()[:16])},
-        "unknown_services": sorted(({"name": k, "count": v} for k, v in unknown.items()), key=lambda x: -x["count"]),
+        "unknown_services": sorted((_unknown_service(db, k, v, unknown_line.get(k)) for k, v in unknown.items()),
+                                   key=lambda x: -x["count"]),
         "unknown_staff": sorted(({"name": k, "count": v} for k, v in unknown_staff.items()), key=lambda x: -x["count"]),
     }
+
+
+def _unknown_service(db: Session, name: str, count: int, lines: dict[int, int] | None) -> dict:
+    """A service name of the file that isn't in the system: the line the file gives it and look-alike services
+    (a typo in the old software - «کروبکسی» for «کربوکسی» - should be mapped, not created twice)."""
+    line_id = max(lines, key=lines.get) if lines else None
+    line = db.get(ServiceLine, line_id) if line_id else None
+    similar = [{"id": s.id, "name": s.name, "code": s.code, "line": s.line.name if s.line else None, "is_active": s.is_active}
+               for s in service_catalog.similar(db, name)]
+    return {"name": name, "count": count, "line_id": line_id, "line": line.name if line else None, "similar": similar}
 
 
 def preview(db: Session, filename: str, data: bytes, kind: str, unit: str = "rial", mapping: dict | None = None) -> ImportBatch:
@@ -573,6 +590,12 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
 
     # services that were not found: map to an existing one, create, or leave the name in the notes
     new_services: dict[str, int] = {}
+    # a new service goes to the line the file gives it (most rows decide); without one, to the chosen line
+    name_lines: dict[str, dict[int, int]] = {}
+    for r in batch.rows:
+        if r.get("service_name") and not r.get("service_id") and r.get("line_id"):
+            per = name_lines.setdefault(service_catalog.name_key(r["service_name"]), {})
+            per[r["line_id"]] = per.get(r["line_id"], 0) + 1
 
     def service_for(row: dict) -> int | None:
         if row.get("service_id"):
@@ -585,14 +608,21 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
             return int(choice)
         if choice != "new":
             return None
-        if name not in new_services:
-            line_id = new_line_id or _import_line(db).id
-            svc = Service(line_id=line_id, name=name[:120], base_price=0, duration_minutes=60, is_active=True)
-            db.add(svc)
-            db.flush()
-            new_services[name] = svc.id
-            created["services"].append(svc.id)
-        return new_services[name]
+        key = service_catalog.name_key(name)
+        if key not in new_services:
+            per = name_lines.get(key)
+            line_id = (max(per, key=per.get) if per else None) or new_line_id or _import_line(db).id
+            svc = service_catalog.find_by_name(db, line_id, name)  # e.g. created a moment ago by another spelling
+            line = db.get(ServiceLine, line_id)
+            if line is not None and not line.is_active:
+                line.is_active = True  # a service is about to be added to it: the line must show in the settings
+            if svc is None:
+                svc = Service(line_id=line_id, name=name.strip()[:120], base_price=0, duration_minutes=60, is_active=True)
+                db.add(svc)
+                db.flush()
+                created["services"].append(svc.id)
+            new_services[key] = svc.id
+        return new_services[key]
 
     customers: dict[str, Customer] = {}
 
@@ -810,8 +840,7 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         s = db.get(Service, sid)
         if s is None:
             continue
-        used = db.scalar(select(func.count(Appointment.id)).where(Appointment.service_id == sid)) or \
-            db.scalar(select(func.count(Deposit.id)).where(Deposit.service_id == sid))
+        used = any(db.scalar(select(func.count(m.id)).where(m.service_id == sid)) for m in (Appointment, Deposit, InvoiceItem))
         if used:
             kept["services"] += 1
             continue

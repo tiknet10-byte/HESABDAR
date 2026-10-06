@@ -224,8 +224,10 @@ def test_custom_duration_and_version(client, accounts, services):
     from app import __version__
     assert client.get("/api/health").json()["version"] == __version__
     svc = services["پدیکور"]  # default 60 minutes
-    s30 = client.get(f"/api/appointments/suggest?service_id={svc['id']}&duration=30&count=2").json()
-    from datetime import datetime
+    from datetime import datetime, timedelta
+    # from tomorrow morning, so the two suggestions are on the same day whatever time the tests run
+    after = (datetime.now() + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0).isoformat()
+    s30 = client.get(f"/api/appointments/suggest?service_id={svc['id']}&duration=30&count=2&after={after}").json()
     a, b = (datetime.fromisoformat(x["start_at"]) for x in s30)
     assert (b - a).seconds == 30 * 60  # suggestions follow the chosen length
     r = client.post("/api/appointments", json={"customer_name": "مدت سفارشی", "customer_mobile": "09128880000", "service_id": svc["id"],
@@ -947,3 +949,78 @@ def test_void_mistake_cancels_on_original_date_and_day_details(client, accounts,
     # day details lists invoices, money and customers
     d = client.get("/api/dashboard/day", params={"day": y}).json()
     assert any(r["kind"] == "void_cancel" for r in d["money"]) and any(i["number"] == inv["number"] for i in d["invoices"])
+
+
+def test_archived_service_restore_merge_and_health(client, accounts):
+    """A sold service that was deleted is archived: hidden from the list, still in the reports, code taken -
+    it must be findable, restorable, mergeable, and its code conflict explained."""
+    skin = client.post("/api/lines", json={"name": "لاین پوست بایگانی"}).json()
+    carb = client.post("/api/services", json={"line_id": skin["id"], "name": "کربوکسی", "base_price": 2_000_000}).json()
+    c = client.post("/api/customers", json={"full_name": "مشتری کربوکسی", "mobile": "09125550672"}).json()
+    client.post("/api/invoices", json={"customer_id": c["id"], "items": [{"service_id": carb["id"], "unit_price": 2_000_000}],
+                                       "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 2_000_000}]})
+    other = client.post("/api/services", json={"line_id": skin["id"], "name": "پاکسازی پوست", "base_price": 1}).json()
+    assert client.delete(f"/api/services/{carb['id']}").json()["archived"] is True
+    assert carb["id"] not in [s["id"] for s in client.get("/api/services").json()]
+    hidden = [s for s in client.get("/api/services?all=1").json() if s["id"] == carb["id"]][0]
+    assert hidden["is_active"] is False and hidden["code"] == carb["code"]
+    # the report still has it
+    rev = client.get("/api/reports/revenue").json()
+    assert any(s["id"] == carb["id"] for s in rev["services"])
+    # the health check names it; adding a service with its code says where the code is
+    health = client.get("/api/services/health").json()
+    archived = [i for i in health["issues"] if i["kind"] == "archived_used"][0]
+    assert carb["id"] in [x["id"] for x in archived["items"]]
+    r = client.post("/api/services", json={"line_id": skin["id"], "name": "کربوکسی جدید", "code": carb["code"]})
+    assert r.status_code == 409 and "بایگانی" in r.json()["detail"] and "کربوکسی" in r.json()["detail"]
+    # adding it again by name brings the same service back (no duplicate, same code and history)
+    back = client.post("/api/services", json={"line_id": skin["id"], "name": "كربوكسي", "base_price": 2_500_000}).json()
+    assert back["id"] == carb["id"] and back["restored"] is True and back["code"] == carb["code"]
+    assert client.post("/api/services", json={"line_id": skin["id"], "name": "کربوکسی"}).status_code == 409
+    # a typo of the old software (letters swapped) is reported as a duplicate and merged with all its records
+    typo = client.post("/api/services", json={"line_id": skin["id"], "name": "کروبکسی", "base_price": 1}).json()
+    client.post("/api/invoices", json={"customer_id": c["id"], "items": [{"service_id": typo["id"], "unit_price": 1_500_000}],
+                                       "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 1_500_000}]})
+    groups = [i for i in client.get("/api/services/health").json()["issues"] if i["kind"] == "duplicates"][0]["groups"]
+    assert any({carb["id"], typo["id"]} <= {x["id"] for x in g} for g in groups)
+    assert not any(other["id"] in {x["id"] for x in g} for g in groups)
+    m = client.post(f"/api/services/{typo['id']}/merge", json={"into_id": carb["id"]}).json()
+    assert m["moved"]["invoice_items"] == 1 and "کروبکسی" in m["aliases"]
+    assert typo["id"] not in [s["id"] for s in client.get("/api/services?all=1").json()]
+    usage = client.get(f"/api/services/{carb['id']}/usage").json()
+    assert usage["invoices"] == 2
+    # restore after a plain delete
+    client.delete(f"/api/services/{carb['id']}")
+    assert client.post(f"/api/services/{carb['id']}/restore").json()["is_active"] is True
+    # moved to another line: the automatic code follows the new line; a hand-made odd code is fixed on request
+    hair = client.post("/api/lines", json={"name": "لاین مقصد کد"}).json()
+    moved = client.put(f"/api/services/{other['id']}", json={**other, "line_id": hair["id"], "code": None}).json()
+    assert moved["code"] == f"{hair['code']}01" and moved["old_code"] == other["code"]
+    odd = client.put(f"/api/services/{other['id']}", json={**other, "line_id": hair["id"], "code": "98765"}).json()
+    assert odd["code"] == "98765"
+    assert other["id"] in [x["id"] for i in client.get("/api/services/health").json()["issues"] if i["kind"] == "code_mismatch" for x in i["items"]]
+    fixed = client.post("/api/services/recode", json={"ids": [other["id"]]}).json()["changed"]
+    assert fixed[0]["old"] == "98765" and fixed[0]["new"].startswith(hair["code"])
+
+
+def test_service_codes_with_ten_or_more_lines():
+    from app.services.codes import owner_line_code
+    assert owner_line_code("1201", {"1", "12"}) == "12"
+    assert owner_line_code("110", {"1", "11"}) == "1"
+    assert owner_line_code("672", {"3", "6"}) == "6"
+
+
+def test_import_suggests_lookalike_service_and_uses_file_line(client):
+    line = client.post("/api/lines", json={"name": "پوست واردات"}).json()
+    client.post("/api/services", json={"line_id": line["id"], "name": "میکرونیدلینگ", "base_price": 1}).json()
+    rows = [["کد مشتری", "نام مشتری", "تاریخ", "لاین", "خدمت", "مبلغ"],
+            ["770001", "واردات یک", "1404/01/10", "پوست واردات", "میکرونیدلنیگ", 1000],
+            ["770002", "واردات دو", "1404/01/11", "پوست واردات", "مزوتراپی واردات", 1000]]
+    p = client.post("/api/import/legacy/preview", files={"file": ("h.xlsx", _xlsx(rows), "application/octet-stream")}, data={"kind": "history"}).json()
+    unk = {u["name"]: u for u in p["unknown_services"]}
+    assert unk["میکرونیدلنیگ"]["similar"][0]["name"] == "میکرونیدلینگ"
+    assert unk["مزوتراپی واردات"]["line_id"] == line["id"]
+    client.post(f"/api/import/legacy/{p['id']}/commit", json={"service_map": {"میکرونیدلنیگ": unk["میکرونیدلنیگ"]["similar"][0]["id"],
+                                                                              "مزوتراپی واردات": "new"}})
+    new = [s for s in client.get("/api/services").json() if s["name"] == "مزوتراپی واردات"][0]
+    assert new["line_id"] == line["id"] and new["code"].startswith(line["code"])

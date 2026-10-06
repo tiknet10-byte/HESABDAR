@@ -22,14 +22,26 @@ def next_line_code(db: Session, taken: set[str] | None = None) -> str:
     return str(max((_num(c) or 0 for c in used), default=0) + 1)
 
 
+def owner_line_code(code: str | None, line_codes: set[str]) -> str | None:
+    """The line a service code belongs to: the longest line code it starts with, followed by at least 2 digits
+    (with lines 1 and 12, «1201» is service 01 of line 12, not service 201 of line 1)."""
+    if not code or not code.isdigit():
+        return None
+    best = None
+    for lc in line_codes:
+        if lc and code.startswith(lc) and len(code) - len(lc) >= 2 and (best is None or len(lc) > len(best)):
+            best = lc
+    return best
+
+
 def next_service_code(db: Session, line: ServiceLine, taken: set[str] | None = None) -> str:
     prefix = line.code or ""
     used = {c for c in db.scalars(select(Service.code)) if c} | (taken or set())
-    seqs = [int(c[len(prefix):]) for c in used if prefix and c.startswith(prefix) and c[len(prefix):].isdigit()
-            and len(c) - len(prefix) >= 2]
+    line_codes = {c for c in db.scalars(select(ServiceLine.code)) if c} | {prefix}
+    seqs = [int(c[len(prefix):]) for c in used if prefix and owner_line_code(c, line_codes) == prefix]
     n = max(seqs, default=0) + 1
     code = f"{prefix}{n:02d}"
-    while code in used:  # e.g. a hand-made code in the way
+    while code in used or (owner_line_code(code, line_codes) or prefix) != prefix:  # a hand-made code in the way
         n += 1
         code = f"{prefix}{n:02d}"
     return code

@@ -322,7 +322,7 @@ function DepositView({ id, onChange }: { id: number; onChange: () => void }) {
 
 export default function Deposits() {
   const [params, setParams] = useSearchParams();
-  const lines = useApi<any[]>("/api/lines").data ?? [];
+  const lines = useApi<any[]>("/api/lines?all=1").data ?? []; // archived lines too: their old records can still be filtered
   const [status, setStatus] = useState(params.get("status") ?? "held");
   const [filter, setFilter] = useState(params.get("filter") ?? "");
   const [sort, setSort] = useState("received_desc");
@@ -365,7 +365,7 @@ export default function Deposits() {
             ))}
             <select className="input w-auto py-1.5 text-sm" value={lineId} onChange={(e) => setLineId(Number(e.target.value))} aria-label="لاین">
               <option value={0}>همهٔ لاین‌ها</option>
-              {lines.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+              {lines.map((l) => <option key={l.id} value={l.id}>{l.name}{l.is_active ? "" : " (بایگانی)"}</option>)}
             </select>
             <select className="input w-auto py-1.5 text-sm" value={sort} onChange={(e) => setSort(e.target.value)} aria-label="مرتب‌سازی">
               {SORTS.map((o) => <option key={o.v} value={o.v}>مرتب‌سازی: {o.l}</option>)}

@@ -24,7 +24,7 @@ from ..models import (
     ServiceLine,
     Staff,
 )
-from ..services import accounting, learning
+from ..services import accounting, learning, service_catalog
 from ..services.audit import audit
 from .deps import require
 
@@ -63,7 +63,12 @@ def _check_code(db: Session, model, code: str | None, own_id: int | None = None)
         raise HTTPException(400, "کد فقط باید عدد باشد")
     other = db.scalar(select(model).where(model.code == code, model.id != (own_id or 0)))
     if other is not None:
-        raise HTTPException(409, f"کد {code} متعلق به «{other.name}» است")
+        what = "لاین" if model is ServiceLine else "خدمت"
+        where = f" در لاین «{other.line.name}»" if model is Service and other.line else ""
+        if not other.is_active:  # hidden from the list, so say where it is
+            raise HTTPException(409, f"کد {code} متعلق به {what} بایگانی‌شدهٔ «{other.name}»{where} است؛ آن را از بخش "
+                                     f"«بایگانی‌شده» بازگردانید یا کد دیگری بدهید")
+        raise HTTPException(409, f"کد {code} متعلق به {what} «{other.name}»{where} است")
     return code
 
 
@@ -99,7 +104,8 @@ def _service(s: Service) -> dict:
             "line_code": s.line.code if s.line else None, "name": s.name, "base_price": s.base_price,
             "min_price": s.min_price, "max_price": s.max_price, "default_deposit": s.default_deposit,
             "duration_minutes": s.duration_minutes, "aliases": s.aliases, "is_active": s.is_active,
-            "learned_avg_price": s.learned_avg_price, "learned_count": s.learned_count}
+            "learned_avg_price": s.learned_avg_price, "learned_count": s.learned_count,
+            "line_active": bool(s.line and s.line.is_active)}
 
 
 def _account(a: PaymentAccount) -> dict:
@@ -120,18 +126,32 @@ def lines(all: bool = False, db: Session = Depends(get_db), _=Depends(require("r
 
 @router.post("/lines")
 def create_line(body: LineIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
-    l = db.scalar(select(ServiceLine).where(ServiceLine.name == body.name.strip()))
+    key = service_catalog.name_key(body.name)
+    l = next((x for x in db.scalars(select(ServiceLine).order_by(ServiceLine.is_active.desc(), ServiceLine.id))
+              if service_catalog.name_key(x.name) == key), None)
+    archived, restored = 0, l is not None
     if l is not None:
         if l.is_active:
-            raise HTTPException(409, "این لاین وجود دارد")
-        l.is_active = True  # re-activate an archived line with the same name
+            raise HTTPException(409, f"لاین «{l.name}» وجود دارد")
+        l.is_active = True  # re-activate an archived line with the same name (keeps its code and history)
         l.color, l.icon = body.color, body.icon
+        archived = db.scalar(select(func.count(Service.id)).where(Service.line_id == l.id, Service.is_active.is_(False))) or 0
     else:
         l = ServiceLine(**{**body.model_dump(), "name": body.name.strip(), "code": _check_code(db, ServiceLine, body.code)})
         db.add(l)
     db.flush()
     accounting.revenue_account_for_line(db, l.name)
     audit(db, "line.create", "line", l.id, body.model_dump(), user=user)
+    _names_changed()
+    db.commit()
+    return {**_line(l), "restored": restored, "archived_services": archived}
+
+
+@router.post("/lines/{lid}/restore")
+def restore_line(lid: int, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    l = db.get(ServiceLine, lid) or _404()
+    l.is_active = True
+    audit(db, "line.restore", "line", l.id, {"name": l.name}, user=user)
     _names_changed()
     db.commit()
     return _line(l)
@@ -196,29 +216,129 @@ def services(all: bool = False, db: Session = Depends(get_db), _=Depends(require
 
 @router.post("/services")
 def create_service(body: ServiceIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
-    s = Service(**{**body.model_dump(), "code": _check_code(db, Service, body.code)})
-    db.add(s)
+    line = db.get(ServiceLine, body.line_id)
+    if line is None:
+        raise HTTPException(400, "لاین انتخاب‌شده وجود ندارد")
+    name = body.name.strip()
+    same = service_catalog.find_by_name(db, line.id, name)
+    if same is not None and same.is_active:
+        raise HTTPException(409, f"«{same.name}» (کد {same.code}) در این لاین وجود دارد")
+    code = _check_code(db, Service, body.code, same.id if same else None)
+    restored = same is not None
+    if same is not None:  # the same service was deleted (archived) before: bring it back instead of a duplicate
+        s = same
+        for k, v in body.model_dump(exclude={"code"}).items():
+            setattr(s, k, v)
+        s.name, s.is_active = name, True
+        if code:
+            s.code = code
+    else:
+        s = Service(**{**body.model_dump(), "name": name, "code": code})
+        db.add(s)
+    line.is_active = True
     db.flush()
     learning.learn_text(db, s.name, s.id, weight=3)
-    audit(db, "service.create", "service", s.id, body.model_dump(), user=user)
+    audit(db, "service.restore" if restored else "service.create", "service", s.id, body.model_dump(), user=user)
     db.commit()
-    return _service(s)
+    return {**_service(s), "restored": restored}
 
 
 @router.put("/services/{sid}")
 def update_service(sid: int, body: ServiceIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
     s = db.get(Service, sid) or _404()
-    old_price = s.base_price
+    line = db.get(ServiceLine, body.line_id)
+    if line is None:
+        raise HTTPException(400, "لاین انتخاب‌شده وجود ندارد")
+    same = service_catalog.find_by_name(db, line.id, body.name, exclude=sid)
+    if same is not None and same.is_active and body.is_active:
+        raise HTTPException(409, f"«{same.name}» (کد {same.code}) در لاین «{line.name}» وجود دارد؛ اگر یک خدمت‌اند «ادغام» کنید")
+    old_price, old_line, old_code = s.base_price, s.line_id, s.code
     code = _check_code(db, Service, body.code, sid)
     for k, v in body.model_dump(exclude={"code"}).items():
         setattr(s, k, v)
+    s.name = body.name.strip()
     if code:
         s.code = code
+    elif old_line != s.line_id and not service_catalog.code_fits_line(s.code, line, _line_codes(db)):
+        # moved to another line with the automatic code: number it in the new line (line 3 -> 3xx)
+        service_catalog.recode(db, s)
+    if s.is_active:
+        line.is_active = True
     for a in body.aliases:
         learning.learn_text(db, a, s.id, weight=3)
-    audit(db, "service.update", "service", s.id, {**body.model_dump(), "old_price": old_price}, user=user)
+    audit(db, "service.update", "service", s.id, {**body.model_dump(), "old_price": old_price, "old_code": old_code}, user=user)
+    db.commit()
+    return {**_service(s), "old_code": old_code if old_code != s.code else None}
+
+
+def _line_codes(db: Session) -> set[str]:
+    return {c for c in db.scalars(select(ServiceLine.code)) if c}
+
+
+@router.get("/services/health")
+def services_health(db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Problems in the list of services (archived but sold, duplicates/typos, codes not matching the line ...)."""
+    return service_catalog.health(db)
+
+
+@router.get("/services/{sid}/usage")
+def service_usage(sid: int, db: Session = Depends(get_db), _=Depends(require("read"))):
+    db.get(Service, sid) or _404()
+    return service_catalog.usage(db, [sid]).get(sid) or {"invoices": 0, "old": 0, "deposits": 0, "appointments": 0, "amount": 0}
+
+
+class MergeIn(BaseModel):
+    into_id: int
+
+
+@router.post("/services/{sid}/merge")
+def merge_service(sid: int, body: MergeIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    """Same service registered twice (e.g. a typo in the previous software): move all its records to the other one."""
+    src = db.get(Service, sid) or _404()
+    dst = db.get(Service, body.into_id) or _404()
+    if src.id == dst.id:
+        raise HTTPException(400, "یک خدمت را نمی‌توان با خودش ادغام کرد")
+    info = {"from": src.name, "from_code": src.code, "into": dst.name, "into_code": dst.code}
+    moved = service_catalog.merge(db, src, dst)
+    if dst.is_active:
+        dst.line.is_active = True
+    audit(db, "service.merge", "service", dst.id, {**info, "moved": moved}, user=user)
+    db.commit()
+    return {**_service(dst), "moved": moved}
+
+
+@router.post("/services/{sid}/restore")
+def restore_service(sid: int, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    s = db.get(Service, sid) or _404()
+    same = service_catalog.find_by_name(db, s.line_id, s.name, exclude=sid)
+    if same is not None and same.is_active:
+        raise HTTPException(409, f"«{same.name}» (کد {same.code}) در همین لاین فعال است؛ به‌جای بازگردانی، این دو را «ادغام» کنید")
+    s.is_active = True
+    s.line.is_active = True
+    audit(db, "service.restore", "service", s.id, {"name": s.name, "code": s.code}, user=user)
     db.commit()
     return _service(s)
+
+
+class RecodeIn(BaseModel):
+    ids: list[int] = []  # empty = every service whose code doesn't match its line
+
+
+@router.post("/services/recode")
+def recode_services(body: RecodeIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    lines_ = {l.id: l for l in db.scalars(select(ServiceLine))}
+    lcodes = {l.code for l in lines_.values() if l.code}
+    q = select(Service).order_by(Service.line_id, func.cast(Service.code, Integer), Service.id)
+    if body.ids:
+        q = q.where(Service.id.in_(body.ids))
+    changed = []
+    for s in db.scalars(q):
+        if not service_catalog.code_fits_line(s.code, lines_.get(s.line_id), lcodes):
+            old = s.code
+            changed.append({"id": s.id, "name": s.name, "old": old, "new": service_catalog.recode(db, s)})
+    audit(db, "service.recode", "service", "", {"changed": changed}, user=user)
+    db.commit()
+    return {"changed": changed}
 
 
 @router.delete("/services/{sid}")

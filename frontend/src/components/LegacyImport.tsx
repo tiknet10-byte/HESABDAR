@@ -188,21 +188,37 @@ export default function LegacyImport() {
             {pv.unknown_services.length > 0 && (
               <div className="space-y-2 rounded-2xl bg-amber-500/10 p-3 text-sm">
                 <div className="font-bold">این خدمات در سیستم نیستند - هر کدام معادل کدام خدمت است؟</div>
-                <div className="muted text-xs">«خدمت جدید» با همین نام ساخته می‌شود (بعداً در تنظیمات قابل ویرایش/ادغام است).</div>
+                <div className="muted text-xs">«خدمت جدید» با همین نام ساخته می‌شود (بعداً در «تنظیمات ← لاین‌ها و خدمات ← بررسی خدمات» قابل ویرایش/ادغام است).</div>
                 <div className="grid gap-2 sm:grid-cols-2">
-                  {pv.unknown_services.map((u: any) => (
-                    <div key={u.name} className="flex items-center gap-2">
-                      <span className="w-1/2 truncate font-semibold" title={u.name}>{u.name} <span className="muted text-xs">({faDigits(u.count)})</span></span>
-                      <select className="input w-1/2 py-1 text-sm" value={svcMap[u.name] ?? "new"} onChange={(e) => setSvcMap({ ...svcMap, [u.name]: e.target.value })}>
-                        <option value="new">➕ خدمت جدید</option>
-                        <option value="skip">فقط در توضیحات بماند</option>
-                        {services.map((x) => <option key={x.id} value={x.id}>{svcLabel(x)}</option>)}
-                      </select>
-                    </div>
-                  ))}
+                  {pv.unknown_services.map((u: any) => {
+                    const pick = svcMap[u.name] ?? "new";
+                    return (
+                      <div key={u.name} className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="w-1/2 truncate font-semibold" title={u.name}>{u.name} <span className="muted text-xs">({faDigits(u.count)}{u.line ? ` · ${u.line}` : ""})</span></span>
+                          <select className="input w-1/2 py-1 text-sm" value={pick} onChange={(e) => setSvcMap({ ...svcMap, [u.name]: e.target.value })}>
+                            <option value="new">➕ خدمت جدید{u.line ? ` در «${u.line}»` : ""}</option>
+                            <option value="skip">فقط در توضیحات بماند</option>
+                            {u.similar?.filter((x: any) => !services.some((y) => y.id === x.id)).map((x: any) => <option key={x.id} value={x.id}>{x.code} · {x.name} (بایگانی)</option>)}
+                            {services.map((x) => <option key={x.id} value={x.id}>{svcLabel(x)}</option>)}
+                          </select>
+                        </div>
+                        {u.similar?.length > 0 && pick === "new" && (
+                          <div className="flex flex-wrap items-center gap-1 text-xs text-amber-700 dark:text-amber-300">
+                            شاید همان
+                            {u.similar.map((x: any) => (
+                              <button key={x.id} type="button" className="rounded-lg bg-amber-500/20 px-2 py-0.5 font-semibold hover:bg-amber-500/30"
+                                onClick={() => setSvcMap({ ...svcMap, [u.name]: String(x.id) })}>«{x.name}»{x.line ? ` (${x.line})` : ""}</button>
+                            ))}
+                            است؟ (برای جلوگیری از خدمت تکراری روی آن بزنید)
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
                 {Object.values(svcMap).includes("new") && (
-                  <Field label="خدمات جدید در کدام لاین ساخته شوند؟">
+                  <Field label="خدمات جدیدی که لاینشان در فایل مشخص نیست، در کدام لاین ساخته شوند؟" hint="خدماتی که در فایل لاین دارند، در همان لاین ساخته می‌شوند">
                     <select className="input py-1.5 text-sm" value={lineId} onChange={(e) => setLineId(Number(e.target.value))}>
                       <option value={0}>لاین جدید «خدمات انتقالی»</option>
                       {lines.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}

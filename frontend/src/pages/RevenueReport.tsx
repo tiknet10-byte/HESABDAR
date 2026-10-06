@@ -104,7 +104,8 @@ function ServicesTable({ rows }: { rows: any[] }) {
             {shown.map((r, i) => (
               <tr key={i}>
                 <td className="num font-bold text-violet-600 dark:text-violet-300">{r.code ?? "—"}</td>
-                <td className="font-semibold">{r.name}{r.old > 0 && r.old === r.revenue && <span className="badge mr-2 bg-sky-500/10 text-[10px] text-sky-600">سیستم قبلی</span>}</td>
+                <td className="font-semibold">{r.name}{r.old > 0 && r.old === r.revenue && <span className="badge mr-2 bg-sky-500/10 text-[10px] text-sky-600">سیستم قبلی</span>}
+                  {r.archived && <span className="badge mr-1 bg-slate-500/15 text-[10px] text-slate-500" title="این خدمت حذف (بایگانی) شده؛ در «تنظیمات ← لاین‌ها و خدمات ← بایگانی‌شده» قابل بازگردانی یا ادغام است">بایگانی‌شده</span>}</td>
                 <td className="muted text-xs">{r.line}</td>
                 <td className="num">{num(r.count)}</td>
                 <td className="num font-bold">{money(r.revenue)}</td>
@@ -205,7 +206,7 @@ export default function RevenueReport() {
   const [start, end] = range(period, from, to);
   const qs = new URLSearchParams({ source, ...(start ? { start } : {}), ...(end ? { end } : {}), ...(lineId ? { line_id: String(lineId) } : {}) });
   const { data } = useApi<any>(`/api/reports/revenue?${qs}`, [qs.toString()]);
-  const allLines = useApi<any[]>("/api/lines").data ?? [];
+  const allLines = useApi<any[]>("/api/lines?all=1").data ?? [];
   const t = data?.totals;
   const monthsN = data?.months.length || 0;
 
@@ -225,7 +226,7 @@ export default function RevenueReport() {
           </>}
           <select className="input w-auto py-1.5 text-sm" value={lineId} onChange={(e) => setLineId(Number(e.target.value))} aria-label="لاین">
             <option value={0}>همهٔ لاین‌ها</option>
-            {allLines.map((l) => <option key={l.id} value={l.id}>{l.code ? `${l.code} · ` : ""}{l.name}</option>)}
+            {allLines.map((l) => <option key={l.id} value={l.id}>{l.code ? `${l.code} · ` : ""}{l.name}{l.is_active ? "" : " (بایگانی)"}</option>)}
           </select>
           <select className="input w-auto py-1.5 text-sm" value={source} onChange={(e) => setSource(e.target.value)} aria-label="منبع">
             {SOURCES.map((s) => <option key={s.v} value={s.v}>منبع: {s.l}</option>)}

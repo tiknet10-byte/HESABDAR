@@ -471,7 +471,8 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
         P["last"] = max(P["last"] or r["day"], r["day"])
         key = str(r["service_id"]) if r["service_id"] else f"name:{r['name'] or 'نامشخص'}"
         S = agg_svc.setdefault(key, {"id": r["service_id"], "code": svc.code if svc else None, "name": svc.name if svc else (r["name"] or "خدمت نامشخص"),
-                                     "line": lname, "revenue": 0, "count": 0, "last": None, "old": 0})
+                                     "line": lname, "revenue": 0, "count": 0, "last": None, "old": 0,
+                                     "archived": bool(svc and not svc.is_active)})
         S["revenue"] += amt
         S["count"] += n
         S["old"] += amt if r["old"] else 0

@@ -1,8 +1,9 @@
 import {
-  AlertTriangle, Bell, BookOpen, Bot, Brain, CreditCard, Database, DatabaseBackup, KeyRound, Pencil, Plug, Plus, Scissors, Settings as Cog, ShieldCheck,
-  Calculator, FileSpreadsheet, Save, Trash2, UserCog, Users, Wrench,
+  AlertTriangle, Archive, Bell, BookOpen, Bot, Brain, CreditCard, Database, DatabaseBackup, GitMerge, KeyRound, Pencil, Plug, Plus, RotateCcw, Scissors,
+  Settings as Cog, ShieldCheck, Stethoscope, Calculator, FileSpreadsheet, Save, Trash2, UserCog, Users, Wrench,
 } from "lucide-react";
 import LegacyImport from "../components/LegacyImport";
+import { MergeDialog, ServiceHealth } from "../components/ServiceTools";
 import JalaliPicker from "../components/JalaliPicker";
 import { toLocalIso } from "../lib/jalali";
 import { type ReactNode, useEffect, useState } from "react";
@@ -102,13 +103,17 @@ function serviceProblem(s: any): string {
 
 function Catalog() {
   const toast = useToast();
-  const lines = useApi<any[]>("/api/lines");
-  const services = useApi<any[]>("/api/services");
+  // archived lines/services too: a sold service that was deleted is only hidden (its code and history stay)
+  const lines = useApi<any[]>("/api/lines?all=1");
+  const services = useApi<any[]>("/api/services?all=1");
   const staff = useApi<any[]>("/api/staff");
   const usage = useApi<any[]>("/api/services/usage");
+  const health = useApi<any>("/api/services/health");
   const [edit, setEdit] = useState<any>(null);
   const [line, setLine] = useState<any>(null);
-  const [sold, setSold] = useState<"all" | "sold" | "unsold">("all");
+  const [merge, setMerge] = useState<{ id: number; into?: number } | null>(null);
+  const [showHealth, setShowHealth] = useState(false);
+  const [sold, setSold] = useState<"all" | "sold" | "unsold" | "archived">("all");
   const [busy, setBusy] = useState(false);
   const [q, setQ] = useState("");
   // the selected line (0 = all lines); remembered between visits
@@ -119,11 +124,15 @@ function Catalog() {
     setSelectedState(id);
     try { localStorage.setItem(catalogLineKey, String(id)); } catch { /* storage unavailable */ }
   };
-  const reload = () => { lines.reload(); services.reload(); usage.reload(); };
+  const reload = () => { lines.reload(); services.reload(); usage.reload(); health.reload(); };
 
-  const allLines = lines.data ?? [];
-  const allServices = services.data ?? [];
-  const current = allLines.find((l) => l.id === selected) ?? null;
+  const everyLine = lines.data ?? [];
+  const allLines = everyLine.filter((l) => l.is_active);
+  const oldLines = everyLine.filter((l) => !l.is_active);
+  const everyService = services.data ?? [];
+  const allServices = everyService.filter((s) => s.is_active);
+  const oldServices = everyService.filter((s) => !s.is_active);
+  const current = everyLine.find((l) => l.id === selected) ?? null;
   // a remembered line that was deleted meanwhile falls back to "all"
   useEffect(() => {
     if (lines.data && selected && !lines.data.some((l) => l.id === selected)) setSelected(0);
@@ -132,16 +141,21 @@ function Catalog() {
 
   const countBy = (rows: any[]) => rows.reduce<Record<number, number>>((m, r) => (r.line_id ? { ...m, [r.line_id]: (m[r.line_id] ?? 0) + 1 } : m), {});
   const serviceCount = countBy(allServices);
+  const archivedCount = countBy(oldServices);
   const staffCount = countBy((staff.data ?? []).filter((p) => p.is_active !== false));
   const lineStaff = (staff.data ?? []).filter((p) => current && p.line_id === current.id && p.is_active !== false);
 
   const usageOf: Record<number, any> = Object.fromEntries((usage.data ?? []).map((u) => [u.service_id, u]));
   const everSold = (s: any) => !!usageOf[s.id];
   const inLine = allServices.filter((s) => !current || s.line_id === current.id);
+  const oldInLine = oldServices.filter((s) => !current || s.line_id === current.id);
   const soldCount = inLine.filter(everSold).length;
   const needle = toEnDigits(q.trim().toLowerCase());
-  const shown = inLine.filter((s) => (sold === "all" || (sold === "sold") === everSold(s)) && (!needle
-    || toEnDigits(`${s.code ?? ""} ${s.name} ${(s.aliases ?? []).join(" ")} ${current ? "" : s.line ?? ""}`).toLowerCase().includes(needle)));
+  const matches = (s: any) => !needle
+    || toEnDigits(`${s.code ?? ""} ${s.name} ${(s.aliases ?? []).join(" ")} ${current ? "" : s.line ?? ""}`).toLowerCase().includes(needle);
+  const shown = (sold === "archived" ? oldInLine : inLine).filter((s) => (sold === "all" || sold === "archived" || (sold === "sold") === everSold(s)) && matches(s));
+  // searching (e.g. a code) finds archived services too, so «not found» never hides an existing code
+  const archivedHits = needle && sold !== "archived" ? oldServices.filter((s) => matches(s) && (!current || s.line_id === current.id || /^\d+$/.test(needle))) : [];
   const lineColor = (id: number) => allLines.find((l) => l.id === id)?.color ?? "#a78bfa";
 
   function newService() {
@@ -156,8 +170,10 @@ function Catalog() {
     try {
       const body = { ...edit, name: edit.name.trim(), code: edit.code || null,
         aliases: typeof edit.aliases === "string" ? edit.aliases.split(/[،,]/).map((s: string) => s.trim()).filter(Boolean) : edit.aliases };
-      await api(edit.id ? `/api/services/${edit.id}` : "/api/services", { method: edit.id ? "PUT" : "POST", body });
-      toast(edit.id ? "ذخیره شد" : `«${body.name}» اضافه شد`);
+      const r = await api(edit.id ? `/api/services/${edit.id}` : "/api/services", { method: edit.id ? "PUT" : "POST", body });
+      if (r.restored) toast(`«${r.name}» قبلاً حذف (بایگانی) شده بود؛ همان خدمت با کد ${r.code} و سوابقش بازگردانده شد`);
+      else toast(edit.id ? "ذخیره شد" : `«${body.name}» با کد ${r.code} اضافه شد`);
+      if (r.old_code) toast(`کد خدمت از ${r.old_code} به ${r.code} تغییر کرد تا با کد لاین جدید هماهنگ باشد`, "info");
       if (current && current.id !== edit.line_id) setSelected(edit.line_id); // follow a service moved to another line
       setEdit(null);
       reload();
@@ -168,11 +184,15 @@ function Catalog() {
     }
   }
   async function deleteService(s: any) {
-    if (!confirm(`خدمت «${s.name}» حذف شود؟`)) return;
+    const u = usageOf[s.id];
+    const used = u ? [u.invoices && `${num(u.invoices)} فاکتور`, u.old && `${num(u.old)} سابقه در سیستم قبلی`].filter(Boolean).join(" و ") : "";
+    if (!confirm(used
+      ? `«${s.name}» ${used} دارد، پس پاک نمی‌شود و «بایگانی» می‌شود:\n• از فهرست خدمات و فرم‌ها پنهان می‌شود\n• در گزارش‌ها می‌ماند و کد ${s.code} برایش محفوظ است\n• از تب «بایگانی‌شده» قابل بازگردانی است\n\nاگر این خدمت تکراری است (مثلاً غلط تایپی)، به‌جای حذف از «ادغام» استفاده کنید.\n\nبایگانی شود؟`
+      : `خدمت «${s.name}» حذف شود؟`)) return;
     try {
       const r = await api(`/api/services/${s.id}`, { method: "DELETE" });
-      toast(r.archived ? `«${s.name}» حذف شد (در سوابق قبلی نگه داشته می‌شود)` : `«${s.name}» حذف شد`);
-      if (r.line_removed) toast("لاین بدون خدمت ماند و حذف شد", "info");
+      toast(r.archived ? `«${s.name}» بایگانی شد (در تب «بایگانی‌شده» قابل بازگردانی است)` : `«${s.name}» حذف شد`);
+      if (r.line_removed) toast("لاین بدون خدمت فعال ماند و حذف (بایگانی) شد؛ در «لاین‌های بایگانی‌شده» قابل بازگردانی است", "info");
       setEdit(null);
       reload();
     } catch (e: any) {
@@ -195,7 +215,8 @@ function Catalog() {
     setBusy(true);
     try {
       const r = await api(line.id ? `/api/lines/${line.id}` : "/api/lines", { method: line.id ? "PUT" : "POST", body: { code: line.code || null, name: line.name.trim(), color: line.color, icon: line.icon ?? "sparkles", is_active: true } });
-      toast("ذخیره شد");
+      if (r?.restored) toast(`لاین «${r.name}» قبلاً حذف شده بود و با همان کد ${r.code} بازگردانده شد${r.archived_services ? `؛ ${num(r.archived_services)} خدمت بایگانی‌شدهٔ آن در تب «بایگانی‌شده» است` : ""}`);
+      else toast("ذخیره شد");
       if (!line.id && r?.id) setSelected(r.id); // jump to the new line so its services can be added right away
       setLine(null);
       reload();
@@ -218,6 +239,27 @@ function Catalog() {
       toast(`حذف انجام نشد: ${e.message}`, "error");
     }
   }
+
+  async function restoreService(s: any) {
+    try {
+      await api(`/api/services/${s.id}/restore`, { method: "POST" });
+      toast(`«${s.name}» بازگردانده شد`);
+      setEdit(null);
+      reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  }
+  async function restoreLine(l: any) {
+    try {
+      await api(`/api/lines/${l.id}/restore`, { method: "POST" });
+      toast(`لاین «${l.name}» بازگردانده شد${archivedCount[l.id] ? `؛ خدمات بایگانی‌شدهٔ آن را از تب «بایگانی‌شده» بازگردانید` : ""}`);
+      reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  }
+  const openEdit = (s: any) => setEdit({ ...s, aliases: (s.aliases ?? []).join("، ") });
 
   const lineButton = (id: number, label: ReactNode, color: string, count: number, extra?: ReactNode) => {
     const active = selected === id;
@@ -244,16 +286,28 @@ function Catalog() {
             staffCount[l.id] ? <span className="muted flex items-center gap-0.5 text-xs" title="پرسنل این لاین"><Users size={12} />{num(staffCount[l.id])}</span> : undefined))}
         </div>
         {!allLines.length && <Empty text="هنوز لاینی تعریف نشده؛ با «لاین جدید» شروع کنید" />}
-        <p className="muted mt-3 text-xs leading-6">برای دیدن خدمات هر لاین روی آن کلیک کنید. کد هر خدمت = کد لاین + شماره (مثلاً لاین ۳ ← خدمت‌های ۳۰۱، ۳۰۲)؛ کدها خودکار داده می‌شوند و با تغییر نام عوض نمی‌شوند. با حذف آخرین خدمت یک لاین، خود لاین هم حذف می‌شود.</p>
+        {oldLines.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3 opacity-75" style={{ borderColor: "var(--border)" }}>
+            <span className="muted flex items-center gap-1 text-xs"><Archive size={13} />لاین‌های بایگانی‌شده:</span>
+            {oldLines.map((l) => lineButton(l.id, <>{l.code && <span className="num muted ml-1 text-xs">{l.code}</span>}{l.name}</>, "#94a3b8", (serviceCount[l.id] ?? 0) + (archivedCount[l.id] ?? 0)))}
+          </div>
+        )}
+        <p className="muted mt-3 text-xs leading-6">برای دیدن خدمات هر لاین روی آن کلیک کنید. کد هر خدمت = کد لاین + شماره (مثلاً لاین ۳ ← خدمت‌های ۳۰۱، ۳۰۲)؛ کدها خودکار داده می‌شوند و با تغییر نام عوض نمی‌شوند. خدمت یا لاینی که سابقهٔ فروش دارد با «حذف» پاک نمی‌شود، بلکه بایگانی می‌شود (در گزارش‌ها می‌ماند و از «بایگانی‌شده» قابل بازگردانی است).</p>
       </Card>
 
       <Card pad={false}
         title={current
-          ? <span className="flex items-center gap-2"><span className="h-3 w-3 rounded-full" style={{ background: current.color }} />{current.code && <span className="num muted text-sm">{current.code}</span>}خدمات {current.name}</span>
+          ? <span className="flex items-center gap-2"><span className="h-3 w-3 rounded-full" style={{ background: current.is_active ? current.color : "#94a3b8" }} />{current.code && <span className="num muted text-sm">{current.code}</span>}خدمات {current.name}
+            {!current.is_active && <span className="badge bg-slate-500/15 text-xs text-slate-500">لاین بایگانی‌شده</span>}</span>
           : "همه خدمات"}
         actions={
-          <div className="flex shrink-0 gap-2">
-            {current && <button className="btn btn-sm" onClick={() => setLine({ ...current })} title="ویرایش یا حذف لاین"><Pencil size={14} /><span className="hidden sm:inline">ویرایش لاین</span></button>}
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <button className="btn btn-sm" onClick={() => setShowHealth(true)} title="پیدا کردن خدمات تکراری، بایگانی‌شده، کدهای ناهماهنگ و ...">
+              <Stethoscope size={14} /><span className="hidden sm:inline">بررسی خدمات</span>
+              {health.data?.count > 0 && <span className="num rounded-md bg-amber-500 px-1.5 text-xs text-white">{num(health.data.count)}</span>}
+            </button>
+            {current && !current.is_active && <button className="btn btn-sm" onClick={() => restoreLine(current)}><RotateCcw size={14} />بازگردانی لاین</button>}
+            {current && current.is_active && <button className="btn btn-sm" onClick={() => setLine({ ...current })} title="ویرایش یا حذف لاین"><Pencil size={14} /><span className="hidden sm:inline">ویرایش لاین</span></button>}
             <button className="btn btn-sm btn-primary" disabled={!allLines.length} onClick={newService}><Plus size={14} />خدمت جدید{current && <span className="hidden sm:inline"> در این لاین</span>}</button>
           </div>
         }>
@@ -263,6 +317,7 @@ function Catalog() {
             { value: "all", label: <>همه <span className="num muted text-xs">{num(inLine.length)}</span></> },
             { value: "sold", label: <>دارای فاکتور <span className="num muted text-xs">{num(soldCount)}</span></> },
             { value: "unsold", label: <>بدون هیچ فاکتور <span className="num muted text-xs">{num(inLine.length - soldCount)}</span></> },
+            ...(oldInLine.length || sold === "archived" ? [{ value: "archived" as const, label: <>بایگانی‌شده <span className="num muted text-xs">{num(oldInLine.length)}</span></> }] : []),
           ]} />
           {current && (
             <span className="muted flex flex-wrap items-center gap-1 text-xs">
@@ -272,15 +327,24 @@ function Catalog() {
             </span>
           )}
         </div>
+        {archivedHits.length > 0 && (
+          <button className="mx-5 mt-3 flex items-center gap-2 rounded-xl bg-amber-500/10 px-3 py-2 text-right text-xs text-amber-700 dark:text-amber-300"
+            onClick={() => setSold("archived")}>
+            <Archive size={14} />{num(archivedHits.length)} خدمت بایگانی‌شده هم با این جستجو پیدا شد ({archivedHits.slice(0, 3).map((s) => `${s.code} ${s.name}`).join("، ")}) — نمایش
+          </button>
+        )}
+        {sold === "archived" && shown.length > 0 && (
+          <p className="muted mx-5 mt-3 rounded-xl bg-slate-500/10 px-3 py-2 text-xs leading-6">این خدمات «حذف» شده‌اند ولی چون فاکتور یا سابقه دارند فقط پنهان شده‌اند: در گزارش‌ها هستند و کدشان آزاد نیست. اگر هنوز ارائه می‌شوند «بازگردانی»، اگر تکراری‌اند «ادغام» کنید.</p>
+        )}
         {shown.length ? (
           <div className="mt-3 overflow-x-auto">
             <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
               <thead><tr><th>کد</th><th>خدمت</th><th>سابقه فروش</th><th>مدت <span className="font-normal">(دقیقه)</span></th><th>قیمت پایه <span className="font-normal">({unitLabel()})</span></th><th>قیمت آموخته‌شده <span className="font-normal">({unitLabel()})</span></th><th>بیعانه <span className="font-normal">({unitLabel()})</span></th><th></th></tr></thead>
               <tbody>{shown.map((s) => (
-                <tr key={s.id} className="cursor-pointer" onDoubleClick={() => setEdit({ ...s, aliases: (s.aliases ?? []).join("، ") })}>
+                <tr key={s.id} className={`cursor-pointer ${s.is_active ? "" : "opacity-80"}`} onDoubleClick={() => openEdit(s)}>
                   <td className="num font-bold text-violet-600 dark:text-violet-300">{s.code}</td>
                   <td>
-                    <div className="font-semibold">{s.name}</div>
+                    <div className="font-semibold">{s.name}{!s.is_active && <span className="badge mr-1.5 bg-slate-500/15 text-[11px] text-slate-500">بایگانی‌شده</span>}</div>
                     <div className="flex items-center gap-1.5 text-xs">
                       {!current && (
                         <button className="flex shrink-0 items-center gap-1 whitespace-nowrap font-semibold hover:underline" style={{ color: lineColor(s.line_id) }}
@@ -294,9 +358,9 @@ function Catalog() {
                   </td>
                   <td><SalesHistory u={usageOf[s.id]} loading={!usage.data} /></td>
                   <td onDoubleClick={(e) => e.stopPropagation()}>
-                    <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
+                    {!s.is_active ? <span className="num muted">{num(s.duration_minutes)}</span> : <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
                       className="input num w-16 px-2 py-1 text-sm" onBlur={(e) => saveDuration(s, Number(e.target.value))}
-                      onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
+                      onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />}
                   </td>
                   <td className="num whitespace-nowrap">
                     {money(s.base_price, false)}
@@ -305,15 +369,21 @@ function Catalog() {
                   <td className="num whitespace-nowrap">{s.learned_avg_price ? <>{money(s.learned_avg_price, false)} <span className="muted text-xs" title="تعداد فروش‌هایی که این میانگین از آن‌ها آموخته شده">({num(s.learned_count)})</span></> : "—"}</td>
                   <td className="num whitespace-nowrap">{s.default_deposit ? money(s.default_deposit, false) : "—"}</td>
                   <td className="whitespace-nowrap">
-                    <button className="btn btn-ghost btn-sm" onClick={() => setEdit({ ...s, aliases: (s.aliases ?? []).join("، ") })} title="ویرایش"><Pencil size={15} /></button>
-                    <button className="btn btn-ghost btn-sm text-rose-500" onClick={() => deleteService(s)} title="حذف"><Trash2 size={15} /></button>
+                    {s.is_active ? <>
+                      <button className="btn btn-ghost btn-sm" onClick={() => openEdit(s)} title="ویرایش"><Pencil size={15} /></button>
+                      <button className="btn btn-ghost btn-sm text-rose-500" onClick={() => deleteService(s)} title="حذف"><Trash2 size={15} /></button>
+                    </> : <>
+                      <button className="btn btn-ghost btn-sm text-emerald-600" onClick={() => restoreService(s)} title="بازگردانی به فهرست خدمات"><RotateCcw size={15} /></button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => setMerge({ id: s.id })} title="ادغام با خدمت دیگر"><GitMerge size={15} /></button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => openEdit(s)} title="ویرایش"><Pencil size={15} /></button>
+                    </>}
                   </td>
                 </tr>
               ))}</tbody>
             </table>
           </div>
         ) : (
-          <Empty icon={<Scissors size={28} />} text={q ? "خدمتی با این جستجو پیدا نشد" : sold === "unsold" ? "همه خدمات این بخش حداقل یک فاکتور دارند" : sold === "sold" ? "هیچ خدمتی در این بخش فاکتور ندارد" : current ? "این لاین هنوز خدمتی ندارد؛ با «خدمت جدید در این لاین» اضافه کنید" : "هنوز خدمتی تعریف نشده"} />
+          <Empty icon={<Scissors size={28} />} text={q ? "خدمتی با این جستجو پیدا نشد" : sold === "archived" ? "خدمت بایگانی‌شده‌ای در این بخش نیست" : sold === "unsold" ? "همه خدمات این بخش حداقل یک فاکتور دارند" : sold === "sold" ? "هیچ خدمتی در این بخش فاکتور ندارد" : current ? "این لاین هنوز خدمتی ندارد؛ با «خدمت جدید در این لاین» اضافه کنید" : "هنوز خدمتی تعریف نشده"} />
         )}
         {shown.length > 0 && (
           <p className="muted px-5 pb-4 text-xs">{num(shown.length)} خدمت · مبالغ به {unitLabel()} · برای ویرایش روی ردیف دوبار کلیک کنید · مدت انجام را مستقیم در جدول تغییر دهید (Enter = ذخیره)</p>
@@ -323,9 +393,15 @@ function Catalog() {
       <Modal open={!!edit} onClose={() => setEdit(null)} title={edit?.id ? "ویرایش خدمت" : "خدمت جدید"}>
         {edit && (
           <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); saveService(); }}>
+            {edit.id && !edit.is_active && (
+              <div className="flex flex-wrap items-center gap-2 rounded-xl bg-slate-500/10 p-2.5 text-xs">
+                <Archive size={14} />این خدمت بایگانی است (در فرم‌ها نمایش داده نمی‌شود).
+                <button type="button" className="btn btn-sm mr-auto" onClick={() => restoreService(edit)}><RotateCcw size={14} />بازگردانی</button>
+              </div>
+            )}
             <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="لاین"><select className="input" value={edit.line_id} onChange={(e) => setEdit({ ...edit, line_id: Number(e.target.value) })}>{allLines.map((l) => <option key={l.id} value={l.id}>{l.code ? `${l.code} · ` : ""}{l.name}</option>)}</select></Field>
-              <Field label="کد خدمت" hint={edit.id ? "با تغییر لاین یا نام، کد عوض نمی‌شود" : "خالی بگذارید تا خودکار داده شود"}><input className="input num" dir="ltr" value={edit.code ?? ""} placeholder="خودکار" onChange={(e) => setEdit({ ...edit, code: e.target.value })} /></Field>
+              <Field label="لاین"><select className="input" value={edit.line_id} onChange={(e) => setEdit({ ...edit, line_id: Number(e.target.value) })}>{everyLine.filter((l) => l.is_active || l.id === edit.line_id).map((l) => <option key={l.id} value={l.id}>{l.code ? `${l.code} · ` : ""}{l.name}{l.is_active ? "" : " (بایگانی)"}</option>)}</select></Field>
+              <Field label="کد خدمت" hint={edit.id ? "با تغییر نام عوض نمی‌شود؛ با انتقال به لاین دیگر، کد خودکار لاین جدید را می‌گیرد" : "خالی بگذارید تا خودکار داده شود"}><input className="input num" dir="ltr" value={edit.code ?? ""} placeholder="خودکار" onChange={(e) => setEdit({ ...edit, code: e.target.value })} /></Field>
               <Field label="نام خدمت"><input className="input" autoFocus value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
               <Field label="قیمت پایه"><MoneyInput value={edit.base_price} onChange={(v) => setEdit({ ...edit, base_price: v })} /></Field>
               <Field label="مدت زمان انجام (دقیقه)" hint="فاصله پیش‌فرض نوبت‌های این خدمت؛ هنگام نوبت‌دهی قابل تغییر است">
@@ -339,9 +415,23 @@ function Catalog() {
             {serviceProblem(edit) && edit.name && <p className="flex items-center gap-1 text-xs text-amber-600"><AlertTriangle size={13} />{serviceProblem(edit)}</p>}
             <div className="flex gap-2">
               <button type="submit" className="btn btn-primary flex-1" disabled={busy || !!serviceProblem(edit)}><Save size={15} />ذخیره</button>
-              {edit.id && <button type="button" className="btn btn-danger" onClick={() => deleteService(edit)}><Trash2 size={15} />حذف</button>}
+              {edit.id && <button type="button" className="btn" onClick={() => { setMerge({ id: edit.id }); setEdit(null); }} title="این خدمت تکراری است: همهٔ سوابقش به خدمت دیگری منتقل شود"><GitMerge size={15} />ادغام</button>}
+              {edit.id && edit.is_active && <button type="button" className="btn btn-danger" onClick={() => deleteService(edit)}><Trash2 size={15} />حذف</button>}
             </div>
           </form>
+        )}
+      </Modal>
+      <Modal open={!!merge} onClose={() => setMerge(null)} title="ادغام خدمت تکراری">
+        {merge && everyService.find((s) => s.id === merge.id) && (
+          <MergeDialog src={everyService.find((s) => s.id === merge.id)} services={everyService} usage={usageOf[merge.id]} preferred={merge.into}
+            onClose={() => setMerge(null)} onDone={() => { setMerge(null); reload(); }} />
+        )}
+      </Modal>
+      <Modal open={showHealth} onClose={() => setShowHealth(false)} title="بررسی و اصلاح خدمات" wide>
+        {showHealth && (
+          <ServiceHealth onChanged={reload}
+            onEdit={(id) => { const s = everyService.find((x) => x.id === id); if (s) { setShowHealth(false); openEdit(s); } }}
+            onMerge={(id, into) => { setShowHealth(false); setMerge({ id, into }); }} />
         )}
       </Modal>
       <Modal open={!!line} onClose={() => setLine(null)} title={line?.id ? "ویرایش لاین" : "لاین جدید"}>
