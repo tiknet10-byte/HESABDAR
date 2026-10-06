@@ -1,6 +1,8 @@
 """Service lines, services, staff, payment accounts (POS / cards / bank accounts)."""
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -66,6 +68,8 @@ class AccountIn(BaseModel):
     provider: str | None = None
     provider_config: dict = {}
     is_active: bool = True
+    opening_balance: int | None = None  # money already in this account when the system started (Rial)
+    opening_at: datetime | None = None
 
 
 def _line(l: ServiceLine) -> dict:
@@ -313,15 +317,63 @@ def balances(db: Session = Depends(get_db), _=Depends(require("finance"))):
     return out
 
 
+class OpeningIn(BaseModel):
+    amount: int  # Rial; may be negative (e.g. an overdrawn bank account)
+    at: datetime | None = None
+
+
+class AdjustIn(BaseModel):
+    actual: int  # the real balance counted / read from the bank (Rial)
+    note: str = ""
+
+
+@router.get("/accounts/opening")
+def openings(db: Session = Depends(get_db), _=Depends(require("finance"))):
+    """Opening balance and current balance of every account (cash box, cards, POS, bank)."""
+    out = []
+    for row in accounting.account_balances(db):
+        pa = db.get(PaymentAccount, row["id"])
+        amount, at = accounting.opening_balance(db, pa)
+        out.append({**row, "opening": amount, "opening_at": at.isoformat(timespec="minutes") if at else None})
+    db.commit()
+    return out
+
+
+@router.put("/accounts/{aid}/opening")
+def set_opening(aid: int, body: OpeningIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+    a = db.get(PaymentAccount, aid) or _404()
+    try:
+        accounting.set_opening_balance(db, a, body.amount, body.at, user=user)
+    except accounting.AccountingError as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/accounts/{aid}/adjust")
+def adjust(aid: int, body: AdjustIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+    a = db.get(PaymentAccount, aid) or _404()
+    diff = accounting.adjust_balance(db, a, body.actual, body.note, user=user)
+    db.commit()
+    return {"difference": diff}
+
+
 @router.post("/accounts")
 def create_account(body: AccountIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
     if body.kind not in ("pos", "card", "bank", "cash", "gateway"):
         raise HTTPException(400, "نوع حساب نامعتبر")
-    data = body.model_dump(exclude={"card_number"})
+    data = body.model_dump(exclude={"card_number", "opening_balance", "opening_at"})
     a = PaymentAccount(**data, card_mask=mask_card(body.card_number))
     db.add(a)
     db.flush()
     accounting.cash_account_for(db, a)
+    if body.opening_balance:
+        try:
+            accounting.set_opening_balance(db, a, body.opening_balance, body.opening_at, user=user)
+        except accounting.AccountingError as exc:
+            db.rollback()
+            raise HTTPException(400, str(exc)) from exc
     audit(db, "account.create", "payment_account", a.id, {"name": a.name, "kind": a.kind}, user=user)
     db.commit()
     return _account(a)
@@ -330,7 +382,7 @@ def create_account(body: AccountIn, db: Session = Depends(get_db), user=Depends(
 @router.put("/accounts/{aid}")
 def update_account(aid: int, body: AccountIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
     a = db.get(PaymentAccount, aid) or _404()
-    data = body.model_dump(exclude={"card_number", "provider_config"})
+    data = body.model_dump(exclude={"card_number", "provider_config", "opening_balance", "opening_at"})
     for k, v in data.items():
         setattr(a, k, v)
     if body.card_number:

@@ -2,6 +2,7 @@ import {
   ArrowDownLeft, ArrowUpRight, Banknote, BookOpenCheck, CheckCircle2, ChevronLeft, CreditCard, Globe, Landmark, Scale, Search, TrendingDown, TrendingUp, Wallet,
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { Card, Empty, HelpTip, Loading, Modal, PageHeader, Spinner, Stat, Tabs } from "../components/ui";
 import { api } from "../lib/api";
 import { ACCOUNT_KINDS, compactMoney, daysAgo, isoDate, jdatetime, jlong, money, num, unitLabel } from "../lib/format";
@@ -93,7 +94,8 @@ export default function Ledger() {
 
   return (
     <div className="space-y-5">
-      <PageHeader title="دفاتر حسابداری" subtitle="حسابداری دوطرفه: هر عملیات یک سند متوازن بدهکار/بستانکار" icon={<BookOpenCheck size={22} />} />
+      <PageHeader title="دفاتر حسابداری" subtitle="حسابداری دوطرفه: هر عملیات یک سند متوازن بدهکار/بستانکار" icon={<BookOpenCheck size={22} />}
+        actions={<Link to="/settings?tab=accounts" className="btn">موجودی اولیه و شمارش صندوق</Link>} />
       {d && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
           <Stat label="موجودی صندوق و بانک‌ها" value={money(d.cash)} icon={<Wallet size={20} />} tone="sky" onClick={() => setTab("accounts")}

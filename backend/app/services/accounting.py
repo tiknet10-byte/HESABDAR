@@ -58,7 +58,9 @@ DEFAULT_CHART = [
     ("5000", "هزینه‌ها", "expense", None),
     (EXPENSE_PARENT, "هزینه‌های عملیاتی", "expense", "5000"),
     (COMMISSION, "پورسانت پرسنل", "expense", "5000"),
+    ("5300", "کسری و اضافی موجودی صندوق/حساب", "expense", "5000"),
 ]
+CASH_DIFF = "5300"
 
 
 class AccountingError(ValueError):
@@ -615,6 +617,53 @@ def customer_balance(db: Session, customer_id: int) -> dict:
     return {"receivable": receivable, "deposits_held": deposits, "net": deposits - receivable}
 
 
+# --------------------------------------------------------------------- opening balances
+def opening_balance(db: Session, pa: PaymentAccount) -> tuple[int, datetime | None]:
+    """Opening balance entered for a cash box / card / POS / bank account and its date."""
+    acc = cash_account_for(db, pa)
+    rows = db.execute(select(JournalEntry.at, func.coalesce(func.sum(JournalLine.debit - JournalLine.credit), 0))
+                      .join(JournalLine, JournalLine.entry_id == JournalEntry.id)
+                      .where(JournalEntry.ref_type == "opening_balance", JournalEntry.ref_id == pa.id, JournalLine.account_id == acc.id)
+                      .group_by(JournalEntry.id)).all()
+    return sum(int(v) for _, v in rows), (min(at for at, _ in rows) if rows else None)
+
+
+def set_opening_balance(db: Session, pa: PaymentAccount, amount: int, at: datetime | None = None, user=None) -> int:
+    """Set (or correct) the money that was already in an account when the system started.
+    Booked against the owner's opening equity; replaces a previous opening entry of this account."""
+    at = at or local_now()
+    ensure_not_future(at, "تاریخ موجودی اولیه")
+    for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "opening_balance", JournalEntry.ref_id == pa.id)):
+        db.delete(e)
+    db.flush()
+    if amount:
+        cash = cash_account_for(db, pa)
+        opening = account(db, OPENING)
+        post(db, f"موجودی اولیه {pa.name}", [
+            Leg(cash, debit=amount) if amount > 0 else Leg(cash, credit=-amount),
+            Leg(opening, credit=amount) if amount > 0 else Leg(opening, debit=-amount),
+        ], "opening_balance", pa.id, at=at)
+    audit(db, "account.opening_balance", "payment_account", pa.id, {"amount": amount, "at": at.isoformat()}, user=user)
+    return amount
+
+
+def adjust_balance(db: Session, pa: PaymentAccount, actual: int, note: str = "", user=None) -> int:
+    """Cash count / bank statement check: book the difference between the real balance and the books
+    (shortage = expense, overage = reduces that expense account). Returns the difference posted."""
+    cash = cash_account_for(db, pa)
+    dr, cr = db.execute(select(func.coalesce(func.sum(JournalLine.debit), 0), func.coalesce(func.sum(JournalLine.credit), 0))
+                        .where(JournalLine.account_id == cash.id)).one()
+    diff = int(actual) - (int(dr) - int(cr))
+    if diff:
+        other = account(db, CASH_DIFF)
+        post(db, f"{'اضافی' if diff > 0 else 'کسری'} موجودی {pa.name}" + (f" - {note}" if note else ""), [
+            Leg(cash, debit=diff) if diff > 0 else Leg(cash, credit=-diff),
+            Leg(other, credit=diff) if diff > 0 else Leg(other, debit=-diff),
+        ], "balance_adjust", pa.id)
+    audit(db, "account.adjust", "payment_account", pa.id, {"actual": actual, "difference": diff}, user=user)
+    return diff
+
+
 def account_balances(db: Session) -> list[dict]:
     out = []
     for pa in db.scalars(select(PaymentAccount).order_by(PaymentAccount.id)):
@@ -626,11 +675,12 @@ def account_balances(db: Session) -> list[dict]:
         ).one()
         out.append({"id": pa.id, "name": pa.name, "kind": pa.kind, "bank_name": pa.bank_name, "is_active": pa.is_active,
                     "ledger_account_id": acc.id, "code": acc.code, "total_in": int(dr), "total_out": int(cr),
-                    "count": int(n), "balance": int(dr) - int(cr)})
+                    "count": int(n), "balance": int(dr) - int(cr), "opening": opening_balance(db, pa)[0]})
     return out
 
 
 REF_LABELS = {
+    "opening_balance": "موجودی اولیه", "balance_adjust": "اصلاح موجودی (شمارش)",
     "deposit": "بیعانه", "deposit_apply": "تسویه بیعانه", "invoice": "فاکتور فروش", "invoice_void": "ابطال فاکتور",
     "payment": "دریافت وجه", "expense": "هزینه", "commission": "سهم پرسنل", "staff_payout": "پرداخت به پرسنل",
 }

@@ -1,8 +1,10 @@
 import {
   AlertTriangle, Bell, BookOpen, Bot, Brain, CreditCard, Database, DatabaseBackup, KeyRound, Pencil, Plug, Plus, Scissors, Settings as Cog, ShieldCheck,
-  FileSpreadsheet, Save, Trash2, UserCog, Users, Wrench,
+  Calculator, FileSpreadsheet, Save, Trash2, UserCog, Users, Wrench,
 } from "lucide-react";
 import LegacyImport from "../components/LegacyImport";
+import JalaliPicker from "../components/JalaliPicker";
+import { toLocalIso } from "../lib/jalali";
 import { type ReactNode, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader } from "../components/ui";
@@ -212,11 +214,93 @@ function Catalog() {
   );
 }
 
+/** Money already in each cash box / card / POS / bank account when starting with this system, plus cash counts. */
+function OpeningBalances({ refresh }: { refresh: number }) {
+  const toast = useToast();
+  const { data, reload } = useApi<any[]>("/api/accounts/opening", [refresh]);
+  const [draft, setDraft] = useState<Record<number, { amount: number; at: string }>>({});
+  const [count, setCount] = useState<{ id: number; name: string; balance: number } | null>(null);
+  const [actual, setActual] = useState(0);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const rows = (data ?? []).filter((a) => a.is_active || a.opening || a.balance);
+  const dirty = Object.keys(draft).map(Number);
+  const val = (a: any) => draft[a.id] ?? { amount: a.opening ?? 0, at: (a.opening_at ?? toLocalIso(new Date())).slice(0, 16) };
+  async function saveAll() {
+    setBusy(true);
+    try {
+      for (const id of dirty) await api(`/api/accounts/${id}/opening`, { method: "PUT", body: { amount: draft[id].amount, at: draft[id].at } });
+      toast("موجودی‌های اولیه ثبت شد");
+      setDraft({});
+      reload();
+    } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
+  }
+  async function doCount() {
+    if (!count) return;
+    try {
+      const r = await api(`/api/accounts/${count.id}/adjust`, { body: { actual, note } });
+      toast(r.difference === 0 ? "موجودی با دفاتر یکی است ✓" : `${r.difference > 0 ? "اضافی" : "کسری"} ${money(Math.abs(r.difference))} ثبت شد`);
+      setCount(null);
+      reload();
+    } catch (e: any) { toast(e.message, "error"); }
+  }
+  const total = rows.reduce((t, a) => t + (a.balance ?? 0), 0);
+  return (
+    <Card title="موجودی اولیه و موجودی فعلی حساب‌ها" actions={dirty.length > 0 && <button className="btn btn-sm btn-primary" disabled={busy} onClick={saveAll}><Save size={14} />ذخیرهٔ {num(dirty.length)} مورد</button>}>
+      <div className="muted mb-3 text-xs leading-6">
+        <b>موجودی اولیه</b> پولی است که روز شروع کار با این سیستم در هر صندوق، کارت، کارتخوان یا حساب بانکی بوده است (مثلاً مانده حساب بانک یا پول نقد صندوق در آن روز). یک بار وارد کنید؛ اگر اشتباه شد همین‌جا اصلاح کنید (جایگزین می‌شود، دوبار حساب نمی‌شود). در حسابداری به «مانده افتتاحیه» ثبت می‌شود و فروش یا دریافتی امروز حساب نمی‌شود.
+        <br /><b>شمارش موجودی</b>: هر وقت پول صندوق را شمردید یا مانده واقعی بانک را دیدید، عدد واقعی را وارد کنید؛ اختلاف به‌عنوان کسری/اضافی ثبت می‌شود.
+      </div>
+      {!data ? <Loading /> : rows.length === 0 ? <Empty text="ابتدا کارتخوان/کارت/صندوق تعریف کنید" /> : (
+        <div className="overflow-x-auto">
+          <table className="table">
+            <thead><tr><th>حساب</th><th>موجودی اولیه</th><th>تاریخ موجودی اولیه</th><th>موجودی فعلی در دفاتر</th><th></th></tr></thead>
+            <tbody>
+              {rows.map((a) => {
+                const v = val(a);
+                return (
+                  <tr key={a.id} className={draft[a.id] ? "bg-amber-500/5" : ""}>
+                    <td><div className="font-semibold">{a.name}</div><div className="muted text-xs">{ACCOUNT_KINDS[a.kind]}{a.bank_name ? ` · ${a.bank_name}` : ""}</div></td>
+                    <td className="w-48"><MoneyInput value={v.amount} onChange={(x) => setDraft((d) => ({ ...d, [a.id]: { ...v, amount: x } }))} /></td>
+                    <td className="w-52"><JalaliPicker pastOnly withTime={false} value={v.at} onChange={(x) => x && setDraft((d) => ({ ...d, [a.id]: { ...v, at: x } }))} /></td>
+                    <td className="num font-bold">{money(a.balance)}</td>
+                    <td><button className="btn btn-sm" onClick={() => { setCount({ id: a.id, name: a.name, balance: a.balance }); setActual(a.balance); setNote(""); }}><Calculator size={14} />شمارش</button></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot><tr><td className="font-bold">جمع موجودی‌ها</td><td /><td /><td className="num font-extrabold">{money(total)}</td><td /></tr></tfoot>
+          </table>
+        </div>
+      )}
+      <Modal open={!!count} onClose={() => setCount(null)} title={`شمارش موجودی «${count?.name ?? ""}»`}>
+        {count && (
+          <div className="space-y-3 text-sm">
+            <div className="flex justify-between rounded-xl bg-violet-500/10 px-3 py-2"><span>موجودی در دفاتر</span><b className="num">{money(count.balance)}</b></div>
+            <Field label="موجودی واقعی (شمرده‌شده / مانده بانک)"><MoneyInput value={actual} onChange={setActual} /></Field>
+            {actual !== count.balance && (
+              <div className={`rounded-xl px-3 py-2 font-semibold ${actual < count.balance ? "bg-rose-500/10 text-rose-700" : "bg-emerald-500/10 text-emerald-700"}`}>
+                {actual < count.balance ? "کسری" : "اضافی"}: {money(Math.abs(actual - count.balance))}
+              </div>
+            )}
+            <Field label="توضیح"><input className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="مثلاً شمارش پایان روز" /></Field>
+            <button className="btn btn-primary w-full" onClick={doCount}>ثبت شمارش</button>
+          </div>
+        )}
+      </Modal>
+    </Card>
+  );
+}
+
 function Accounts() {
   const toast = useToast();
-  const { data, reload } = useApi<any[]>("/api/accounts");
+  const { user } = useAuth();
+  const { data, reload: reloadList } = useApi<any[]>("/api/accounts");
+  const [refresh, setRefresh] = useState(0);
+  const reload = () => { reloadList(); setRefresh((n) => n + 1); };
   const [edit, setEdit] = useState<any>(null);
   return (
+    <div className="space-y-5">
     <Card title="کارتخوان‌ها، کارت‌ها و حساب‌ها" actions={<button className="btn btn-sm btn-primary" onClick={() => setEdit({ kind: "pos", name: "", bank_name: "", provider_config: {}, is_active: true })}>افزودن</button>} pad={false}>
       <table className="table">
         <thead><tr><th>نام</th><th>نوع</th><th>بانک</th><th>کارت / ترمینال</th><th>اتصال API</th><th>وضعیت</th></tr></thead>
@@ -239,6 +323,10 @@ function Accounts() {
               <Field label="شماره ترمینال"><input className="input num" dir="ltr" value={edit.terminal_id ?? ""} onChange={(e) => setEdit({ ...edit, terminal_id: e.target.value })} /></Field>
               <Field label="سرویس اتصال بانکی"><select className="input" value={edit.provider ?? ""} onChange={(e) => setEdit({ ...edit, provider: e.target.value || null })}><option value="">بدون اتصال</option><option value="generic_http">API بانک/Open Banking</option><option value="demo">آزمایشی</option></select></Field>
               <label className="flex items-center gap-2 pt-6 text-sm"><input type="checkbox" checked={edit.is_active} onChange={(e) => setEdit({ ...edit, is_active: e.target.checked })} />فعال</label>
+              {!edit.id && <>
+                <Field label="موجودی اولیه (اختیاری)" hint="پولی که الان در این حساب/صندوق هست"><MoneyInput value={edit.opening_balance ?? 0} onChange={(v) => setEdit({ ...edit, opening_balance: v })} /></Field>
+                <Field label="تاریخ موجودی اولیه"><JalaliPicker pastOnly withTime={false} value={edit.opening_at ?? toLocalIso(new Date())} onChange={(v) => v && setEdit({ ...edit, opening_at: v })} /></Field>
+              </>}
             </div>
             {edit.provider === "generic_http" && (
               <Field label="پیکربندی API (JSON)" hint='{"url": ".../transactions?from={since}", "token": "...", "items_path": "data"}'>
@@ -260,6 +348,8 @@ function Accounts() {
         )}
       </Modal>
     </Card>
+    {can(user, "finance") && <OpeningBalances refresh={refresh} />}
+    </div>
   );
 }
 

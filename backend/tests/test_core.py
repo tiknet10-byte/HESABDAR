@@ -839,3 +839,25 @@ def test_void_paid_invoice_refund_or_keep_as_deposit(client, accounts, services)
     client.post(f"/api/invoices/{inv2['id']}/void", params={"payments": "deposit"})
     held = client.get(f"/api/deposits?status=held&customer_id={c['id']}").json()
     assert sorted(d["amount"] for d in held) == [1_000_000, 1_500_000]
+
+
+def test_opening_balances_and_cash_count(client):
+    from datetime import datetime, timedelta
+    box = client.post("/api/accounts", json={"kind": "cash", "name": "صندوق آزمون افتتاحیه", "opening_balance": 50_000_000,
+                                             "opening_at": (datetime.now() - timedelta(days=3)).isoformat()}).json()
+    rows = {r["id"]: r for r in client.get("/api/accounts/opening").json()}
+    assert rows[box["id"]]["opening"] == 50_000_000 and rows[box["id"]]["balance"] == 50_000_000
+    # correcting the opening balance replaces it (no double counting)
+    assert client.put(f"/api/accounts/{box['id']}/opening", json={"amount": 42_000_000}).status_code == 200
+    rows = {r["id"]: r for r in client.get("/api/accounts/opening").json()}
+    assert rows[box["id"]]["opening"] == 42_000_000 and rows[box["id"]]["balance"] == 42_000_000
+    # future date is refused
+    r = client.put(f"/api/accounts/{box['id']}/opening", json={"amount": 1, "at": (datetime.now() + timedelta(days=2)).isoformat()})
+    assert r.status_code == 400
+    # cash count: 41.5M actually in the box -> 0.5M shortage booked, balance follows the count
+    d = client.post(f"/api/accounts/{box['id']}/adjust", json={"actual": 41_500_000, "note": "شمارش"}).json()
+    assert d["difference"] == -500_000
+    rows = {r["id"]: r for r in client.get("/api/accounts/opening").json()}
+    assert rows[box["id"]]["balance"] == 41_500_000 and rows[box["id"]]["opening"] == 42_000_000
+    tb = client.get("/api/ledger/trial-balance").json()
+    assert tb["total_debit"] == tb["total_credit"]
