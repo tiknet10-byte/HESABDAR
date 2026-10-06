@@ -71,23 +71,80 @@ function General() {
 
 const LINE_COLORS = ["#f472b6", "#a78bfa", "#34d399", "#fbbf24", "#fb7185", "#60a5fa", "#f97316", "#14b8a6"];
 
+const catalogLineKey = "hesabdar:catalog-line";
+const toEnDigits = (s: string) => s.replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))).replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d))).replace(/ي/g, "ی").replace(/ك/g, "ک");
+
+/** A service's price range / deposit sanity check; returns a Persian error or "". */
+function serviceProblem(s: any): string {
+  if (!s.name?.trim()) return "نام خدمت را وارد کنید";
+  if (!s.line_id) return "لاین خدمت را انتخاب کنید";
+  if (!(s.duration_minutes >= 5)) return "مدت انجام باید حداقل ۵ دقیقه باشد";
+  if (s.min_price && s.max_price && s.min_price > s.max_price) return "حداقل قیمت از حداکثر بیشتر است";
+  if (s.base_price && s.min_price && s.base_price < s.min_price) return "قیمت پایه کمتر از حداقل قیمت مجاز است";
+  if (s.base_price && s.max_price && s.base_price > s.max_price) return "قیمت پایه بیشتر از حداکثر قیمت مجاز است";
+  if (s.default_deposit && s.base_price && s.default_deposit > s.base_price) return "بیعانه از قیمت پایه بیشتر است";
+  return "";
+}
+
 function Catalog() {
   const toast = useToast();
   const lines = useApi<any[]>("/api/lines");
   const services = useApi<any[]>("/api/services");
+  const staff = useApi<any[]>("/api/staff");
   const [edit, setEdit] = useState<any>(null);
   const [line, setLine] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [q, setQ] = useState("");
+  // the selected line (0 = all lines); remembered between visits
+  const [selected, setSelectedState] = useState<number>(() => {
+    try { return Number(localStorage.getItem(catalogLineKey)) || 0; } catch { return 0; }
+  });
+  const setSelected = (id: number) => {
+    setSelectedState(id);
+    try { localStorage.setItem(catalogLineKey, String(id)); } catch { /* storage unavailable */ }
+  };
   const reload = () => { lines.reload(); services.reload(); };
 
+  const allLines = lines.data ?? [];
+  const allServices = services.data ?? [];
+  const current = allLines.find((l) => l.id === selected) ?? null;
+  // a remembered line that was deleted meanwhile falls back to "all"
+  useEffect(() => {
+    if (lines.data && selected && !lines.data.some((l) => l.id === selected)) setSelected(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lines.data]);
+
+  const countBy = (rows: any[]) => rows.reduce<Record<number, number>>((m, r) => (r.line_id ? { ...m, [r.line_id]: (m[r.line_id] ?? 0) + 1 } : m), {});
+  const serviceCount = countBy(allServices);
+  const staffCount = countBy((staff.data ?? []).filter((p) => p.is_active !== false));
+  const lineStaff = (staff.data ?? []).filter((p) => current && p.line_id === current.id && p.is_active !== false);
+
+  const needle = toEnDigits(q.trim().toLowerCase());
+  const shown = allServices.filter((s) => (!current || s.line_id === current.id) && (!needle
+    || toEnDigits(`${s.code ?? ""} ${s.name} ${(s.aliases ?? []).join(" ")} ${current ? "" : s.line ?? ""}`).toLowerCase().includes(needle)));
+  const lineColor = (id: number) => allLines.find((l) => l.id === id)?.color ?? "#a78bfa";
+
+  function newService() {
+    const lineId = current?.id ?? allLines[0]?.id;
+    if (!lineId) return toast("اول یک لاین بسازید", "error");
+    setEdit({ line_id: lineId, name: "", base_price: 0, default_deposit: 0, duration_minutes: 60, aliases: "", is_active: true });
+  }
   async function saveService() {
+    const problem = serviceProblem(edit);
+    if (problem) return toast(problem, "error");
+    setBusy(true);
     try {
-      const body = { ...edit, aliases: typeof edit.aliases === "string" ? edit.aliases.split(/[،,]/).map((s: string) => s.trim()).filter(Boolean) : edit.aliases };
+      const body = { ...edit, name: edit.name.trim(), code: edit.code || null,
+        aliases: typeof edit.aliases === "string" ? edit.aliases.split(/[،,]/).map((s: string) => s.trim()).filter(Boolean) : edit.aliases };
       await api(edit.id ? `/api/services/${edit.id}` : "/api/services", { method: edit.id ? "PUT" : "POST", body });
-      toast("ذخیره شد");
+      toast(edit.id ? "ذخیره شد" : `«${body.name}» اضافه شد`);
+      if (current && current.id !== edit.line_id) setSelected(edit.line_id); // follow a service moved to another line
       setEdit(null);
       reload();
     } catch (e: any) {
       toast(e.message, "error");
+    } finally {
+      setBusy(false);
     }
   }
   async function deleteService(s: any) {
@@ -104,6 +161,7 @@ function Catalog() {
   }
   async function saveDuration(s: any, minutes: number) {
     if (!minutes || minutes === s.duration_minutes) return;
+    if (minutes < 5) return toast("مدت انجام باید حداقل ۵ دقیقه باشد", "error");
     try {
       await api(`/api/services/${s.id}`, { method: "PUT", body: { ...s, duration_minutes: minutes } });
       toast(`مدت «${s.name}» ذخیره شد`);
@@ -113,21 +171,27 @@ function Catalog() {
     }
   }
   async function saveLine() {
+    if (!line.name?.trim()) return;
+    setBusy(true);
     try {
-      await api(line.id ? `/api/lines/${line.id}` : "/api/lines", { method: line.id ? "PUT" : "POST", body: { code: line.code || null, name: line.name, color: line.color, icon: line.icon ?? "sparkles", is_active: true } });
+      const r = await api(line.id ? `/api/lines/${line.id}` : "/api/lines", { method: line.id ? "PUT" : "POST", body: { code: line.code || null, name: line.name.trim(), color: line.color, icon: line.icon ?? "sparkles", is_active: true } });
       toast("ذخیره شد");
+      if (!line.id && r?.id) setSelected(r.id); // jump to the new line so its services can be added right away
       setLine(null);
       reload();
     } catch (e: any) {
       toast(e.message, "error");
+    } finally {
+      setBusy(false);
     }
   }
   async function deleteLine() {
-    const count = (services.data ?? []).filter((s) => s.line_id === line.id).length;
+    const count = serviceCount[line.id] ?? 0;
     if (!confirm(`لاین «${line.name}»${count ? ` و ${count} خدمت آن` : ""} حذف شود؟`)) return;
     try {
       await api(`/api/lines/${line.id}`, { method: "DELETE" });
       toast("لاین حذف شد");
+      if (selected === line.id) setSelected(0);
       setLine(null);
       reload();
     } catch (e: any) {
@@ -135,83 +199,137 @@ function Catalog() {
     }
   }
 
+  const lineButton = (id: number, label: ReactNode, color: string, count: number, extra?: ReactNode) => {
+    const active = selected === id;
+    return (
+      <button key={id} onClick={() => { setSelected(id); setQ(""); }}
+        className={`flex shrink-0 items-center gap-2 rounded-xl border px-3 py-2 text-right text-sm transition xl:w-full ${active ? "font-bold shadow-sm" : "hover:bg-violet-500/5"}`}
+        style={{ borderColor: active ? color : "var(--border)", background: active ? color + "1f" : undefined }}>
+        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: color }} />
+        <span className="flex-1 truncate">{label}</span>
+        {extra}
+        <span className="num muted rounded-md px-1.5 text-xs" style={{ background: "var(--surface)" }} title="تعداد خدمات">{num(count)}</span>
+      </button>
+    );
+  };
+
+  if (!lines.data || !services.data) return <Loading />;
+
   return (
-    <div className="space-y-4">
-      <Card title="لاین‌های خدماتی" actions={<button className="btn btn-sm" onClick={() => setLine({ name: "", color: LINE_COLORS[(lines.data?.length ?? 0) % 8] })}><Plus size={14} />لاین جدید</button>}>
-        <div className="flex flex-wrap gap-2">
-          {(lines.data ?? []).map((l) => (
-            <button key={l.id} onClick={() => setLine({ ...l })} className="badge cursor-pointer gap-2 py-2 text-sm transition hover:scale-105" style={{ background: l.color + "22", color: l.color }} title="ویرایش یا حذف">
-              {l.code && <span className="num rounded-md bg-white/60 px-1.5 text-xs font-bold dark:bg-black/30">{l.code}</span>}{l.name}<Pencil size={12} />
-            </button>
-          ))}
+    <div className="grid gap-4 xl:grid-cols-[16rem_1fr]">
+      <Card title="لاین‌ها" actions={<button className="btn btn-sm" onClick={() => setLine({ name: "", color: LINE_COLORS[allLines.length % LINE_COLORS.length] })}><Plus size={14} />لاین جدید</button>}>
+        <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 xl:mx-0 xl:flex-col xl:overflow-visible xl:px-0">
+          {lineButton(0, "همه لاین‌ها", "#8b5cf6", allServices.length)}
+          {allLines.map((l) => lineButton(l.id, <>{l.code && <span className="num muted ml-1 text-xs">{l.code}</span>}{l.name}</>, l.color, serviceCount[l.id] ?? 0,
+            staffCount[l.id] ? <span className="muted flex items-center gap-0.5 text-xs" title="پرسنل این لاین"><Users size={12} />{num(staffCount[l.id])}</span> : undefined))}
         </div>
-        <p className="muted mt-2 text-xs">برای ویرایش یا حذف، روی لاین کلیک کنید. با حذف آخرین خدمت یک لاین، خود لاین هم حذف می‌شود. کد هر خدمت = کد لاین + شماره (مثلاً لاین ۳ ← خدمت‌های ۳۰۱، ۳۰۲)؛ کدها خودکار داده می‌شوند و با تغییر نام عوض نمی‌شوند.</p>
+        {!allLines.length && <Empty text="هنوز لاینی تعریف نشده؛ با «لاین جدید» شروع کنید" />}
+        <p className="muted mt-3 hidden text-xs leading-6 xl:block">کد هر خدمت = کد لاین + شماره (مثلاً لاین ۳ ← خدمت‌های ۳۰۱، ۳۰۲)؛ کدها خودکار داده می‌شوند و با تغییر نام عوض نمی‌شوند. با حذف آخرین خدمت یک لاین، خود لاین هم حذف می‌شود.</p>
       </Card>
-      <Card title="خدمات و قیمت‌ها" actions={<button className="btn btn-sm btn-primary" onClick={() => setEdit({ line_id: lines.data?.[0]?.id, name: "", base_price: 0, default_deposit: 0, duration_minutes: 60, aliases: "", is_active: true })}><Plus size={14} />خدمت جدید</button>} pad={false}>
-        <div className="overflow-x-auto">
-          <table className="table">
-            <thead><tr><th>کد</th><th>لاین</th><th>خدمت</th><th>مدت انجام</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th></th></tr></thead>
-            <tbody>{(services.data ?? []).map((s) => (
-              <tr key={s.id}>
-                <td className="num font-bold text-violet-600 dark:text-violet-300">{s.code}</td><td className="muted">{s.line}</td><td className="font-semibold">{s.name}</td><td>
-                  <span className="flex items-center gap-1">
-                    <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
-                      className="input num w-20 py-1 text-sm" onBlur={(e) => saveDuration(s, Number(e.target.value))}
-                      onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
-                    <span className="muted text-xs">دقیقه</span>
-                  </span>
-                </td><td className="num">{money(s.base_price)}</td>
-                <td className="num">{s.learned_avg_price ? <>{money(s.learned_avg_price)} <span className="muted text-xs">({num(s.learned_count)})</span></> : "—"}</td>
-                <td className="num">{s.default_deposit ? money(s.default_deposit) : "—"}</td>
-                <td className="whitespace-nowrap">
-                  <button className="btn btn-ghost btn-sm" onClick={() => setEdit({ ...s, aliases: s.aliases.join("، ") })} title="ویرایش"><Pencil size={15} /></button>
-                  <button className="btn btn-ghost btn-sm text-rose-500" onClick={() => deleteService(s)} title="حذف"><Trash2 size={15} /></button>
-                </td>
-              </tr>
-            ))}</tbody>
-          </table>
+
+      <Card pad={false}
+        title={current
+          ? <span className="flex items-center gap-2"><span className="h-3 w-3 rounded-full" style={{ background: current.color }} />{current.code && <span className="num muted text-sm">{current.code}</span>}خدمات {current.name}</span>
+          : "همه خدمات"}
+        actions={
+          <div className="flex gap-2">
+            {current && <button className="btn btn-sm" onClick={() => setLine({ ...current })} title="ویرایش یا حذف لاین"><Pencil size={14} />ویرایش لاین</button>}
+            <button className="btn btn-sm btn-primary" disabled={!allLines.length} onClick={newService}><Plus size={14} />خدمت جدید{current ? " در این لاین" : ""}</button>
+          </div>
+        }>
+        <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
+          <input className="input max-w-xs py-1.5 text-sm" placeholder={current ? "جستجو در خدمات این لاین (نام، کد، نام دیگر)…" : "جستجوی خدمت (نام، کد، لاین، نام دیگر)…"} value={q} onChange={(e) => setQ(e.target.value)} />
+          {current && (
+            <span className="muted flex flex-wrap items-center gap-1 text-xs">
+              <Users size={13} />
+              {lineStaff.length ? lineStaff.map((p) => <span key={p.id} className="badge bg-violet-500/10 text-violet-600 dark:text-violet-300">{p.full_name}</span>)
+                : <>پرسنلی به این لاین وصل نیست (از «پرسنل و کاربران» تعیین کنید)</>}
+            </span>
+          )}
         </div>
+        {shown.length ? (
+          <div className="mt-3 overflow-x-auto">
+            <table className="table">
+              <thead><tr><th>کد</th>{!current && <th>لاین</th>}<th>خدمت</th><th>مدت انجام</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th></th></tr></thead>
+              <tbody>{shown.map((s) => (
+                <tr key={s.id} className="cursor-pointer" onDoubleClick={() => setEdit({ ...s, aliases: (s.aliases ?? []).join("، ") })}>
+                  <td className="num font-bold text-violet-600 dark:text-violet-300">{s.code}</td>
+                  {!current && <td><button className="badge cursor-pointer whitespace-nowrap" style={{ background: lineColor(s.line_id) + "22", color: lineColor(s.line_id) }} onClick={() => setSelected(s.line_id)} title="نمایش خدمات این لاین">{s.line}</button></td>}
+                  <td>
+                    <div className="font-semibold">{s.name}</div>
+                    {s.aliases?.length > 0 && <div className="muted max-w-[16rem] truncate text-xs" title={s.aliases.join("، ")}>{s.aliases.join("، ")}</div>}
+                  </td>
+                  <td onDoubleClick={(e) => e.stopPropagation()}>
+                    <span className="flex items-center gap-1">
+                      <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
+                        className="input num w-20 py-1 text-sm" onBlur={(e) => saveDuration(s, Number(e.target.value))}
+                        onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
+                      <span className="muted text-xs">دقیقه</span>
+                    </span>
+                  </td>
+                  <td className="num whitespace-nowrap">
+                    {money(s.base_price)}
+                    {(s.min_price || s.max_price) && <div className="muted text-xs" title="بازه قیمت مجاز">{s.min_price ? money(s.min_price) : "…"} تا {s.max_price ? money(s.max_price) : "…"}</div>}
+                  </td>
+                  <td className="num whitespace-nowrap">{s.learned_avg_price ? <>{money(s.learned_avg_price)} <span className="muted text-xs">({num(s.learned_count)})</span></> : "—"}</td>
+                  <td className="num whitespace-nowrap">{s.default_deposit ? money(s.default_deposit) : "—"}</td>
+                  <td className="whitespace-nowrap">
+                    <button className="btn btn-ghost btn-sm" onClick={() => setEdit({ ...s, aliases: (s.aliases ?? []).join("، ") })} title="ویرایش"><Pencil size={15} /></button>
+                    <button className="btn btn-ghost btn-sm text-rose-500" onClick={() => deleteService(s)} title="حذف"><Trash2 size={15} /></button>
+                  </td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        ) : (
+          <Empty icon={<Scissors size={28} />} text={q ? "خدمتی با این جستجو پیدا نشد" : current ? "این لاین هنوز خدمتی ندارد؛ با «خدمت جدید در این لاین» اضافه کنید" : "هنوز خدمتی تعریف نشده"} />
+        )}
+        {shown.length > 0 && (
+          <p className="muted px-5 pb-4 text-xs">{num(shown.length)} خدمت · برای ویرایش روی ردیف دوبار کلیک کنید · مدت انجام را مستقیم در جدول تغییر دهید (Enter = ذخیره)</p>
+        )}
       </Card>
+
       <Modal open={!!edit} onClose={() => setEdit(null)} title={edit?.id ? "ویرایش خدمت" : "خدمت جدید"}>
         {edit && (
-          <div className="space-y-3">
+          <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); saveService(); }}>
             <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="لاین"><select className="input" value={edit.line_id} onChange={(e) => setEdit({ ...edit, line_id: Number(e.target.value) })}>{(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.code ? `${l.code} · ` : ""}{l.name}</option>)}</select></Field>
+              <Field label="لاین"><select className="input" value={edit.line_id} onChange={(e) => setEdit({ ...edit, line_id: Number(e.target.value) })}>{allLines.map((l) => <option key={l.id} value={l.id}>{l.code ? `${l.code} · ` : ""}{l.name}</option>)}</select></Field>
               <Field label="کد خدمت" hint={edit.id ? "با تغییر لاین یا نام، کد عوض نمی‌شود" : "خالی بگذارید تا خودکار داده شود"}><input className="input num" dir="ltr" value={edit.code ?? ""} placeholder="خودکار" onChange={(e) => setEdit({ ...edit, code: e.target.value })} /></Field>
-              <Field label="نام خدمت"><input className="input" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
+              <Field label="نام خدمت"><input className="input" autoFocus value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
               <Field label="قیمت پایه"><MoneyInput value={edit.base_price} onChange={(v) => setEdit({ ...edit, base_price: v })} /></Field>
               <Field label="مدت زمان انجام (دقیقه)" hint="فاصله پیش‌فرض نوبت‌های این خدمت؛ هنگام نوبت‌دهی قابل تغییر است">
                 <input type="number" min={5} step={5} className="input" value={edit.duration_minutes} onChange={(e) => setEdit({ ...edit, duration_minutes: Number(e.target.value) })} />
               </Field>
               <Field label="بیعانه پیش‌فرض"><MoneyInput value={edit.default_deposit} onChange={(v) => setEdit({ ...edit, default_deposit: v })} /></Field>
-              <div />
               <Field label="حداقل قیمت مجاز"><MoneyInput value={edit.min_price ?? 0} onChange={(v) => setEdit({ ...edit, min_price: v || null })} /></Field>
               <Field label="حداکثر قیمت مجاز"><MoneyInput value={edit.max_price ?? 0} onChange={(v) => setEdit({ ...edit, max_price: v || null })} /></Field>
             </div>
             <Field label="نام‌های دیگری که مشتری‌ها استفاده می‌کنند" hint="با ویرگول جدا کنید؛ سیستم از این‌ها و گفتگوها یاد می‌گیرد"><input className="input" value={edit.aliases} onChange={(e) => setEdit({ ...edit, aliases: e.target.value })} /></Field>
+            {serviceProblem(edit) && edit.name && <p className="flex items-center gap-1 text-xs text-amber-600"><AlertTriangle size={13} />{serviceProblem(edit)}</p>}
             <div className="flex gap-2">
-              <button className="btn btn-primary flex-1" onClick={saveService}>ذخیره</button>
-              {edit.id && <button className="btn btn-danger" onClick={() => deleteService(edit)}><Trash2 size={15} />حذف</button>}
+              <button type="submit" className="btn btn-primary flex-1" disabled={busy || !!serviceProblem(edit)}><Save size={15} />ذخیره</button>
+              {edit.id && <button type="button" className="btn btn-danger" onClick={() => deleteService(edit)}><Trash2 size={15} />حذف</button>}
             </div>
-          </div>
+          </form>
         )}
       </Modal>
       <Modal open={!!line} onClose={() => setLine(null)} title={line?.id ? "ویرایش لاین" : "لاین جدید"}>
         {line && (
-          <div className="space-y-3">
+          <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); saveLine(); }}>
             <div className="grid grid-cols-3 gap-3">
               <Field label="کد لاین"><input className="input num" dir="ltr" value={line.code ?? ""} placeholder="خودکار" onChange={(e) => setLine({ ...line, code: e.target.value })} /></Field>
-              <div className="col-span-2"><Field label="نام لاین"><input className="input" value={line.name} onChange={(e) => setLine({ ...line, name: e.target.value })} /></Field></div>
+              <div className="col-span-2"><Field label="نام لاین"><input className="input" autoFocus value={line.name} onChange={(e) => setLine({ ...line, name: e.target.value })} /></Field></div>
             </div>
             <div>
               <div className="label">رنگ</div>
-              <div className="flex gap-2">{LINE_COLORS.map((c) => <button key={c} type="button" onClick={() => setLine({ ...line, color: c })} className={`h-8 w-8 rounded-full ${line.color === c ? "ring-4 ring-violet-300" : ""}`} style={{ background: c }} />)}</div>
+              <div className="flex flex-wrap gap-2">{LINE_COLORS.map((c) => <button key={c} type="button" onClick={() => setLine({ ...line, color: c })} className={`h-8 w-8 rounded-full ${line.color === c ? "ring-4 ring-violet-300" : ""}`} style={{ background: c }} />)}</div>
             </div>
+            {line.id && <p className="muted text-xs">{num(serviceCount[line.id] ?? 0)} خدمت و {num(staffCount[line.id] ?? 0)} پرسنل در این لاین</p>}
             <div className="flex gap-2">
-              <button className="btn btn-primary flex-1" disabled={!line.name} onClick={saveLine}>ذخیره</button>
-              {line.id && <button className="btn btn-danger" onClick={deleteLine}><Trash2 size={15} />حذف لاین و خدماتش</button>}
+              <button type="submit" className="btn btn-primary flex-1" disabled={busy || !line.name?.trim()}><Save size={15} />ذخیره</button>
+              {line.id && <button type="button" className="btn btn-danger" onClick={deleteLine}><Trash2 size={15} />حذف لاین و خدماتش</button>}
             </div>
-          </div>
+          </form>
         )}
       </Modal>
     </div>
