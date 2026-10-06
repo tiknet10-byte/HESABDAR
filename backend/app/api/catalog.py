@@ -5,7 +5,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import Integer, func, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
@@ -31,6 +31,7 @@ router = APIRouter(prefix="/api", tags=["catalog"])
 
 
 class LineIn(BaseModel):
+    code: str | None = None  # empty = next number
     name: str
     color: str = "#c084fc"
     icon: str = "sparkles"
@@ -38,6 +39,7 @@ class LineIn(BaseModel):
 
 
 class ServiceIn(BaseModel):
+    code: str | None = None  # empty = next number in its line
     line_id: int
     name: str
     base_price: int = 0
@@ -47,6 +49,21 @@ class ServiceIn(BaseModel):
     duration_minutes: int = 60
     aliases: list[str] = []
     is_active: bool = True
+
+
+def _check_code(db: Session, model, code: str | None, own_id: int | None = None) -> str | None:  # noqa: ANN001
+    """Normalise a hand-entered code (Persian digits allowed) and refuse a duplicate."""
+    from ..services.textutil import to_en_digits
+
+    code = to_en_digits(code or "").strip()
+    if not code:
+        return None
+    if not code.isdigit():
+        raise HTTPException(400, "کد فقط باید عدد باشد")
+    other = db.scalar(select(model).where(model.code == code, model.id != (own_id or 0)))
+    if other is not None:
+        raise HTTPException(409, f"کد {code} متعلق به «{other.name}» است")
+    return code
 
 
 class StaffIn(BaseModel):
@@ -73,11 +90,12 @@ class AccountIn(BaseModel):
 
 
 def _line(l: ServiceLine) -> dict:
-    return {"id": l.id, "name": l.name, "color": l.color, "icon": l.icon, "is_active": l.is_active}
+    return {"id": l.id, "code": l.code, "name": l.name, "color": l.color, "icon": l.icon, "is_active": l.is_active}
 
 
 def _service(s: Service) -> dict:
-    return {"id": s.id, "line_id": s.line_id, "line": s.line.name if s.line else None, "name": s.name, "base_price": s.base_price,
+    return {"id": s.id, "code": s.code, "line_id": s.line_id, "line": s.line.name if s.line else None,
+            "line_code": s.line.code if s.line else None, "name": s.name, "base_price": s.base_price,
             "min_price": s.min_price, "max_price": s.max_price, "default_deposit": s.default_deposit,
             "duration_minutes": s.duration_minutes, "aliases": s.aliases, "is_active": s.is_active,
             "learned_avg_price": s.learned_avg_price, "learned_count": s.learned_count}
@@ -93,7 +111,7 @@ def _account(a: PaymentAccount) -> dict:
 # ---------------------------------------------------------------- lines
 @router.get("/lines")
 def lines(all: bool = False, db: Session = Depends(get_db), _=Depends(require("read"))):
-    q = select(ServiceLine).order_by(ServiceLine.id)
+    q = select(ServiceLine).order_by(func.cast(ServiceLine.code, Integer), ServiceLine.id)
     if not all:
         q = q.where(ServiceLine.is_active.is_(True))
     return [_line(l) for l in db.scalars(q)]
@@ -108,7 +126,7 @@ def create_line(body: LineIn, db: Session = Depends(get_db), user=Depends(requir
         l.is_active = True  # re-activate an archived line with the same name
         l.color, l.icon = body.color, body.icon
     else:
-        l = ServiceLine(**{**body.model_dump(), "name": body.name.strip()})
+        l = ServiceLine(**{**body.model_dump(), "name": body.name.strip(), "code": _check_code(db, ServiceLine, body.code)})
         db.add(l)
     db.flush()
     accounting.revenue_account_for_line(db, l.name)
@@ -125,8 +143,11 @@ def update_line(lid: int, body: LineIn, db: Session = Depends(get_db), user=Depe
         # keep the line's revenue account (and its history) - just rename it
         acc = accounting.revenue_account_for_line(db, l.name)
         acc.name = f"درآمد {body.name}"
-    for k, v in body.model_dump().items():
+    code = _check_code(db, ServiceLine, body.code, lid)
+    for k, v in body.model_dump(exclude={"code"}).items():
         setattr(l, k, v)
+    if code:
+        l.code = code
     audit(db, "line.update", "line", l.id, body.model_dump(), user=user)
     _names_changed()
     db.commit()
@@ -166,7 +187,7 @@ def _remove_service(db: Session, s: Service) -> bool:
 # ---------------------------------------------------------------- services
 @router.get("/services")
 def services(all: bool = False, db: Session = Depends(get_db), _=Depends(require("read"))):
-    q = select(Service).order_by(Service.line_id, Service.name)
+    q = select(Service).order_by(func.cast(Service.code, Integer), Service.line_id, Service.name)
     if not all:
         q = q.where(Service.is_active.is_(True))
     return [_service(s) for s in db.scalars(q)]
@@ -174,7 +195,7 @@ def services(all: bool = False, db: Session = Depends(get_db), _=Depends(require
 
 @router.post("/services")
 def create_service(body: ServiceIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
-    s = Service(**body.model_dump())
+    s = Service(**{**body.model_dump(), "code": _check_code(db, Service, body.code)})
     db.add(s)
     db.flush()
     learning.learn_text(db, s.name, s.id, weight=3)
@@ -187,8 +208,11 @@ def create_service(body: ServiceIn, db: Session = Depends(get_db), user=Depends(
 def update_service(sid: int, body: ServiceIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
     s = db.get(Service, sid) or _404()
     old_price = s.base_price
-    for k, v in body.model_dump().items():
+    code = _check_code(db, Service, body.code, sid)
+    for k, v in body.model_dump(exclude={"code"}).items():
         setattr(s, k, v)
+    if code:
+        s.code = code
     for a in body.aliases:
         learning.learn_text(db, a, s.id, weight=3)
     audit(db, "service.update", "service", s.id, {**body.model_dump(), "old_price": old_price}, user=user)

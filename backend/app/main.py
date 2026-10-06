@@ -16,7 +16,7 @@ from .core.config import get_settings
 from .core.db import Base, SessionLocal
 from .plugins.manager import manager
 from .seed import seed_base
-from .services import backup, settings_store
+from .services import backup, codes, settings_store  # codes: gives new lines/services their code on save
 
 log = logging.getLogger("hesabdar")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -49,6 +49,7 @@ def init_db() -> None:
         from .services.accounting import assign_missing_codes
 
         assign_missing_codes(db)  # every customer has a customer code
+        codes.assign_missing(db)  # every service line and service has a code
         db.commit()
 
 

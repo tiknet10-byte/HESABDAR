@@ -114,7 +114,7 @@ function Catalog() {
   }
   async function saveLine() {
     try {
-      await api(line.id ? `/api/lines/${line.id}` : "/api/lines", { method: line.id ? "PUT" : "POST", body: { name: line.name, color: line.color, icon: line.icon ?? "sparkles", is_active: true } });
+      await api(line.id ? `/api/lines/${line.id}` : "/api/lines", { method: line.id ? "PUT" : "POST", body: { code: line.code || null, name: line.name, color: line.color, icon: line.icon ?? "sparkles", is_active: true } });
       toast("ذخیره شد");
       setLine(null);
       reload();
@@ -141,19 +141,19 @@ function Catalog() {
         <div className="flex flex-wrap gap-2">
           {(lines.data ?? []).map((l) => (
             <button key={l.id} onClick={() => setLine({ ...l })} className="badge cursor-pointer gap-2 py-2 text-sm transition hover:scale-105" style={{ background: l.color + "22", color: l.color }} title="ویرایش یا حذف">
-              {l.name}<Pencil size={12} />
+              {l.code && <span className="num rounded-md bg-white/60 px-1.5 text-xs font-bold dark:bg-black/30">{l.code}</span>}{l.name}<Pencil size={12} />
             </button>
           ))}
         </div>
-        <p className="muted mt-2 text-xs">برای ویرایش یا حذف، روی لاین کلیک کنید. با حذف آخرین خدمت یک لاین، خود لاین هم حذف می‌شود.</p>
+        <p className="muted mt-2 text-xs">برای ویرایش یا حذف، روی لاین کلیک کنید. با حذف آخرین خدمت یک لاین، خود لاین هم حذف می‌شود. کد هر خدمت = کد لاین + شماره (مثلاً لاین ۳ ← خدمت‌های ۳۰۱، ۳۰۲)؛ کدها خودکار داده می‌شوند و با تغییر نام عوض نمی‌شوند.</p>
       </Card>
       <Card title="خدمات و قیمت‌ها" actions={<button className="btn btn-sm btn-primary" onClick={() => setEdit({ line_id: lines.data?.[0]?.id, name: "", base_price: 0, default_deposit: 0, duration_minutes: 60, aliases: "", is_active: true })}><Plus size={14} />خدمت جدید</button>} pad={false}>
         <div className="overflow-x-auto">
           <table className="table">
-            <thead><tr><th>لاین</th><th>خدمت</th><th>مدت انجام</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th></th></tr></thead>
+            <thead><tr><th>کد</th><th>لاین</th><th>خدمت</th><th>مدت انجام</th><th>قیمت پایه</th><th>قیمت آموخته‌شده</th><th>بیعانه</th><th></th></tr></thead>
             <tbody>{(services.data ?? []).map((s) => (
               <tr key={s.id}>
-                <td className="muted">{s.line}</td><td className="font-semibold">{s.name}</td><td>
+                <td className="num font-bold text-violet-600 dark:text-violet-300">{s.code}</td><td className="muted">{s.line}</td><td className="font-semibold">{s.name}</td><td>
                   <span className="flex items-center gap-1">
                     <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
                       className="input num w-20 py-1 text-sm" onBlur={(e) => saveDuration(s, Number(e.target.value))}
@@ -176,7 +176,8 @@ function Catalog() {
         {edit && (
           <div className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="لاین"><select className="input" value={edit.line_id} onChange={(e) => setEdit({ ...edit, line_id: Number(e.target.value) })}>{(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></Field>
+              <Field label="لاین"><select className="input" value={edit.line_id} onChange={(e) => setEdit({ ...edit, line_id: Number(e.target.value) })}>{(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.code ? `${l.code} · ` : ""}{l.name}</option>)}</select></Field>
+              <Field label="کد خدمت" hint={edit.id ? "با تغییر لاین یا نام، کد عوض نمی‌شود" : "خالی بگذارید تا خودکار داده شود"}><input className="input num" dir="ltr" value={edit.code ?? ""} placeholder="خودکار" onChange={(e) => setEdit({ ...edit, code: e.target.value })} /></Field>
               <Field label="نام خدمت"><input className="input" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
               <Field label="قیمت پایه"><MoneyInput value={edit.base_price} onChange={(v) => setEdit({ ...edit, base_price: v })} /></Field>
               <Field label="مدت زمان انجام (دقیقه)" hint="فاصله پیش‌فرض نوبت‌های این خدمت؛ هنگام نوبت‌دهی قابل تغییر است">
@@ -198,7 +199,10 @@ function Catalog() {
       <Modal open={!!line} onClose={() => setLine(null)} title={line?.id ? "ویرایش لاین" : "لاین جدید"}>
         {line && (
           <div className="space-y-3">
-            <Field label="نام لاین"><input className="input" value={line.name} onChange={(e) => setLine({ ...line, name: e.target.value })} /></Field>
+            <div className="grid grid-cols-3 gap-3">
+              <Field label="کد لاین"><input className="input num" dir="ltr" value={line.code ?? ""} placeholder="خودکار" onChange={(e) => setLine({ ...line, code: e.target.value })} /></Field>
+              <div className="col-span-2"><Field label="نام لاین"><input className="input" value={line.name} onChange={(e) => setLine({ ...line, name: e.target.value })} /></Field></div>
+            </div>
             <div>
               <div className="label">رنگ</div>
               <div className="flex gap-2">{LINE_COLORS.map((c) => <button key={c} type="button" onClick={() => setLine({ ...line, color: c })} className={`h-8 w-8 rounded-full ${line.color === c ? "ring-4 ring-violet-300" : ""}`} style={{ background: c }} />)}</div>

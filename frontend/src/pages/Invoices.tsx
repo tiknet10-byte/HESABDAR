@@ -5,7 +5,7 @@ import StaffSelect from "../components/StaffSelect";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Stat, Tabs } from "../components/ui";
 import { api } from "../lib/api";
-import { ACCOUNT_KINDS, cmoney, jdatetime, money, num } from "../lib/format";
+import { ACCOUNT_KINDS, cmoney, jdatetime, money, num, svcLabel } from "../lib/format";
 import JalaliPicker from "../components/JalaliPicker";
 import { faDigits, formatJ, toGregorian, toJalali, toLocalIso } from "../lib/jalali";
 import { announceFreed } from "../components/Waitlist";
@@ -203,7 +203,7 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
             }}>
               <option value="">انتخاب خدمت…</option>
               {Object.entries(services.reduce((g: any, s) => ((g[s.line] ||= []).push(s), g), {})).map(([line, list]: any) => (
-                <optgroup key={line} label={line}>{list.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}</optgroup>
+                <optgroup key={line} label={`${list[0]?.line_code ? list[0].line_code + " · " : ""}${line}`}>{list.map((s: any) => <option key={s.id} value={s.id}>{svcLabel(s, false)}</option>)}</optgroup>
               ))}
             </select>
             <StaffSelect className="input col-span-6 sm:col-span-3" serviceId={it.service_id} value={it.staff_id}

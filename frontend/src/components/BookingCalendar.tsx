@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import JalaliPicker from "./JalaliPicker";
 import { Badge, Card, Empty, Field, Modal } from "./ui";
 import { api } from "../lib/api";
-import { money } from "../lib/format";
+import { money, svcLabel } from "../lib/format";
 import { useApi } from "../lib/hooks";
 import { faDigits, formatJ, J_MONTHS, J_WEEKDAYS, J_WEEKDAYS_SHORT, jWeekday, parseLocal, toJalali, toLocalIso } from "../lib/jalali";
 
@@ -196,7 +196,7 @@ function DayPanel({ lineId, day, services, onBook, refresh }: { lineId: number; 
           <div className="flex flex-wrap items-center gap-2">
             <span className="label mb-0">زمان‌های خالی برای</span>
             <select className="input w-auto py-1 text-sm" value={serviceId} onChange={(e) => setServiceId(Number(e.target.value))}>
-              {services.map((s) => <option key={s.id} value={s.id}>{s.name} ({faDigits(s.duration_minutes)} دقیقه)</option>)}
+              {services.map((s) => <option key={s.id} value={s.id}>{svcLabel(s, false)} ({faDigits(s.duration_minutes)} دقیقه)</option>)}
             </select>
           </div>
           {slots.length ? (

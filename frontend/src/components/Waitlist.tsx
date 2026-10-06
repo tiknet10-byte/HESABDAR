@@ -1,4 +1,5 @@
 import { Crown, Plus, Trash2, UserCheck } from "lucide-react";
+import { svcLabel } from "../lib/format";
 import { useEffect, useState } from "react";
 import BookingFields, { type BookingState } from "./Booking";
 import CustomerPicker, { type CustomerChoice } from "./CustomerPicker";
@@ -132,7 +133,7 @@ function AddForm({ onDone }: { onDone: () => void }) {
         <Field label="خدمت">
           <select className="input" value={f.service_id} onChange={(e) => setF({ ...f, service_id: Number(e.target.value), staff_id: 0 })}>
             <option value={0}>هر خدمتی</option>
-            {services.map((s) => <option key={s.id} value={s.id}>{s.line} / {s.name}</option>)}
+            {services.map((s) => <option key={s.id} value={s.id}>{svcLabel(s)}</option>)}
           </select>
         </Field>
         <Field label="پرسنل">
@@ -174,7 +175,7 @@ function BookForm({ entry, onDone }: { entry: any; onDone: () => void }) {
         <Field label="خدمت">
           <select className="input" value={f.service_id} onChange={(e) => setF({ ...f, service_id: Number(e.target.value) })}>
             <option value={0}>—</option>
-            {services.map((s) => <option key={s.id} value={s.id}>{s.line} / {s.name}</option>)}
+            {services.map((s) => <option key={s.id} value={s.id}>{svcLabel(s)}</option>)}
           </select>
         </Field>
         <Field label="پرسنل">

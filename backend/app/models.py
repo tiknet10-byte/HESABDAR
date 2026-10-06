@@ -74,6 +74,7 @@ class ServiceLine(TimestampMixin, Base):
     __tablename__ = "service_lines"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(128), unique=True)
+    code: Mapped[str | None] = mapped_column(String(8), index=True, nullable=True)  # line code: 1, 2, 3 ...
     color: Mapped[str] = mapped_column(String(16), default="#c084fc")
     icon: Mapped[str] = mapped_column(String(32), default="sparkles")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -85,6 +86,7 @@ class Service(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     line_id: Mapped[int] = mapped_column(ForeignKey("service_lines.id"))
     name: Mapped[str] = mapped_column(String(128))
+    code: Mapped[str | None] = mapped_column(String(12), index=True, nullable=True)  # line code + number: 101, 102, 201 ...
     base_price: Mapped[int] = mapped_column(BigInteger, default=0)
     min_price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     max_price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

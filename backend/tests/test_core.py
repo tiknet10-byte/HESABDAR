@@ -861,3 +861,28 @@ def test_opening_balances_and_cash_count(client):
     assert rows[box["id"]]["balance"] == 41_500_000 and rows[box["id"]]["opening"] == 42_000_000
     tb = client.get("/api/ledger/trial-balance").json()
     assert tb["total_debit"] == tb["total_credit"]
+
+
+def test_line_and_service_codes(client):
+    lines = client.get("/api/lines").json()
+    svcs = client.get("/api/services").json()
+    assert all(l["code"] and l["code"].isdigit() for l in lines)
+    assert all(s["code"] and s["code"].startswith(s["line_code"]) and len(s["code"]) == len(s["line_code"]) + 2 for s in svcs)
+    assert len({s["code"] for s in svcs}) == len(svcs) and len({l["code"] for l in lines}) == len(lines)
+    # a new line gets the next number, its services line-code + 01, 02 ...
+    line = client.post("/api/lines", json={"name": "لاین کددار"}).json()
+    assert int(line["code"]) == max(int(l["code"]) for l in lines) + 1
+    a = client.post("/api/services", json={"line_id": line["id"], "name": "خدمت کددار یک", "base_price": 1}).json()
+    b = client.post("/api/services", json={"line_id": line["id"], "name": "خدمت کددار دو", "base_price": 1}).json()
+    assert a["code"] == f"{line['code']}01" and b["code"] == f"{line['code']}02"
+    # codes stay when renaming; can be set by hand; duplicates refused
+    r = client.put(f"/api/services/{a['id']}", json={"line_id": line["id"], "name": "نام تازه", "base_price": 1}).json()
+    assert r["code"] == a["code"]
+    assert client.put(f"/api/services/{a['id']}", json={"line_id": line["id"], "name": "x", "code": b["code"]}).status_code == 409
+    assert client.put(f"/api/services/{a['id']}", json={"line_id": line["id"], "name": "x", "code": "۹۹۰۱"}).json()["code"] == "9901"
+    # services created by the import also get codes
+    rows = [["کد مشتری", "نام مشتری", "موبایل", "تاریخ", "خدمت"], ["660011", "کد خدمت انتقالی", "09120066011", "1404/01/10", "خدمت کاملاً تازه"]]
+    p = client.post("/api/import/legacy/preview", files={"file": ("h.xlsx", _xlsx(rows), "application/octet-stream")}, data={"kind": "history"}).json()
+    client.post(f"/api/import/legacy/{p['id']}/commit", json={"service_map": {"خدمت کاملاً تازه": "new"}})
+    new = [s for s in client.get("/api/services").json() if s["name"] == "خدمت کاملاً تازه"][0]
+    assert new["code"] and new["code"].startswith(new["line_code"])

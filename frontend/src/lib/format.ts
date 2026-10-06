@@ -70,3 +70,7 @@ export const ROLES: Record<string, string> = {
 };
 export const CHANNELS: Record<string, string> = { sms: "پیامک", whatsapp: "واتساپ", instagram: "اینستاگرام", manual: "دستی" };
 export const cmoney = (rial: number) => `${compactMoney(rial)} ${unitLabel()}`;
+
+/** Service label with its code first ("301 · آرایش دائم / فیبروز ابرو") - typing the code in a list jumps to it. */
+export const svcLabel = (s: { code?: string | null; line?: string | null; name: string }, withLine = true) =>
+  `${s.code ? s.code + " · " : ""}${withLine && s.line ? s.line + " / " : ""}${s.name}`;

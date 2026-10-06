@@ -7,7 +7,7 @@ import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicke
 import JalaliPicker from "../components/JalaliPicker";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Stat, Tabs } from "../components/ui";
 import { api } from "../lib/api";
-import { ACCOUNT_KINDS, cmoney, money, num } from "../lib/format";
+import { ACCOUNT_KINDS, cmoney, money, num, svcLabel } from "../lib/format";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
 import { formatJ, toLocalIso } from "../lib/jalali";
 
@@ -84,7 +84,7 @@ function DepositForm({ onDone }: { onDone: () => void }) {
         <Field label="بیعانه برای کدام خدمت است؟">
           <select className="input" value={f.service_id} onChange={(e) => setF({ ...f, service_id: Number(e.target.value) })}>
             <option value={0}>نامشخص</option>
-            {services.map((s) => <option key={s.id} value={s.id}>{s.line} / {s.name}</option>)}
+            {services.map((s) => <option key={s.id} value={s.id}>{svcLabel(s)}</option>)}
           </select>
         </Field>
         <Field label="پرسنل انجام‌دهنده">
@@ -125,7 +125,7 @@ function BookForDeposit({ deposit, onDone }: { deposit: any; onDone: () => void 
       <div className="text-sm">بیعانه <b>{money(deposit.amount)}</b> از <b>{deposit.customer}</b> · دریافت {formatJ(deposit.received_at)}</div>
       <select className="input" value={serviceId} onChange={(e) => setServiceId(Number(e.target.value))}>
         <option value={0}>انتخاب خدمت…</option>
-        {services.map((s) => <option key={s.id} value={s.id}>{s.line} / {s.name}</option>)}
+        {services.map((s) => <option key={s.id} value={s.id}>{svcLabel(s)}</option>)}
       </select>
       <BookingFields serviceId={serviceId || undefined} value={at} onChange={setAt} onStaff={setStaffId} onDuration={setDur}
         customerId={deposit.customer_id} onState={setBs} />
@@ -179,7 +179,7 @@ function DepositEditForm({ d, onDone }: { d: any; onDone: () => void }) {
           <Field label="خدمت">
             <select className="input" value={f.service_id} onChange={(e) => setF({ ...f, service_id: Number(e.target.value), staff_id: 0 })}>
               <option value={0}>نامشخص</option>
-              {services.map((x) => <option key={x.id} value={x.id}>{x.line} / {x.name}</option>)}
+              {services.map((x) => <option key={x.id} value={x.id}>{svcLabel(x)}</option>)}
             </select>
           </Field>
           <Field label="پرسنل"><StaffSelect serviceId={f.service_id || undefined} value={f.staff_id || undefined} onChange={(id) => setF((x) => ({ ...x, staff_id: id ?? 0 }))} /></Field>

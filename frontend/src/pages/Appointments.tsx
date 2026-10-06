@@ -8,7 +8,7 @@ import { announceFreed, WAITLIST_CHANGED, WaitlistPanel } from "../components/Wa
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
 import { Badge, Card, Empty, Field, Loading, Modal, PageHeader, Tabs } from "../components/ui";
 import { api } from "../lib/api";
-import { money } from "../lib/format";
+import { money, svcLabel } from "../lib/format";
 import { useApi, useToast } from "../lib/hooks";
 import { faDigits, formatJ } from "../lib/jalali";
 
@@ -57,7 +57,7 @@ function AppointmentForm({ initial, preset, onDone }: { initial?: any; preset?: 
         <Field label="خدمت">
           <select className="input" value={f.service_id} onChange={(e) => setF({ ...f, service_id: Number(e.target.value) })}>
             <option value={0}>—</option>
-            {services.map((s) => <option key={s.id} value={s.id}>{s.line} / {s.name} ({faDigits(s.duration_minutes)} دقیقه)</option>)}
+            {services.map((s) => <option key={s.id} value={s.id}>{svcLabel(s)} ({faDigits(s.duration_minutes)} دقیقه)</option>)}
           </select>
         </Field>
         <Field label="پرسنل">

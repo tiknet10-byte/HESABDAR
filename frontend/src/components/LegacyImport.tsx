@@ -3,7 +3,7 @@ import { useState } from "react";
 import CustomerCleanup from "./CustomerCleanup";
 import { Badge, Card, Empty, Field } from "./ui";
 import { api, download } from "../lib/api";
-import { money } from "../lib/format";
+import { money, svcLabel } from "../lib/format";
 import { useApi, useToast } from "../lib/hooks";
 import { faDigits, formatJ } from "../lib/jalali";
 
@@ -196,7 +196,7 @@ export default function LegacyImport() {
                       <select className="input w-1/2 py-1 text-sm" value={svcMap[u.name] ?? "new"} onChange={(e) => setSvcMap({ ...svcMap, [u.name]: e.target.value })}>
                         <option value="new">➕ خدمت جدید</option>
                         <option value="skip">فقط در توضیحات بماند</option>
-                        {services.map((x) => <option key={x.id} value={x.id}>{x.line} / {x.name}</option>)}
+                        {services.map((x) => <option key={x.id} value={x.id}>{svcLabel(x)}</option>)}
                       </select>
                     </div>
                   ))}
