@@ -44,6 +44,19 @@ def staff_shares(start: date | None = None, end: date | None = None, db: Session
     return reports.staff_shares(db, start, end)
 
 
+@router.get("/reports/revenue")
+def revenue_report(start: date | None = None, end: date | None = None, line_id: int | None = None, source: str = "all",
+                   db: Session = Depends(get_db), _=Depends(require("reports"))):
+    """Revenue per Jalali month, line, staff and service - invoices here plus the previous software's receipts."""
+    return reports.revenue_breakdown(db, start, end, line_id=line_id, source=source if source in ("all", "new", "old") else "all")
+
+
+@router.get("/reports/revenue/staff/{sid}")
+def revenue_staff(sid: int, start: date | None = None, end: date | None = None, limit: int = 100, offset: int = 0,
+                  db: Session = Depends(get_db), _=Depends(require("reports"))):
+    return reports.staff_revenue_detail(db, sid, start, end, min(limit, 500), max(offset, 0))
+
+
 @router.get("/reports/forecast")
 def forecast(days: int = 30, db: Session = Depends(get_db), _=Depends(require("reports"))):
     return reports.forecast(db, min(days, 180))

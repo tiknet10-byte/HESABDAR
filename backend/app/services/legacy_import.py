@@ -760,6 +760,9 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
     for c in moved:  # customers whose automatic code was taken by an imported one get a fresh code
         c.legacy_code = new_code()
     batch.status = "committed"
+    # the parsed file is not needed any more (undo uses "created", re-import checks use "fps"): keep only the problem
+    # lines for reference, so big imports don't bloat the database
+    batch.rows = [r for r in batch.rows if r.get("errors") or r.get("warnings")][:1000]
     batch.summary = {**batch.summary, "created": created, "result": counts, "fps": fps, "committed_at": now.isoformat(timespec="minutes")}
     return counts
 

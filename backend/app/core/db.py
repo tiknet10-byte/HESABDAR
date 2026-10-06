@@ -23,7 +23,11 @@ def _make_engine(url: str):
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA journal_mode=WAL")  # crash-safe, concurrent reads
             cur.execute("PRAGMA foreign_keys=ON")
-            cur.execute("PRAGMA synchronous=FULL")
+            cur.execute("PRAGMA synchronous=FULL")  # money data: never lose a committed transaction
+            cur.execute("PRAGMA busy_timeout=8000")  # wait instead of failing when a backup/report is writing
+            cur.execute("PRAGMA cache_size=-65536")  # 64 MB page cache - keeps large reports fast
+            cur.execute("PRAGMA temp_store=MEMORY")
+            cur.execute("PRAGMA mmap_size=268435456")
             cur.close()
     return engine
 

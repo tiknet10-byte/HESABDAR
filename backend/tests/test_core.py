@@ -886,3 +886,37 @@ def test_line_and_service_codes(client):
     client.post(f"/api/import/legacy/{p['id']}/commit", json={"service_map": {"خدمت کاملاً تازه": "new"}})
     new = [s for s in client.get("/api/services").json() if s["name"] == "خدمت کاملاً تازه"][0]
     assert new["code"] and new["code"].startswith(new["line_code"])
+
+
+def test_revenue_by_line_staff_service_with_previous_software(client, accounts):
+    from datetime import datetime, timedelta
+
+    from app.services.jalali import gregorian_to_jalali
+    line = client.post("/api/lines", json={"name": "لاین گزارش درآمد"}).json()
+    s1 = client.post("/api/services", json={"line_id": line["id"], "name": "خدمت گزارش یک", "base_price": 1_000_000}).json()
+    s2 = client.post("/api/services", json={"line_id": line["id"], "name": "خدمت گزارش دو", "base_price": 2_000_000}).json()
+    boss = client.post("/api/staff", json={"full_name": "مدیر لاین گزارش", "line_id": line["id"], "commission_percent": 40}).json()
+    # new-system invoice (staff share is NOT deducted in this report)
+    c = client.post("/api/customers", json={"full_name": "مشتری گزارش", "mobile": "09121239900"}).json()
+    client.post("/api/invoices", json={"customer_id": c["id"], "items": [{"service_id": s1["id"], "unit_price": 1_000_000, "staff_id": boss["id"]}],
+                                       "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 1_000_000}]})
+    # previous-software receipts two months ago, without staff (single-person line -> attributed to its manager)
+    old = datetime.now() - timedelta(days=62)
+    j = "%04d/%02d/%02d" % gregorian_to_jalali(old.year, old.month, old.day)
+    rows = [["کد مشتری", "نام مشتری", "تاریخ", "خدمت", "مبلغ"], ["881100", "قدیمی گزارش", j, "خدمت گزارش دو", 3_000_000],
+            ["881100", "قدیمی گزارش", j, "خدمت گزارش دو", 3_000_000]]
+    p = client.post("/api/import/legacy/preview", files={"file": ("r.xlsx", _xlsx(rows), "application/octet-stream")},
+                    data={"kind": "history", "unit": "rial"}).json()
+    client.post(f"/api/import/legacy/{p['id']}/commit", json={})
+    r = client.get("/api/reports/revenue", params={"line_id": line["id"]}).json()
+    assert r["totals"]["revenue"] == 7_000_000 and r["totals"]["old"] == 6_000_000 and r["totals"]["new"] == 1_000_000
+    assert [x["name"] for x in r["lines"]] == ["لاین گزارش درآمد"] and r["lines"][0]["revenue"] == 7_000_000
+    st = {x["name"]: x for x in r["staff"]}
+    assert st["مدیر لاین گزارش"]["revenue"] == 7_000_000 and st["مدیر لاین گزارش"]["inferred"] == 2
+    sv = {x["name"]: x for x in r["services"]}
+    assert sv["خدمت گزارش دو"]["revenue"] == 6_000_000 and sv["خدمت گزارش دو"]["count"] == 2 and sv["خدمت گزارش دو"]["code"] == s2["code"]
+    assert len(r["months"]) >= 2 and sum(m["total"] for m in r["months"]) == 7_000_000
+    assert client.get("/api/reports/revenue", params={"line_id": line["id"], "source": "old"}).json()["totals"]["revenue"] == 6_000_000
+    d = client.get(f"/api/reports/revenue/staff/{boss['id']}").json()
+    assert d["totals"]["revenue"] == 7_000_000 and d["records_total"] == 3
+    assert {x["source"] for x in d["records"]} == {"old", "new"} and d["records"][0]["source"] == "new"

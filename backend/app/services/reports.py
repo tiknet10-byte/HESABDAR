@@ -367,3 +367,172 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
     totals = {k: sum(r[k] for r in staff_rows) for k in ("revenue", "staff_share", "salon_share", "paid", "balance")}
     return {"period": {"start": s.date().isoformat(), "end": e.date().isoformat()}, "staff": staff_rows,
             "lines": sorted(per_line.values(), key=lambda x: -x["revenue"]), "totals": totals}
+
+
+# ------------------------------------------------------------------ revenue by line / staff / service
+J_MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"]
+
+
+def _jmonth(day: str, cache: dict) -> str:
+    if day not in cache:
+        from .jalali import gregorian_to_jalali
+
+        y, m, d = (int(x) for x in day[:10].split("-"))
+        jy, jm, _ = gregorian_to_jalali(y, m, d)
+        cache[day] = f"{jy:04d}-{jm:02d}"
+    return cache[day]
+
+
+def _jlabel(key: str) -> str:
+    jy, jm = key.split("-")
+    return f"{J_MONTHS[int(jm) - 1]} {jy}"
+
+
+def _revenue_rows(db: Session, s: datetime, e: datetime, source: str = "all") -> list[dict]:
+    """Every sale in the period at day x line x staff x service level (sums), from invoices here and from the
+    service history brought over from the previous software. Amounts are the full price paid (no staff share deducted)."""
+    rows: list[dict] = []
+    if source in ("all", "new"):
+        amt = func.coalesce(InvoiceItem.net_amount, InvoiceItem.unit_price * InvoiceItem.quantity - InvoiceItem.discount)
+        q = (select(func.date(Invoice.issued_at), InvoiceItem.line_id, InvoiceItem.staff_id, InvoiceItem.service_id,
+                    InvoiceItem.description, func.sum(amt), func.sum(InvoiceItem.quantity))
+             .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+             .where(Invoice.issued_at.between(s, e), Invoice.status != "void")
+             .group_by(func.date(Invoice.issued_at), InvoiceItem.line_id, InvoiceItem.staff_id, InvoiceItem.service_id,
+                       InvoiceItem.description))
+        for day, line_id, staff_id, service_id, desc, total, n in db.execute(q):
+            rows.append({"day": str(day), "line_id": line_id, "staff_id": staff_id, "service_id": service_id, "name": desc,
+                         "amount": int(total or 0), "count": int(n or 0), "old": False})
+    if source in ("all", "old"):
+        q = (select(func.date(Appointment.start_at), Service.line_id, Appointment.staff_id, Appointment.service_id,
+                    func.sum(Appointment.quoted_price), func.count(Appointment.id))
+             .outerjoin(Service, Service.id == Appointment.service_id)
+             .where(Appointment.status == "done", Appointment.invoice_id.is_(None), Appointment.start_at.between(s, e))
+             .group_by(func.date(Appointment.start_at), Service.line_id, Appointment.staff_id, Appointment.service_id))
+        for day, line_id, staff_id, service_id, total, n in db.execute(q):
+            rows.append({"day": str(day), "line_id": line_id, "staff_id": staff_id, "service_id": service_id, "name": None,
+                         "amount": int(total or 0), "count": int(n or 0), "old": True})
+    return rows
+
+
+def revenue_breakdown(db: Session, start: date | None = None, end: date | None = None, line_id: int | None = None,
+                      staff_id: int | None = None, source: str = "all") -> dict:
+    """Revenue per Jalali month, per line, per staff member and per service."""
+    if start is None:
+        first = [x for x in (db.scalar(select(func.min(Invoice.issued_at)).where(Invoice.status != "void")),
+                             db.scalar(select(func.min(Appointment.start_at)).where(Appointment.status == "done"))) if x]
+        start = min(first).date() if first else date.today()
+    s, e = _range(start, end)
+    services = {x.id: x for x in db.scalars(select(Service))}
+    lines = {x.id: x for x in db.scalars(select(ServiceLine))}
+    people = {x.id: x for x in db.scalars(select(Staff))}
+    # a line run by a single person: their services are attributed to them when the record has no staff
+    by_line_staff: dict[int, list[int]] = defaultdict(list)
+    for p in people.values():
+        if p.line_id and p.is_active:
+            by_line_staff[p.line_id].append(p.id)
+    cache: dict = {}
+    months: dict[str, dict] = {}
+    agg_line: dict[int, dict] = {}
+    agg_staff: dict[int, dict] = {}
+    agg_svc: dict[str, dict] = {}
+    total = {"revenue": 0, "count": 0, "old": 0, "new": 0, "inferred_staff": 0}
+    for r in _revenue_rows(db, s, e, source):
+        svc = services.get(r["service_id"])
+        lid = r["line_id"] or (svc.line_id if svc else None) or (people[r["staff_id"]].line_id if r["staff_id"] in people else None)
+        sid = r["staff_id"]
+        inferred = False
+        if not sid and lid and len(by_line_staff.get(lid, [])) == 1:
+            sid, inferred = by_line_staff[lid][0], True
+        if line_id and lid != line_id:
+            continue
+        if staff_id is not None and (sid or 0) != staff_id:
+            continue
+        amt, n = r["amount"], r["count"]
+        mk = _jmonth(r["day"], cache)
+        m = months.setdefault(mk, {"key": mk, "label": _jlabel(mk), "total": 0, "count": 0, "by_line": defaultdict(int)})
+        lname = lines[lid].name if lid in lines else "بدون لاین"
+        m["total"] += amt
+        m["count"] += n
+        m["by_line"][lname] += amt
+        L = agg_line.setdefault(lid or 0, {"id": lid or 0, "code": lines[lid].code if lid in lines else None, "name": lname,
+                                           "color": lines[lid].color if lid in lines else "#94a3b8", "revenue": 0, "count": 0,
+                                           "months": defaultdict(int)})
+        L["revenue"] += amt
+        L["count"] += n
+        L["months"][mk] += amt
+        P = agg_staff.setdefault(sid or 0, {"id": sid or 0, "name": people[sid].full_name if sid in people else "بدون پرسنل",
+                                            "line": lines[people[sid].line_id].name if sid in people and people[sid].line_id in lines else None,
+                                            "revenue": 0, "count": 0, "inferred": 0, "last": None, "months": defaultdict(int)})
+        P["revenue"] += amt
+        P["count"] += n
+        P["inferred"] += n if inferred else 0
+        P["months"][mk] += amt
+        P["last"] = max(P["last"] or r["day"], r["day"])
+        key = str(r["service_id"]) if r["service_id"] else f"name:{r['name'] or 'نامشخص'}"
+        S = agg_svc.setdefault(key, {"id": r["service_id"], "code": svc.code if svc else None, "name": svc.name if svc else (r["name"] or "خدمت نامشخص"),
+                                     "line": lname, "revenue": 0, "count": 0, "last": None, "old": 0})
+        S["revenue"] += amt
+        S["count"] += n
+        S["old"] += amt if r["old"] else 0
+        S["last"] = max(S["last"] or r["day"], r["day"])
+        total["revenue"] += amt
+        total["count"] += n
+        total["old" if r["old"] else "new"] += amt
+        total["inferred_staff"] += n if inferred else 0
+    keys = sorted(months)
+    rev = total["revenue"] or 1
+
+    def finish(d: dict) -> dict:
+        d = {**d, "share": round(d["revenue"] / rev * 100, 1), "avg": d["revenue"] // d["count"] if d["count"] else 0}
+        if "months" in d:
+            d["months"] = [d["months"].get(k, 0) for k in keys]
+        return d
+    return {
+        "period": {"start": s.date().isoformat(), "end": e.date().isoformat()},
+        "totals": total,
+        "months": [{**months[k], "by_line": dict(months[k]["by_line"])} for k in keys],
+        "month_keys": keys,
+        "lines": sorted((finish(x) for x in agg_line.values()), key=lambda x: -x["revenue"]),
+        "staff": sorted((finish(x) for x in agg_staff.values()), key=lambda x: -x["revenue"]),
+        "services": sorted((finish(x) for x in agg_svc.values()), key=lambda x: -x["revenue"]),
+    }
+
+
+def staff_revenue_detail(db: Session, staff_id: int, start: date | None = None, end: date | None = None,
+                         limit: int = 100, offset: int = 0) -> dict:
+    """One staff member: the breakdown plus the individual services (date, customer, service, amount, source)."""
+    summary = revenue_breakdown(db, start, end, staff_id=staff_id)
+    s, e = _range(date.fromisoformat(summary["period"]["start"]), end)
+    person = db.get(Staff, staff_id) if staff_id else None
+    line_staff = []
+    if person and person.line_id:
+        line_staff = [p.id for p in db.scalars(select(Staff).where(Staff.line_id == person.line_id, Staff.is_active.is_(True)))]
+    sole = person is not None and line_staff == [person.id]
+    svc_ids_of_line = select(Service.id).where(Service.line_id == person.line_id) if person and person.line_id else None
+    amt = func.coalesce(InvoiceItem.net_amount, InvoiceItem.unit_price * InvoiceItem.quantity - InvoiceItem.discount)
+    item_q = (select(Invoice.issued_at, Customer.full_name, Customer.legacy_code, InvoiceItem.description, amt, Invoice.number)
+              .join(Invoice, Invoice.id == InvoiceItem.invoice_id).join(Customer, Customer.id == Invoice.customer_id)
+              .where(Invoice.issued_at.between(s, e), Invoice.status != "void"))
+    hist_q = (select(Appointment.start_at, Customer.full_name, Customer.legacy_code, Service.name, Appointment.quoted_price, Appointment.notes)
+              .join(Customer, Customer.id == Appointment.customer_id).outerjoin(Service, Service.id == Appointment.service_id)
+              .where(Appointment.status == "done", Appointment.invoice_id.is_(None), Appointment.start_at.between(s, e)))
+    if staff_id:
+        if sole and svc_ids_of_line is not None:  # unassigned records of their (single-person) line count as theirs
+            item_q = item_q.where((InvoiceItem.staff_id == staff_id) | (InvoiceItem.staff_id.is_(None) & InvoiceItem.service_id.in_(svc_ids_of_line)))
+            hist_q = hist_q.where((Appointment.staff_id == staff_id) | (Appointment.staff_id.is_(None) & Appointment.service_id.in_(svc_ids_of_line)))
+        else:
+            item_q = item_q.where(InvoiceItem.staff_id == staff_id)
+            hist_q = hist_q.where(Appointment.staff_id == staff_id)
+    else:
+        item_q = item_q.where(InvoiceItem.staff_id.is_(None))
+        hist_q = hist_q.where(Appointment.staff_id.is_(None))
+    records = [{"at": at.isoformat(timespec="minutes"), "customer": c, "code": code, "service": svc, "amount": int(a or 0),
+                "source": "new", "ref": num} for at, c, code, svc, a, num in db.execute(item_q)]
+    for at, c, code, svc, a, notes in db.execute(hist_q):
+        name = svc or ((notes or "").split("خدمت: ", 1)[1].split(" - ")[0] if "خدمت: " in (notes or "") else "نامشخص")
+        records.append({"at": at.isoformat(timespec="minutes"), "customer": c, "code": code, "service": name, "amount": int(a or 0),
+                        "source": "old", "ref": None})
+    records.sort(key=lambda x: x["at"], reverse=True)
+    return {**summary, "staff": person.full_name if person else "بدون پرسنل", "records_total": len(records),
+            "records": records[offset:offset + limit]}

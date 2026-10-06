@@ -1,5 +1,7 @@
 import { BarChart3, Download, TrendingUp } from "lucide-react";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import RevenueReport from "./RevenueReport";
 import { Area, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Badge, Card, Loading, PageHeader, Stat, Tabs } from "../components/ui";
 import { download } from "../lib/api";
@@ -27,7 +29,7 @@ function HBar({ data, color }: { data: { name: string; value: number }[]; color:
   );
 }
 
-export default function Reports() {
+function Overview() {
   const [range, setRange] = useState<keyof typeof RANGES>("30");
   const start = daysAgo(Number(range) - 1);
   const end = isoDate(new Date());
@@ -46,9 +48,10 @@ export default function Reports() {
 
   return (
     <div className="space-y-5">
-      <PageHeader title="گزارش، تحلیل و پیش‌بینی" subtitle="تحلیل فروش به تفکیک لاین، خدمت، پرسنل و حساب؛ پیش‌بینی درآمد" icon={<BarChart3 size={22} />}
-        actions={<><Tabs value={range} onChange={setRange} items={Object.entries(RANGES).map(([value, label]) => ({ value: value as keyof typeof RANGES, label }))} />
-          <button className="btn" onClick={() => download(`/api/reports/export.csv?start=${start}&end=${end}`, "sales.csv")}><Download size={16} />اکسل</button></>} />
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <Tabs value={range} onChange={setRange} items={Object.entries(RANGES).map(([value, label]) => ({ value: value as keyof typeof RANGES, label }))} />
+        <button className="btn" onClick={() => download(`/api/reports/export.csv?start=${start}&end=${end}`, "sales.csv")}><Download size={16} />اکسل</button>
+      </div>
       {!d ? <Loading /> : (
         <>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -114,6 +117,19 @@ export default function Reports() {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+export default function Reports() {
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") === "overview" ? "overview" : "revenue";
+  return (
+    <div className="space-y-5">
+      <PageHeader title="گزارش، تحلیل و پیش‌بینی" subtitle="درآمد لاین‌ها، پرسنل و خدمات (با سوابق سیستم قبلی)؛ تحلیل و پیش‌بینی" icon={<BarChart3 size={22} />}
+        actions={<Tabs value={tab} onChange={(t) => setParams({ tab: t }, { replace: true })} items={[
+          { value: "revenue", label: "درآمد لاین، پرسنل و خدمات" }, { value: "overview", label: "خلاصه، تحلیل و پیش‌بینی" }]} />} />
+      {tab === "revenue" ? <RevenueReport /> : <Overview />}
     </div>
   );
 }

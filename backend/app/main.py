@@ -44,6 +44,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(dbmod.engine)
     _add_missing_columns()
+    _ensure_indexes()
     with SessionLocal() as db:
         seed_base(db)
         from .services.accounting import assign_missing_codes
@@ -51,6 +52,51 @@ def init_db() -> None:
         assign_missing_codes(db)  # every customer has a customer code
         codes.assign_missing(db)  # every service line and service has a code
         db.commit()
+
+
+# indexes for the queries that grow with the data (lists, reports, dashboards); created if missing on start-up
+INDEXES = {
+    "ix_appt_status_start": "appointments(status, start_at)",
+    "ix_appt_customer_status": "appointments(customer_id, status)",
+    "ix_appt_invoice": "appointments(invoice_id)",
+    "ix_appt_service": "appointments(service_id)",
+    "ix_appt_staff": "appointments(staff_id)",
+    "ix_dep_status_received": "deposits(status, received_at)",
+    "ix_dep_appointment": "deposits(appointment_id)",
+    "ix_dep_applied_invoice": "deposits(applied_invoice_id)",
+    "ix_inv_issued": "invoices(issued_at)",
+    "ix_inv_status": "invoices(status)",
+    "ix_inv_customer": "invoices(customer_id)",
+    "ix_item_line": "invoice_items(line_id)",
+    "ix_item_staff": "invoice_items(staff_id)",
+    "ix_item_service": "invoice_items(service_id)",
+    "ix_pay_invoice": "payments(invoice_id)",
+    "ix_pay_paid": "payments(paid_at)",
+    "ix_je_ref": "journal_entries(ref_type, ref_id)",
+    "ix_cust_name": "customers(full_name)",
+    "ix_cust_created": "customers(created_at)",
+    "ix_exp_spent": "expenses(spent_at)",
+}
+
+
+def _tune_db() -> None:
+    """Daily: refresh the query planner's statistics so reports stay fast as data grows (cheap, no locking)."""
+    from sqlalchemy import text
+
+    if str(dbmod.engine.url).startswith("sqlite"):
+        with dbmod.engine.connect() as con:
+            con.execute(text("PRAGMA optimize"))
+
+
+def _ensure_indexes() -> None:
+    from sqlalchemy import inspect, text
+
+    insp = inspect(dbmod.engine)
+    tables = set(insp.get_table_names())
+    with dbmod.engine.begin() as con:
+        for name, target in INDEXES.items():
+            if target.split("(")[0] in tables:
+                con.execute(text(f"CREATE INDEX IF NOT EXISTS {name} ON {target}"))
 
 
 def _add_missing_columns() -> None:
@@ -96,6 +142,7 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     if get_settings().environment != "test":
         s = get_settings()
         tasks.append(asyncio.create_task(_periodic("backup", s.backup_interval_hours * 3600, _auto_backup)))
+        tasks.append(asyncio.create_task(_periodic("db_tune", 24 * 3600, _tune_db)))
         for name, interval, fn in manager.jobs():
             tasks.append(asyncio.create_task(_periodic(name, interval, fn)))
     yield
