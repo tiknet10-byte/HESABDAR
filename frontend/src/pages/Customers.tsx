@@ -1,6 +1,7 @@
 import { AtSign, Eraser, Phone, Plus, Users } from "lucide-react";
 import CustomerCleanup, { MOBILE_ISSUE } from "../components/CustomerCleanup";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Badge, Card, Empty, Field, Loading, Modal, PageHeader } from "../components/ui";
 import { api } from "../lib/api";
 import { jdate, jdatetime, money, num } from "../lib/format";
@@ -124,7 +125,8 @@ const FILTERS = [
 const PAGE = 100;
 
 export default function Customers() {
-  const [q, setQ] = useState("");
+  const [params] = useSearchParams();
+  const [q, setQ] = useState(params.get("q") ?? "");
   const [sort, setSort] = useState("code");
   const [filter, setFilter] = useState("");
   const [page, setPage] = useState(0);
@@ -133,6 +135,14 @@ export default function Customers() {
   const [create, setCreate] = useState(false);
   const [clean, setClean] = useState(false);
   const pages = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE));
+  // opened from another page with ?q=code: go straight to that customer's file
+  const [autoOpened, setAutoOpened] = useState(false);
+  useEffect(() => {
+    if (!autoOpened && params.get("q") && data?.items?.length === 1) {
+      setView(data.items[0].id);
+      setAutoOpened(true);
+    }
+  }, [data, autoOpened, params]);
   return (
     <div className="space-y-5">
       <PageHeader title="مشتریان" subtitle="پرونده کامل هر مشتری: خدمات، بیعانه، بدهی و کانال‌های ارتباطی" icon={<Users size={22} />}

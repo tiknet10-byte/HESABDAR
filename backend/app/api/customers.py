@@ -9,6 +9,7 @@ from ..core.db import get_db
 from ..models import Appointment, Customer, Deposit, Invoice, Payment, Service, Staff, WaitlistEntry
 from ..services import accounting
 from ..services.audit import audit
+from ..services.search import fa_like
 from ..services.textutil import normalize_mobile, to_en_digits
 from .deps import require
 
@@ -64,7 +65,7 @@ def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "
         like = f"%{q}%"
         mob = normalize_mobile(q)
         code = to_en_digits(q).strip()
-        stmt = stmt.where(or_(Customer.full_name.like(like), Customer.mobile.like(f"%{mob or code}%"), Customer.instagram.like(like),
+        stmt = stmt.where(or_(fa_like(Customer.full_name, q), Customer.mobile.like(f"%{mob or code}%"), Customer.instagram.like(like),
                               Customer.legacy_code == code, Customer.mobile_raw.like(f"%{code}%")))
     if filter == "held":
         stmt = stmt.where(held.c.amt > 0)

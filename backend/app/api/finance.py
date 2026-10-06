@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import Integer, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
@@ -27,6 +27,8 @@ from ..models import (
 )
 from ..services import accounting, learning, scheduling, settings_store
 from ..services.accounting import AccountingError
+from ..services.search import fa_like
+from ..services.textutil import normalize_mobile, to_en_digits
 from ..services.audit import audit
 from .deps import require
 
@@ -303,6 +305,127 @@ def deposits(status: str | None = None, customer_id: int | None = None, db: Sess
     if customer_id:
         q = q.where(Deposit.customer_id == customer_id)
     return [_dep(d, n, db) for d, n in db.execute(q).all()]
+
+
+DEPOSIT_SORTS = {"received_desc", "received_asc", "amount_desc", "amount_asc", "appointment", "customer", "code"}
+
+
+@router.get("/deposits/search")
+def deposits_search(q: str = "", status: str = "held", sort: str = "received_desc", filter: str = "",  # noqa: A002
+                    line_id: int | None = None, staff_id: int | None = None, account_id: int | None = None,
+                    start: date | None = None, end: date | None = None, limit: int = 50, offset: int = 0,
+                    db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Deposits page: search by customer code / name / mobile / reference, filters, sorting, paging and totals."""
+    appt = Appointment.__table__.alias("appt")
+    svc = Service.__table__.alias("svc")
+    stmt = (select(Deposit, Customer.full_name, Customer.legacy_code, Customer.mobile, appt.c.start_at, appt.c.status, appt.c.time_unknown)
+            .join(Customer, Customer.id == Deposit.customer_id)
+            .outerjoin(appt, appt.c.id == Deposit.appointment_id)
+            .outerjoin(svc, svc.c.id == Deposit.service_id))
+    if status:
+        stmt = stmt.where(Deposit.status == status)
+    if q.strip():
+        code = to_en_digits(q).strip()
+        mob = normalize_mobile(q)
+        stmt = stmt.where(or_(fa_like(Customer.full_name, q), Customer.legacy_code == code, Customer.mobile.like(f"%{mob or code}%"),
+                              Deposit.reference.like(f"%{code}%"), fa_like(Deposit.notes, q)))
+    now = local_now()
+    if filter == "no_appointment":
+        stmt = stmt.where(Deposit.appointment_id.is_(None))
+    elif filter == "upcoming":
+        stmt = stmt.where(appt.c.start_at >= now, appt.c.status == "booked")
+    elif filter == "overdue":  # appointment time passed but the deposit is still open (no invoice yet / no-show?)
+        stmt = stmt.where(Deposit.status == "held", appt.c.start_at < now)
+    elif filter == "no_service":
+        stmt = stmt.where(Deposit.service_id.is_(None))
+    elif filter == "imported":
+        stmt = stmt.where(Deposit.source == "import")
+    if line_id:
+        stmt = stmt.where(or_(svc.c.line_id == line_id, Deposit.staff_id.in_(select(Staff.id).where(Staff.line_id == line_id))))
+    if staff_id:
+        stmt = stmt.where(Deposit.staff_id == staff_id)
+    if account_id:
+        stmt = stmt.where(Deposit.payment_account_id == account_id)
+    if start:
+        stmt = stmt.where(Deposit.received_at >= datetime.combine(start, datetime.min.time()))
+    if end:
+        stmt = stmt.where(Deposit.received_at <= datetime.combine(end, datetime.max.time()))
+    sub = stmt.subquery()
+    total, amount = db.execute(select(func.count(), func.coalesce(func.sum(sub.c.amount), 0))).one()
+    order = {"received_desc": [Deposit.received_at.desc()], "received_asc": [Deposit.received_at],
+             "amount_desc": [Deposit.amount.desc(), Deposit.received_at.desc()], "amount_asc": [Deposit.amount, Deposit.received_at.desc()],
+             "appointment": [appt.c.start_at.is_(None), appt.c.start_at], "customer": [Customer.full_name],
+             "code": [func.cast(Customer.legacy_code, Integer)]}[sort if sort in DEPOSIT_SORTS else "received_desc"]
+    rows = db.execute(stmt.order_by(*order, Deposit.id.desc()).limit(min(limit, 200)).offset(max(offset, 0))).all()
+    names = {"service": _names("service"), "staff": _staff_names(), "account": {a.id: a.name for a in db.scalars(select(PaymentAccount))}}
+    line_of = {s.id: s.line.name for s in db.scalars(select(Service))}
+    items = []
+    for d, name, code, mobile, at, astatus, unknown in rows:
+        items.append({"id": d.id, "customer_id": d.customer_id, "customer": name, "code": code, "mobile": mobile, "amount": d.amount,
+                      "status": d.status, "received_at": d.received_at.isoformat(timespec="minutes"), "reference": d.reference,
+                      "service_id": d.service_id, "service": names["service"].get(d.service_id), "line": line_of.get(d.service_id),
+                      "staff_id": d.staff_id, "staff": names["staff"].get(d.staff_id), "account": names["account"].get(d.payment_account_id),
+                      "appointment_id": d.appointment_id, "appointment_at": at.isoformat(timespec="minutes") if at else None,
+                      "appointment_status": astatus, "appointment_time_unknown": bool(unknown),
+                      "overdue": bool(d.status == "held" and at and at < now), "source": d.source, "notes": d.notes,
+                      "applied_invoice_id": d.applied_invoice_id,
+                      "guess": (d.service_guess or {}).get("candidates", [{}])[0].get("service") if (d.service_guess or {}).get("candidates") else None})
+    # headline numbers for all open deposits (independent of the current filter)
+    held_n, held_sum = db.execute(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0)).where(Deposit.status == "held")).one()
+    over_n, over_sum = db.execute(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
+                                  .join(Appointment, Appointment.id == Deposit.appointment_id)
+                                  .where(Deposit.status == "held", Appointment.start_at < now)).one()
+    noappt_n, noappt_sum = db.execute(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
+                                      .where(Deposit.status == "held", Deposit.appointment_id.is_(None))).one()
+    month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_n, month_sum = db.execute(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
+                                    .where(Deposit.received_at >= month)).one()
+    return {"total": total, "amount": int(amount), "items": items,
+            "stats": {"held": [held_n, int(held_sum)], "overdue": [over_n, int(over_sum)], "no_appointment": [noappt_n, int(noappt_sum)],
+                      "month": [month_n, int(month_sum)]}}
+
+
+@router.get("/deposits/{did}")
+def deposit_detail(did: int, db: Session = Depends(get_db), _=Depends(require("read"))):
+    d = _get(db, Deposit, did, "بیعانه")
+    c = db.get(Customer, d.customer_id)
+    appt = db.get(Appointment, d.appointment_id) if d.appointment_id else None
+    inv = db.get(Invoice, d.applied_invoice_id) if d.applied_invoice_id else None
+    pa = db.get(PaymentAccount, d.payment_account_id)
+    timeline = [{"at": e.at.isoformat(timespec="minutes"), "description": e.description, "type": e.ref_type}
+                for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(("deposit", "deposit_apply")),
+                                                                 JournalEntry.ref_id == did).order_by(JournalEntry.at, JournalEntry.id))]
+    others = [_dep(x, c.full_name, db) for x in db.scalars(select(Deposit).where(Deposit.customer_id == c.id, Deposit.id != did)
+                                                             .order_by(Deposit.received_at.desc()).limit(20))]
+    return {**_dep(d, c.full_name, db), "customer_code": c.legacy_code, "customer_mobile": c.mobile, "account": pa.name if pa else None,
+            "account_kind": pa.kind if pa else None,
+            "appointment": _appt(db, appt, c.full_name) if appt else None,
+            "invoice": {"id": inv.id, "number": inv.number, "issued_at": inv.issued_at.isoformat(timespec="minutes"), "total": inv.total}
+            if inv else None,
+            "timeline": timeline, "others": others, "created_at": d.created_at.isoformat(timespec="minutes")}
+
+
+class DepositEdit(BaseModel):
+    service_id: int | None = None
+    staff_id: int | None = None
+    reference: str | None = None
+    notes: str | None = None
+
+
+@router.put("/deposits/{did}")
+def edit_deposit(did: int, body: DepositEdit, db: Session = Depends(get_db), user=Depends(require("write"))):
+    """Correct the details of a deposit (not its amount/date - those are in the books)."""
+    d = _get(db, Deposit, did, "بیعانه")
+    data = body.model_dump(exclude_unset=True)
+    if ("service_id" in data or "staff_id" in data) and d.status != "held":
+        raise HTTPException(400, "خدمت/پرسنل فقط برای بیعانهٔ باز قابل تغییر است")
+    for k, v in data.items():
+        setattr(d, k, v or None if k in ("service_id", "staff_id") else v)
+    if "service_id" in data and d.service_id and d.notes:
+        learning.learn_text(db, d.notes, d.service_id, weight=2)
+    audit(db, "deposit.edit", "deposit", d.id, {k: str(v) for k, v in data.items()}, user=user)
+    db.commit()
+    return _dep(d, None, db)
 
 
 @router.post("/deposits")

@@ -1,2 +1,2 @@
 # Bumped on every release; the web UI checks it to detect a stale server process.
-__version__ = "1.8.1"
+__version__ = "1.9.0"

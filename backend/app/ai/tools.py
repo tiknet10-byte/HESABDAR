@@ -17,6 +17,7 @@ from ..core.security import has_permission
 from ..models import Alert, Customer, Deposit, Invoice, PaymentAccount, Service
 from ..plugins.base import AITool
 from ..services import accounting, learning, matching, reports
+from ..services.search import fa_like
 
 
 def _d(v: str | None) -> date | None:
@@ -25,7 +26,7 @@ def _d(v: str | None) -> date | None:
 
 def search_customers(db: Session, user, query: str, limit: int = 10) -> list[dict]:
     q = f"%{query}%"
-    rows = db.scalars(select(Customer).where(or_(Customer.full_name.like(q), Customer.mobile.like(q), Customer.instagram.like(q))).limit(limit))
+    rows = db.scalars(select(Customer).where(or_(fa_like(Customer.full_name, query), Customer.mobile.like(q), Customer.instagram.like(q))).limit(limit))
     return [{"id": c.id, "name": c.full_name, "mobile": c.mobile, "instagram": c.instagram} for c in rows]
 
 

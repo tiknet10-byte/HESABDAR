@@ -744,3 +744,34 @@ def test_import_templates_are_recognised(client):
         assert titles == {h for h in pv["headers"] if h}, (kind, set(pv["headers"]) - titles)
         assert pv["summary"]["ok"] == 1 and pv["sample"][0]["code"] == "1001", kind
         client.delete(f"/api/import/legacy/{pv['id']}")
+
+
+def test_persian_ye_kaf_search_and_deposits_page(client, accounts, services):
+    arabic = client.post("/api/customers", json={"full_name": "مريم كاظمي‌نژاد", "mobile": "09126543210"}).json()
+    for q in ("مریم", "مريم", "کاظمی", "كاظمي نژاد", "کاظمی‌نژاد"):
+        found = [c["id"] for c in client.get("/api/customers", params={"q": q}).json()["items"]]
+        assert arabic["id"] in found, q
+    # deposits page: search (by code / name in either spelling / mobile), filters, sorting, totals, detail
+    acc = accounts["کارتخوان ملت"]
+    d1 = client.post("/api/deposits", json={"customer_id": arabic["id"], "amount": 3_000_000, "payment_account_id": acc,
+                                            "service_id": services["مانیکور"]["id"], "reference": "778899"}).json()
+    d2 = client.post("/api/deposits", json={"customer_id": arabic["id"], "amount": 1_000_000, "payment_account_id": acc}).json()
+    r = client.get("/api/deposits/search", params={"q": "مریم کاظمی"}).json()
+    assert {x["id"] for x in r["items"]} >= {d1["id"], d2["id"]} and r["amount"] >= 4_000_000
+    assert client.get("/api/deposits/search", params={"q": arabic["code"]}).json()["total"] >= 2
+    assert [x["id"] for x in client.get("/api/deposits/search", params={"q": "778899"}).json()["items"]] == [d1["id"]]
+    by_amount = client.get("/api/deposits/search", params={"q": "مريم", "sort": "amount_asc"}).json()["items"]
+    assert [x["amount"] for x in by_amount] == sorted(x["amount"] for x in by_amount)
+    no_svc = client.get("/api/deposits/search", params={"q": "مريم", "filter": "no_service"}).json()["items"]
+    assert [x["id"] for x in no_svc] == [d2["id"]]
+    page = client.get("/api/deposits/search", params={"limit": 1, "offset": 0}).json()
+    assert len(page["items"]) == 1 and page["total"] >= 2 and page["stats"]["held"][0] >= 2
+    # detail + edit + refund
+    det = client.get(f"/api/deposits/{d2['id']}").json()
+    assert det["customer_code"] == arabic["code"] and det["account"] and det["timeline"] and det["others"][0]["id"] == d1["id"]
+    e = client.put(f"/api/deposits/{d2['id']}", json={"service_id": services["مانیکور"]["id"], "notes": "اصلاح شد"}).json()
+    assert e["service_id"] == services["مانیکور"]["id"]
+    client.post(f"/api/deposits/{d2['id']}/close", json={"action": "refund", "refund_account_id": acc})
+    det = client.get(f"/api/deposits/{d2['id']}").json()
+    assert det["status"] == "refunded" and len(det["timeline"]) == 2
+    assert client.get("/api/deposits/search", params={"q": "مريم", "status": "refunded"}).json()["total"] == 1
