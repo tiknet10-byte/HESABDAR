@@ -121,7 +121,11 @@ class Customer(TimestampMixin, Base):
     tags: Mapped[list] = mapped_column(JSON, default=list)
     source: Mapped[str] = mapped_column(String(32), default="manual")  # manual|chat|ocr|import
     known_cards: Mapped[list] = mapped_column(JSON, default=list)  # masked cards customer paid from
-    legacy_code: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)  # customer code in the previous software
+    # customer code (کد مشتری): every customer has one; customers brought over keep the previous software's code
+    legacy_code: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
+    # a mobile that could not be stored: invalid / incomplete number, or one already used by another customer
+    mobile_issue: Mapped[str | None] = mapped_column(String(16), nullable=True)  # invalid | duplicate | missing
+    mobile_raw: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 # ---------------------------------------------------------------- money accounts

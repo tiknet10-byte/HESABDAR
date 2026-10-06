@@ -1,4 +1,5 @@
-import { AtSign, Phone, Plus, Users } from "lucide-react";
+import { AtSign, Eraser, Phone, Plus, Users } from "lucide-react";
+import CustomerCleanup, { MOBILE_ISSUE } from "../components/CustomerCleanup";
 import { useState } from "react";
 import { Badge, Card, Empty, Field, Loading, Modal, PageHeader, Stat } from "../components/ui";
 import { api } from "../lib/api";
@@ -7,7 +8,7 @@ import { useApi, useToast } from "../lib/hooks";
 
 function CustomerForm({ initial, onDone }: { initial?: any; onDone: () => void }) {
   const toast = useToast();
-  const [f, setF] = useState({ full_name: "", mobile: "", instagram: "", notes: "", ...(initial ?? {}) });
+  const [f, setF] = useState({ code: "", full_name: "", mobile: "", instagram: "", notes: "", ...(initial ?? {}) });
   async function save() {
     try {
       await api(initial ? `/api/customers/${initial.id}` : "/api/customers", { method: initial ? "PUT" : "POST", body: { ...f, tags: f.tags ?? [] } });
@@ -19,7 +20,11 @@ function CustomerForm({ initial, onDone }: { initial?: any; onDone: () => void }
   }
   return (
     <div className="space-y-3">
-      <Field label="نام و نام خانوادگی"><input className="input" value={f.full_name} onChange={(e) => setF({ ...f, full_name: e.target.value })} /></Field>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Field label="کد مشتری" hint={initial ? undefined : "خالی = شمارهٔ بعدی"}><input className="input num" dir="ltr" value={f.code ?? ""} onChange={(e) => setF({ ...f, code: e.target.value })} placeholder="خودکار" /></Field>
+        <div className="sm:col-span-2"><Field label="نام و نام خانوادگی"><input className="input" value={f.full_name} onChange={(e) => setF({ ...f, full_name: e.target.value })} /></Field></div>
+      </div>
+      {initial?.mobile_issue && <div className="rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">{MOBILE_ISSUE[initial.mobile_issue]?.label}{initial.mobile_raw ? ` («${initial.mobile_raw}»)` : ""} - شمارهٔ درست را وارد کنید.</div>}
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="موبایل"><input className="input num" dir="ltr" value={f.mobile ?? ""} onChange={(e) => setF({ ...f, mobile: e.target.value })} placeholder="09xxxxxxxxx" /></Field>
         <Field label="اینستاگرام"><input className="input" dir="ltr" value={f.instagram ?? ""} onChange={(e) => setF({ ...f, instagram: e.target.value })} placeholder="@username" /></Field>
@@ -40,12 +45,12 @@ function CustomerView({ id }: { id: number }) {
     <div className="space-y-4 text-sm">
       <div className="flex items-start justify-between">
         <div>
-          <div className="text-lg font-extrabold">{data.full_name}</div>
+          <div className="text-lg font-extrabold">{data.full_name} {data.code && <span className="num rounded-lg bg-violet-500/10 px-2 py-0.5 text-sm text-violet-700 dark:text-violet-300">کد {data.code}</span>}</div>
           <div className="muted mt-1 flex flex-wrap gap-3">
             {data.mobile && <span className="num flex items-center gap-1" dir="ltr"><Phone size={13} />{data.mobile}</span>}
             {data.instagram && <span className="flex items-center gap-1"><AtSign size={13} />{data.instagram}</span>}
             <span>عضویت: {jdate(data.created_at)}</span>
-            {data.legacy_code && <span>کد در نرم‌افزار قبلی: <b className="num">{data.legacy_code}</b></span>}
+            {data.mobile_issue && <span className={`badge ${MOBILE_ISSUE[data.mobile_issue]?.cls}`}>{MOBILE_ISSUE[data.mobile_issue]?.label}{data.mobile_raw ? `: ${data.mobile_raw}` : ""}</span>}
           </div>
         </div>
         <button className="btn btn-sm" onClick={() => setEdit(true)}>ویرایش</button>
@@ -112,22 +117,28 @@ export default function Customers() {
   const { data, reload } = useApi<any>(`/api/customers?q=${encodeURIComponent(q)}&limit=200`, [q]);
   const [view, setView] = useState<number | null>(null);
   const [create, setCreate] = useState(false);
+  const [clean, setClean] = useState(false);
   return (
     <div className="space-y-5">
       <PageHeader title="مشتریان" subtitle="پرونده کامل هر مشتری: خدمات، بیعانه، بدهی و کانال‌های ارتباطی" icon={<Users size={22} />}
-        actions={<button className="btn btn-primary" onClick={() => setCreate(true)}><Plus size={16} />مشتری جدید</button>} />
+        actions={<>
+          <button className="btn" onClick={() => setClean(true)}><Eraser size={16} />پاک‌سازی مشتریان مشکل‌دار</button>
+          <button className="btn btn-primary" onClick={() => setCreate(true)}><Plus size={16} />مشتری جدید</button>
+        </>} />
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4"><Stat label="تعداد مشتریان" value={num(data?.total)} tone="sky" /></div>
       <Card pad={false}>
-        <div className="p-4"><input className="input max-w-sm" placeholder="جستجوی نام، موبایل یا اینستاگرام…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+        <div className="p-4"><input className="input max-w-sm" placeholder="جستجوی کد، نام، موبایل یا اینستاگرام…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
         <div className="overflow-x-auto">
           {!data ? <Loading /> : data.items.length === 0 ? <Empty /> : (
             <table className="table">
-              <thead><tr><th>نام</th><th>موبایل</th><th>اینستاگرام</th><th>مجموع خرید</th><th>بیعانه باز</th><th>منبع</th></tr></thead>
+              <thead><tr><th>کد</th><th>نام</th><th>موبایل</th><th>اینستاگرام</th><th>مجموع خرید</th><th>بیعانه باز</th><th>منبع</th></tr></thead>
               <tbody>
                 {data.items.map((c: any) => (
                   <tr key={c.id} className="cursor-pointer" onClick={() => setView(c.id)}>
+                    <td className="num muted">{c.code}</td>
                     <td className="font-semibold">{c.full_name}</td>
-                    <td className="num" dir="ltr">{c.mobile ?? "—"}</td>
+                    <td className="num" dir="ltr">{c.mobile ?? (c.mobile_issue && c.mobile_issue !== "missing"
+                      ? <span className={`badge ${MOBILE_ISSUE[c.mobile_issue].cls}`} title={MOBILE_ISSUE[c.mobile_issue].label}>{c.mobile_raw} ⚠</span> : "—")}</td>
                     <td dir="ltr">{c.instagram ? "@" + c.instagram : "—"}</td>
                     <td className="num">{money(c.total_spent)}</td>
                     <td className="num">{c.deposits_held ? money(c.deposits_held) : "—"}</td>
@@ -139,6 +150,7 @@ export default function Customers() {
           )}
         </div>
       </Card>
+      <Modal open={clean} onClose={() => setClean(false)} title="پاک‌سازی مشتریان مشکل‌دار" wide>{clean && <CustomerCleanup onDone={reload} />}</Modal>
       <Modal open={create} onClose={() => setCreate(false)} title="مشتری جدید"><CustomerForm onDone={() => { setCreate(false); reload(); }} /></Modal>
       <Modal open={view !== null} onClose={() => { setView(null); reload(); }} title="پرونده مشتری">{view !== null && <CustomerView id={view} />}</Modal>
     </div>

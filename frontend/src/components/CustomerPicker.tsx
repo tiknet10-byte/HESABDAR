@@ -30,13 +30,13 @@ export default function CustomerPicker({ value, onChange }: { value: CustomerCho
     <div className="space-y-2">
       {mode === "search" ? (
         <div className="relative">
-          <input className="input" placeholder="جستجوی نام یا موبایل مشتری…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input className="input" placeholder="جستجوی کد، نام یا موبایل مشتری…" value={q} onChange={(e) => setQ(e.target.value)} />
           {items.length > 0 && (
             <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-2xl border shadow-xl" style={{ background: "var(--surface-solid)", borderColor: "var(--border)" }}>
               {items.map((c) => (
                 <button type="button" key={c.id} className="flex w-full items-center justify-between px-4 py-2.5 text-right text-sm hover:bg-violet-500/10"
-                  onClick={() => { onChange({ customer_id: c.id, label: `${c.full_name}${c.mobile ? " · " + c.mobile : ""}` }); setQ(""); }}>
-                  <span className="font-semibold">{c.full_name}</span>
+                  onClick={() => { onChange({ customer_id: c.id, label: `${c.full_name}${c.mobile ? " · " + c.mobile : ""}${c.code ? " · کد " + c.code : ""}` }); setQ(""); }}>
+                  <span className="font-semibold">{c.code && <span className="num muted ml-2 text-xs">{c.code}</span>}{c.full_name}</span>
                   <span className="muted num" dir="ltr">{c.mobile}</span>
                 </button>
               ))}

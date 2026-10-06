@@ -49,9 +49,9 @@ def batches(db: Session = Depends(get_db), _=Depends(require("settings"))):
 def template(kind: str, _=Depends(require("settings"))):
     if kind not in li.TEMPLATES:
         raise HTTPException(400, "نوع نامعتبر")
-    body = "﻿" + ",".join(li.TEMPLATES[kind]) + "\n"
-    return StreamingResponse(iter([body]), media_type="text/csv",
-                             headers={"Content-Disposition": f"attachment; filename=hesabdar-{kind}-template.csv"})
+    return StreamingResponse(iter([li.template_xlsx(kind)]),
+                             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f"attachment; filename=hesabdar-{kind}-template.xlsx"})
 
 
 @router.post("/preview")

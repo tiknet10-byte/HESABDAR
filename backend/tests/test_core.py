@@ -679,3 +679,59 @@ def test_legacy_import_reads_html_table_saved_as_xls(client):
                     data={"kind": "history"})
     assert r.status_code == 200, r.text
     assert r.json()["summary"]["ok"] == 1 and r.json()["sample"][0]["date"].startswith("2025-04-04")
+
+
+def test_customer_codes_mobile_warnings_and_cleanup(client, accounts):
+    # every new customer gets the next free code; a taken code is refused
+    a = client.post("/api/customers", json={"full_name": "کددار دستی", "mobile": "09127770001"}).json()
+    assert a["code"] and a["code"].isdigit()
+    b = client.post("/api/customers", json={"full_name": "کددار دوم", "code": "880077"}).json()
+    assert b["code"] == "880077"
+    assert client.post("/api/customers", json={"full_name": "تکراری", "code": "880077"}).status_code == 409
+    assert client.get("/api/customers?q=880077").json()["items"][0]["id"] == b["id"]
+
+    # the standard customers template: code, name, mobile
+    tpl = client.get("/api/import/legacy/template?kind=customers")
+    assert tpl.status_code == 200 and tpl.content[:2] == b"PK"
+    rows = [["کد مشتری", "نام مشتری", "موبایل"],
+            ["880077", "مشتری چهره ۷۷", "09127770077"],      # code given by hand here to someone else -> theirs moves
+            ["880078", "کددار دستی", "09127770001"],         # same person entered by hand -> gets the old code
+            ["880079", "بدون موبایل درست", "0912777"],       # incomplete number -> warning only
+            ["880080", "هم‌شماره یک", "09127770099"],
+            ["880081", "هم‌شماره دو", "09127770099"]]        # duplicate mobile -> warning only
+    p = client.post("/api/import/legacy/preview", files={"file": ("c.xlsx", _xlsx(rows), "application/octet-stream")},
+                    data={"kind": "customers"}).json()
+    assert p["summary"]["ok"] == 5 and p["summary"]["errors"] == 0 and p["summary"]["mobile_issues"] >= 3
+    warns = {r["code"]: " ".join(r["warnings"]) for r in p["sample"]}
+    assert "ناقص" in warns["880079"] and "تکراری" in warns["880080"] and "تکراری" in warns["880081"]
+    r = client.post(f"/api/import/legacy/{p['id']}/commit", json={}).json()["result"]
+    assert r["codes_moved"] == 1 and r["customers_new"] == 4
+    moved = client.get(f"/api/customers/{b['id']}").json()
+    assert moved["code"] not in ("880077", None) and int(moved["code"]) > 880081
+    assert client.get(f"/api/customers/{a['id']}").json()["code"] == "880078"
+    two = client.get("/api/customers?q=09127770099").json()["items"]
+    assert {c["full_name"] for c in two} == {"هم‌شماره یک", "هم‌شماره دو"}
+    dup = [c for c in two if c["full_name"] == "هم‌شماره دو"][0]
+    assert dup["mobile"] is None and dup["mobile_issue"] == "duplicate" and dup["mobile_raw"] == "09127770099"
+
+    # cleanup: customers without any service and a wrong/duplicate number, deleted together
+    client.post("/api/deposits", json={"customer_id": dup["id"], "amount": 1_000_000, "payment_account_id": accounts["کارتخوان ملت"]})
+    cand = client.get("/api/customers/cleanup?issues=invalid,duplicate").json()["items"]
+    names = {c["full_name"] for c in cand}
+    assert "بدون موبایل درست" in names and "هم‌شماره دو" not in names  # has a deposit -> kept out
+    res = client.post("/api/customers/bulk-delete", json={"ids": [c["id"] for c in cand] + [dup["id"]]}).json()
+    assert res["deleted"] == len(cand) and res["skipped"] == 1
+    assert client.get("/api/customers?q=880079").json()["items"] == []
+
+
+def test_import_templates_are_recognised(client):
+    for kind in ("customers", "deposits", "history"):
+        data = client.get(f"/api/import/legacy/template?kind={kind}").content
+        p = client.post("/api/import/legacy/preview", files={"file": (f"{kind}.xlsx", data, "application/octet-stream")},
+                        data={"kind": kind, "unit": "toman"})
+        assert p.status_code == 200, (kind, p.text)
+        pv = p.json()
+        titles = {pv["headers"][i] for i in pv["mapping"].values()}
+        assert titles == {h for h in pv["headers"] if h}, (kind, set(pv["headers"]) - titles)
+        assert pv["summary"]["ok"] == 1 and pv["sample"][0]["code"] == "1001", kind
+        client.delete(f"/api/import/legacy/{pv['id']}")

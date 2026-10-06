@@ -1,5 +1,6 @@
 import { CheckCircle2, Download, FileSpreadsheet, RotateCcw, Upload } from "lucide-react";
 import { useState } from "react";
+import CustomerCleanup from "./CustomerCleanup";
 import { Badge, Card, Empty, Field } from "./ui";
 import { api, download } from "../lib/api";
 import { money } from "../lib/format";
@@ -98,14 +99,14 @@ export default function LegacyImport() {
         <div className="space-y-2 text-sm leading-7">
           <p>اطلاعات را از نرم‌افزار قبلی به صورت <b>فایل Excel</b> خروجی بگیرید و به ترتیب زیر وارد کنید. ستون‌ها خودکار شناخته می‌شوند (نام، موبایل، تاریخ شمسی، خدمت، مبلغ…) و قبل از ثبت، پیش‌نمایش و خطاها نشان داده می‌شود.</p>
           <ol className="list-inside list-decimal space-y-1 rounded-2xl bg-violet-500/5 p-3">
-            <li>(اختیاری) <b>لیست مشتریان</b> ← «مشتریان».</li>
+            <li><b>لیست مشتریان</b> (کد مشتری، نام، موبایل) ← «مشتریان». <b>کد مشتری</b> کلید همه چیز است: هر مشتری با همان کدِ نرم‌افزار قبلی ثبت می‌شود و بیعانه‌ها و فیش‌ها با همین کد به او وصل می‌شوند. مشتریان جدید این سیستم هم خودکار کد بعدی را می‌گیرند.</li>
             <li>گزارش <b>بیعانه‌ها</b> ← «بیعانه‌های باز». مشتری‌ها با «کد مشتری» و موبایل ساخته می‌شوند؛ ردیف‌های «تسویه» رد می‌شوند و «صندوق ودیعه»ها بیعانهٔ باز می‌شوند و در فاکتور همان مشتری کسر می‌شوند. چون پولش قبلاً گرفته شده، به موجودی کارت/کارتخوان اضافه نمی‌شود (حساب «مانده افتتاحیه»). اگر «تاریخ مراجعه» در آینده باشد، نوبت آن روز با «ساعت نامشخص» ثبت می‌شود.</li>
             <li>گزارش <b>فیش‌های صادرشده</b> ← «فیش‌ها». با «کد مشتری» به همان مشتری وصل می‌شود؛ تاریخ، خدمت، پرسنل و مبلغ در پروندهٔ مشتری ثبت می‌شود و <b>هیچ مبلغی وارد حساب‌ها نمی‌شود</b>. فیش‌های مسترد شده رد می‌شوند.</li>
           </ol>
-          <p className="muted text-xs">اگر فایل خروجی پسوند <b>xls</b> دارد: در Excel باز کنید ← Save As ← «Excel Workbook (.xlsx)». اگر نرم‌افزار خروجی Excel ندارد، از قالب‌های زیر استفاده کنید. مشتری تکراری (با موبایل یکسان) دوباره ساخته نمی‌شود و وارد کردن دوبارهٔ یک فایل، سابقه یا بیعانهٔ تکراری نمی‌سازد.</p>
+          <p className="muted text-xs">فایل xls و xlsx هر دو پذیرفته می‌شوند. موبایل <b>اشتباه، ناقص یا تکراری</b> جلوی انتقال را نمی‌گیرد و فقط هشدار داده و در پروندهٔ مشتری علامت می‌خورد. وارد کردن دوبارهٔ یک فایل، مشتری، سابقه یا بیعانهٔ تکراری نمی‌سازد. اگر خروجی آماده ندارید، قالب استاندارد را بگیرید و پر کنید:</p>
           <div className="flex flex-wrap gap-2">
             {KINDS.map((k) => (
-              <button key={k.key} className="btn btn-sm" onClick={() => download(`/api/import/legacy/template?kind=${k.key}`, `قالب-${k.key}.csv`).catch((e) => toast(e.message, "error"))}>
+              <button key={k.key} className="btn btn-sm" onClick={() => download(`/api/import/legacy/template?kind=${k.key}`, `قالب-${k.key}.xlsx`).catch((e) => toast(e.message, "error"))}>
                 <Download size={14} />قالب {k.title.slice(3)}
               </button>
             ))}
@@ -145,6 +146,8 @@ export default function LegacyImport() {
             <div className="rounded-2xl bg-emerald-500/10 p-3 text-sm">
               <div className="flex items-center gap-2 font-bold text-emerald-700 dark:text-emerald-300"><CheckCircle2 size={16} />انتقال انجام شد</div>
               <div>مشتری جدید: {faDigits(done.customers_new)} · مشتری موجود: {faDigits(done.customers_updated)} · سابقه/نوبت: {faDigits(done.appointments)} · بیعانه: {faDigits(done.deposits)}</div>
+              {done.mobile_issues > 0 && <div className="text-xs text-amber-700 dark:text-amber-300">⚠ {faDigits(done.mobile_issues)} مشتری با موبایل اشتباه/ناقص/تکراری ثبت شد (در پرونده علامت خورده؛ پایین همین صفحه قابل پاک‌سازی است)</div>}
+              {done.codes_moved > 0 && <div className="text-xs">{faDigits(done.codes_moved)} مشتری که قبلاً در این سیستم همان کد را گرفته بود، کد جدید گرفت تا کد نرم‌افزار قبلی حفظ شود.</div>}
               {(done.skipped_duplicates > 0 || done.skipped_errors > 0) && <div className="muted text-xs">ردیف تکراری ردشده: {faDigits(done.skipped_duplicates)} · ردیف دارای خطا: {faDigits(done.skipped_errors)}</div>}
             </div>
           )}
@@ -158,6 +161,7 @@ export default function LegacyImport() {
               <Stat label="ردیف قابل ثبت" value={s.ok} tone="emerald" />
               <Stat label="ردیف دارای خطا (ثبت نمی‌شود)" value={s.errors} tone={s.errors ? "rose" : "zinc"} />
               <Stat label="مشتری (جدید / موجود)" value={`${faDigits(s.new_customers)} / ${faDigits(s.existing_customers)}`} tone="violet" />
+              {s.mobile_issues > 0 && <Stat label="موبایل اشتباه/ناقص/تکراری (فقط هشدار)" value={s.mobile_issues} tone="amber" />}
               {(s.skipped_settled > 0 || s.skipped_refunded > 0) && (
                 <Stat label={pv.kind === "deposits" ? "بیعانهٔ تسویه‌شده (منتقل نمی‌شود)" : "فیش مسترد شده (منتقل نمی‌شود)"} value={s.skipped_settled + s.skipped_refunded} tone="zinc" />
               )}
@@ -257,6 +261,11 @@ export default function LegacyImport() {
           </div>
         </Card>
       )}
+
+      <Card title="پاک‌سازی مشتریان بدون سابقه با موبایل مشکل‌دار">
+        <div className="muted mb-2 text-xs">بعد از ورود فیش‌ها، مشتریانی که هیچ خدمتی ندارند و موبایلشان اشتباه/ناقص/تکراری است اینجا فهرست می‌شوند تا یک‌جا حذف کنید.</div>
+        <CustomerCleanup key={history.data?.length ?? 0} />
+      </Card>
 
       <Card title="سابقهٔ انتقال‌ها">
         {!history.data?.length ? <Empty text="هنوز فایلی وارد نشده" /> : (

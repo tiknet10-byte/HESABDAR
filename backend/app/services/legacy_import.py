@@ -81,11 +81,43 @@ FIELD_LABELS = {"customer_code": "کد مشتری (نرم‌افزار قبلی)
                 "last_name": "نام خانوادگی", "mobile": "موبایل", "date": "تاریخ", "time": "ساعت", "appt_date": "تاریخ نوبت / مراجعه",
                 "service": "خدمت", "line": "لاین", "staff": "پرسنل", "amount": "مبلغ", "status": "وضعیت", "settled_date": "تاریخ تسویه",
                 "refund_date": "تاریخ استرداد", "notes": "توضیحات", "birth_date": "تاریخ تولد"}
+# standard layouts: every file starts with the customer code, name and mobile, so all of them match up
 TEMPLATES = {
-    "customers": ["نام مشتری", "موبایل", "تاریخ تولد", "توضیحات"],
-    "history": ["نام مشتری", "موبایل", "تاریخ", "ساعت", "خدمت", "پرسنل", "مبلغ", "توضیحات"],
-    "deposits": ["نام مشتری", "موبایل", "تاریخ دریافت", "مبلغ بیعانه", "خدمت", "تاریخ نوبت", "ساعت نوبت", "پرسنل", "توضیحات"],
+    "customers": ["کد مشتری", "نام مشتری", "موبایل", "تاریخ تولد", "توضیحات"],
+    "deposits": ["کد مشتری", "نام مشتری", "موبایل", "تاریخ پرداخت", "مبلغ بیعانه", "تاریخ مراجعه", "ساعت نوبت", "لاین", "خدمت",
+                 "پرسنل", "وضعیت", "توضیحات"],
+    "history": ["کد مشتری", "نام مشتری", "موبایل", "شماره فیش", "تاریخ", "ساعت", "خدمت", "لاین", "پرسنل", "مبلغ", "توضیحات"],
 }
+TEMPLATE_SAMPLES = {
+    "customers": ["1001", "مریم احمدی", "09121234567", "1370/05/20", ""],
+    "deposits": ["1001", "مریم احمدی", "09121234567", "1405/07/10", 500000, "1405/07/25", "11:30", "آرایش دائم", "فیبروز ابرو",
+                 "لیلا تاجیک", "صندوق ودیعه", ""],
+    "history": ["1001", "مریم احمدی", "09121234567", "1403060034", "1403/06/01", "19:15", "فیبروز ابرو", "آرایش دائم", "لیلا تاجیک",
+                4500000, ""],
+}
+
+
+def template_xlsx(kind: str) -> bytes:
+    import openpyxl
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = KINDS[kind][:30]
+    ws.sheet_view.rightToLeft = True
+    ws.append(TEMPLATES[kind])
+    ws.append(TEMPLATE_SAMPLES[kind])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="7C3AED")
+        cell.alignment = Alignment(horizontal="center")
+    for i, title in enumerate(TEMPLATES[kind], start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = max(12, len(title) + 6)
+        for row in ws.iter_rows(min_row=2, min_col=i, max_col=i):
+            row[0].number_format = "@" if title in ("کد مشتری", "موبایل", "شماره فیش") else row[0].number_format
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 class ImportProblem(ValueError):
@@ -396,7 +428,8 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
             continue
         raw_mobile = _text(get(r, "mobile"))
         code = _text(get(r, "customer_code"))
-        row = {"row": n, "name": name, "mobile": _mobile(get(r, "mobile")), "code": code if code not in ("0", "") else "",
+        row = {"row": n, "name": name, "mobile": _mobile(get(r, "mobile")), "mobile_raw": raw_mobile,
+               "code": to_en_digits(code) if code not in ("0", "") else "",
                "errors": [], "warnings": []}
         if raw_mobile and not row["mobile"]:
             row["warnings"].append(f"موبایل «{raw_mobile}» ناقص یا نامعتبر است" + (" (مشتری با کد شناخته می‌شود)" if row["code"] else ""))
@@ -474,19 +507,34 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
         if p["staff_name"] and not p["staff_id"]:
             unknown_staff[p["staff_name"]] = unknown_staff.get(p["staff_name"], 0) + 1
     ok = [p for p in parsed if not p["errors"]]
-    mobiles = {p["mobile"] for p in ok if p["mobile"]}
-    existing = set(db.scalars(select(Customer.mobile).where(Customer.mobile.in_(mobiles)))) if mobiles else set()
+    # one mobile for several customers (in the file or already in the system): only a warning, the code decides
+    by_mobile: dict[str, set[str]] = {}
+    for p in ok:
+        if p["mobile"]:
+            by_mobile.setdefault(p["mobile"], set()).add(p["code"] or _key(p["name"]))
+    owners = {m: (code, name) for m, code, name in db.execute(
+        select(Customer.mobile, Customer.legacy_code, Customer.full_name).where(Customer.mobile.in_(list(by_mobile))))} if by_mobile else {}
+    for p in ok:
+        m = p["mobile"]
+        if m and len(by_mobile[m]) > 1:
+            p["warnings"].append(f"موبایل {m} در فایل برای چند مشتری آمده (تکراری)")
+        elif m and m in owners and p["code"] and owners[m][0] != p["code"] and _key(owners[m][1]) != _key(p["name"]):
+            p["warnings"].append(f"موبایل {m} در سیستم متعلق به «{owners[m][1]}» (کد {owners[m][0]}) است (تکراری)")
     people = {p["code"] or p["mobile"] or _key(p["name"]) for p in ok}
     codes = {p["code"] for p in ok if p["code"]}
-    if codes:
-        existing |= {f"code:{c}" for c in db.scalars(select(Customer.legacy_code).where(Customer.legacy_code.in_(codes)))}
+    known = set(db.scalars(select(Customer.legacy_code).where(Customer.legacy_code.in_(codes)))) if codes else set()
+    loose = {p["mobile"] for p in ok if p["mobile"] and not p["code"]}
+    known_m = set(db.scalars(select(Customer.mobile).where(Customer.mobile.in_(loose)))) if loose else set()
+    existing = {f"c:{c}" for c in known} | {f"m:{m}" for m in known_m}
+    mobile_issues = sum(1 for p in ok if (p.get("mobile_raw") and not p["mobile"]) or any("تکراری" in w for w in p["warnings"]))
     dates = sorted(p["date"] for p in ok if p["date"])
     return {
         "kind": kind, "kind_label": KINDS[kind], "unit": unit, "header_row": hi + 1, "headers": header, "mapping": mapping,
         "fields": FIELD_LABELS, "rows": parsed,
         "summary": {"total": len(parsed), "ok": len(ok), "errors": len(parsed) - len(ok),
                     "warnings": sum(1 for p in ok if p["warnings"]), "customers": len(people),
-                    "existing_customers": min(len(people), len(existing)), "new_customers": max(0, len(people) - len(existing)),
+                    "existing_customers": len(existing), "new_customers": max(0, len(people) - len(existing)),
+                    "mobile_issues": mobile_issues,
                     "skipped_settled": skipped["settled"], "skipped_refunded": skipped["refunded"],
                     "amount": sum(p["amount"] or 0 for p in ok), "first_date": dates[0] if dates else None,
                     "last_date": dates[-1] if dates else None,
@@ -541,33 +589,76 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
 
     customers: dict[str, Customer] = {}
 
+    # customer codes: the old software's code is kept; customers without one get the next free number after all
+    # codes (in the database and in this file), so a code given here never collides with one coming later in the file
+    file_codes = [int(r["code"]) for r in batch.rows if str(r.get("code") or "").isdigit()]
+    auto_code = [max(int(accounting.next_customer_code(db)), max(file_codes, default=0) + 1)]
+    moved: list[Customer] = []
+
+    def new_code() -> str:
+        auto_code[0] += 1
+        return str(auto_code[0] - 1)
+
+    def same_person(c: Customer, row: dict) -> bool:
+        if row["mobile"] and c.mobile == row["mobile"]:
+            return True
+        return bool(row["name"]) and _key(c.full_name) == _key(row["name"])
+
+    def mobile_state(row: dict, owner: Customer | None = None) -> tuple[str | None, str | None, str | None]:
+        """(mobile to store, issue, raw number) - a wrong or already-used number is only flagged, never blocks."""
+        m = row["mobile"]
+        if m:
+            other = db.scalar(select(Customer).where(Customer.mobile == m))
+            if other is not None and other is not owner:
+                return None, "duplicate", m
+            return m, None, None
+        if row.get("mobile_raw"):
+            return None, "invalid", row["mobile_raw"]
+        return None, "missing", None
+
     def customer_for(row: dict) -> Customer:
-        key = f"code:{row['code']}" if row.get("code") else (row["mobile"] or "name:" + _key(row["name"]))
+        code = row.get("code") or ""
+        key = f"code:{code}" if code else (row["mobile"] or "name:" + _key(row["name"]))
         if key in customers:
             return customers[key]
         c = None
-        if row.get("code"):  # the old software's customer code links its different reports together
-            c = db.scalar(select(Customer).where(Customer.legacy_code == row["code"]))
-        if c is None and row["mobile"]:
+        if code:  # the customer code links the old software's reports (deposits, receipts, customers) together
+            c = db.scalar(select(Customer).where(Customer.legacy_code == code))
+            if c is not None and c.source != "import" and not same_person(c, row):
+                # that code was given automatically in this system to someone else: the old code wins, theirs moves
+                c.legacy_code = None
+                moved.append(c)
+                db.flush()
+                counts["codes_moved"] = counts.get("codes_moved", 0) + 1
+                c = None
+            if c is None and row["mobile"]:  # same person already entered by hand in this system: give them the old code
+                m = accounting.find_customer(db, row["mobile"])
+                if m is not None and m.source != "import" and same_person(m, row):
+                    c = m
+                    c.legacy_code = code
+        elif row["mobile"]:
             c = accounting.find_customer(db, row["mobile"])
-        if c is None and row["name"] and not row["mobile"]:
-            q = select(Customer).where(Customer.full_name == row["name"])
-            q = q.where(Customer.legacy_code.is_(None)) if row.get("code") else q.where(Customer.mobile.is_(None))
-            c = db.scalar(q)
+        elif row["name"]:
+            c = db.scalar(select(Customer).where(Customer.full_name == row["name"], Customer.mobile.is_(None)))
         if c is None:
-            c = Customer(full_name=row["name"] or f"مشتری {row['mobile'] or row.get('code')}", mobile=row["mobile"], source="import",
-                         legacy_code=row.get("code") or None)
+            mobile, issue, raw = mobile_state(row)
+            c = Customer(full_name=row["name"] or f"مشتری {code or row.get('mobile_raw') or ''}".strip(), mobile=mobile,
+                         mobile_issue=issue, mobile_raw=raw, source="import", legacy_code=code or new_code())
             db.add(c)
             db.flush()
             created["customers"].append(c.id)
             counts["customers_new"] += 1
+            if issue in ("invalid", "duplicate"):
+                counts["mobile_issues"] = counts.get("mobile_issues", 0) + 1
         else:
             if row["name"] and (not c.full_name or c.full_name.startswith("مشتری ")):
                 c.full_name = row["name"]
-            if row.get("code") and not c.legacy_code:
-                c.legacy_code = row["code"]
-            if row["mobile"] and not c.mobile and not db.scalar(select(Customer.id).where(Customer.mobile == row["mobile"])):
-                c.mobile = row["mobile"]
+            if not c.mobile:
+                mobile, issue, raw = mobile_state(row, c)
+                if mobile:
+                    c.mobile, c.mobile_issue, c.mobile_raw = mobile, None, None
+                elif issue != "missing" and not c.mobile_issue:
+                    c.mobile_issue, c.mobile_raw = issue, raw
             counts["customers_updated"] += 1
         if row.get("birth_date") and not c.birth_date:
             c.birth_date = row["birth_date"]
@@ -656,6 +747,8 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
             ], "deposit", dep.id, at=received)
             created["deposits"].append(dep.id)
             counts["deposits"] += 1
+    for c in moved:  # customers whose automatic code was taken by an imported one get a fresh code
+        c.legacy_code = new_code()
     batch.status = "committed"
     batch.summary = {**batch.summary, "created": created, "result": counts, "fps": fps, "committed_at": now.isoformat(timespec="minutes")}
     return counts
@@ -711,6 +804,7 @@ def undo(db: Session, batch: ImportBatch) -> dict:
             continue
         db.delete(s)
         removed["services"] += 1
+    unused = []
     for cid in created.get("customers", []):
         c = db.get(Customer, cid)
         if c is None:
@@ -719,8 +813,8 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         if used:
             kept["customers"] += 1
             continue
-        db.delete(c)
-        removed["customers"] += 1
+        unused.append(c)
+    removed["customers"] = accounting.delete_customers(db, unused)
     batch.status = "undone"
     batch.summary = {**batch.summary, "undo": {"removed": removed, "kept": kept}}
     return {"removed": removed, "kept": kept}

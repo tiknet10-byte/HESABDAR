@@ -46,6 +46,9 @@ def init_db() -> None:
     _add_missing_columns()
     with SessionLocal() as db:
         seed_base(db)
+        from .services.accounting import assign_missing_codes
+
+        assign_missing_codes(db)  # every customer has a customer code
         db.commit()
 
 

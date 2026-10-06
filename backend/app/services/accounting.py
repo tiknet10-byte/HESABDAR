@@ -207,6 +207,42 @@ def find_customer(db: Session, mobile: str | None = None, instagram: str | None 
     return None
 
 
+def next_customer_code(db: Session) -> str:
+    """Next free numeric customer code (after the highest one, so it never collides with imported codes)."""
+    nums = [int(c) for c in db.scalars(select(Customer.legacy_code).where(Customer.legacy_code.is_not(None))) if c.isdigit()]
+    return str(max(nums, default=0) + 1)
+
+
+def delete_customers(db: Session, customers: list[Customer]) -> int:
+    """Delete customers that have no financial history; loose links (chat messages, inbound receipts) are detached."""
+    from sqlalchemy import update
+
+    from ..models import ConversationMessage, ConversationState, InboundReceipt
+
+    ids = [c.id for c in customers]
+    if not ids:
+        return 0
+    for m in (InboundReceipt, ConversationMessage):
+        db.execute(update(m).where(m.customer_id.in_(ids)).values(customer_id=None))
+    if hasattr(ConversationState, "customer_id"):
+        db.execute(update(ConversationState).where(ConversationState.customer_id.in_(ids)).values(customer_id=None))
+    for c in customers:
+        db.delete(c)
+    db.flush()
+    return len(ids)
+
+
+def assign_missing_codes(db: Session) -> int:
+    """Give a code to every customer that has none (customers created before codes existed)."""
+    missing = list(db.scalars(select(Customer).where(Customer.legacy_code.is_(None)).order_by(Customer.id)))
+    if missing:
+        n = int(next_customer_code(db))
+        for i, c in enumerate(missing):
+            c.legacy_code = str(n + i)
+        db.flush()
+    return len(missing)
+
+
 def find_or_create_customer(db: Session, full_name: str | None, mobile: str | None = None,
                             instagram: str | None = None, source: str = "manual", user=None) -> tuple[Customer, bool]:
     existing = find_customer(db, mobile, instagram)
@@ -217,7 +253,7 @@ def find_or_create_customer(db: Session, full_name: str | None, mobile: str | No
             existing.instagram = instagram.lstrip("@").lower()
         return existing, False
     m = normalize_mobile(mobile)
-    c = Customer(full_name=full_name or f"مشتری {m or instagram or ''}".strip(), mobile=m,
+    c = Customer(full_name=full_name or f"مشتری {m or instagram or ''}".strip(), mobile=m, legacy_code=next_customer_code(db),
                  instagram=instagram.lstrip("@").lower() if instagram else None, source=source)
     db.add(c)
     db.flush()
