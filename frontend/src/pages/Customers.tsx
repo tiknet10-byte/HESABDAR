@@ -1,7 +1,7 @@
 import { AtSign, Eraser, Phone, Plus, Users } from "lucide-react";
 import CustomerCleanup, { MOBILE_ISSUE } from "../components/CustomerCleanup";
 import { useState } from "react";
-import { Badge, Card, Empty, Field, Loading, Modal, PageHeader, Stat } from "../components/ui";
+import { Badge, Card, Empty, Field, Loading, Modal, PageHeader } from "../components/ui";
 import { api } from "../lib/api";
 import { jdate, jdatetime, money, num } from "../lib/format";
 import { useApi, useToast } from "../lib/hooks";
@@ -55,7 +55,8 @@ function CustomerView({ id }: { id: number }) {
         </div>
         <button className="btn btn-sm" onClick={() => setEdit(true)}>ویرایش</button>
       </div>
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div className="rounded-2xl bg-sky-500/10 p-3"><div className="muted text-xs">مجموع خرید</div><div className="num font-bold">{money((data.history ?? []).reduce((t: number, h: any) => t + (h.amount || 0), 0))}</div></div>
         <div className="rounded-2xl bg-emerald-500/10 p-3"><div className="muted text-xs">بیعانه نزد سالن</div><div className="num font-bold">{money(b.deposits_held)}</div></div>
         <div className="rounded-2xl bg-amber-500/10 p-3"><div className="muted text-xs">بدهی مشتری</div><div className="num font-bold">{money(b.receivable)}</div></div>
         <div className="rounded-2xl bg-violet-500/10 p-3"><div className="muted text-xs">تعداد مراجعه</div><div className="num font-bold">{num(new Set((data.history ?? []).map((h: any) => h.date.slice(0, 10))).size)}</div>{data.history?.[0] && <div className="muted text-[11px]">آخرین: {jdate(data.history[0].date)}</div>}</div>
@@ -112,12 +113,26 @@ function CustomerView({ id }: { id: number }) {
   );
 }
 
+const SORT_OPTIONS = [
+  { v: "code", l: "کد مشتری" }, { v: "recent", l: "تازه‌ترین ثبت" }, { v: "name", l: "نام" },
+  { v: "spent", l: "بیشترین خرید" }, { v: "visits", l: "بیشترین مراجعه" }, { v: "last_visit", l: "آخرین مراجعه" },
+];
+const FILTERS = [
+  { v: "", l: "همه" }, { v: "held", l: "دارای بیعانه باز" }, { v: "mobile_issue", l: "موبایل اشتباه/تکراری" },
+  { v: "no_mobile", l: "بدون موبایل" }, { v: "no_history", l: "بدون سابقه" },
+];
+const PAGE = 100;
+
 export default function Customers() {
   const [q, setQ] = useState("");
-  const { data, reload } = useApi<any>(`/api/customers?q=${encodeURIComponent(q)}&limit=200`, [q]);
+  const [sort, setSort] = useState("code");
+  const [filter, setFilter] = useState("");
+  const [page, setPage] = useState(0);
+  const { data, reload } = useApi<any>(`/api/customers?q=${encodeURIComponent(q)}&sort=${sort}&filter=${filter}&limit=${PAGE}&offset=${page * PAGE}`, [q, sort, filter, page]);
   const [view, setView] = useState<number | null>(null);
   const [create, setCreate] = useState(false);
   const [clean, setClean] = useState(false);
+  const pages = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE));
   return (
     <div className="space-y-5">
       <PageHeader title="مشتریان" subtitle="پرونده کامل هر مشتری: خدمات، بیعانه، بدهی و کانال‌های ارتباطی" icon={<Users size={22} />}
@@ -125,30 +140,49 @@ export default function Customers() {
           <button className="btn" onClick={() => setClean(true)}><Eraser size={16} />پاک‌سازی مشتریان مشکل‌دار</button>
           <button className="btn btn-primary" onClick={() => setCreate(true)}><Plus size={16} />مشتری جدید</button>
         </>} />
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4"><Stat label="تعداد مشتریان" value={num(data?.total)} tone="sky" /></div>
       <Card pad={false}>
-        <div className="p-4"><input className="input max-w-sm" placeholder="جستجوی کد، نام، موبایل یا اینستاگرام…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+        <div className="flex flex-wrap items-center gap-2 p-4">
+          <input className="input max-w-sm" placeholder="جستجوی کد، نام، موبایل یا اینستاگرام…" value={q} onChange={(e) => { setQ(e.target.value); setPage(0); }} />
+          <select className="input w-auto" value={sort} onChange={(e) => { setSort(e.target.value); setPage(0); }} aria-label="مرتب‌سازی">
+            {SORT_OPTIONS.map((o) => <option key={o.v} value={o.v}>مرتب‌سازی: {o.l}</option>)}
+          </select>
+          <div className="flex flex-wrap gap-1">
+            {FILTERS.map((f) => (
+              <button key={f.v} onClick={() => { setFilter(f.v); setPage(0); }}
+                className={`rounded-xl px-3 py-1.5 text-xs font-semibold ${filter === f.v ? "bg-violet-600 text-white" : "border hover:bg-violet-500/10"}`}
+                style={filter === f.v ? {} : { borderColor: "var(--border)" }}>{f.l}</button>
+            ))}
+          </div>
+          <span className="muted mr-auto text-sm">{num(data?.total)} مشتری</span>
+        </div>
         <div className="overflow-x-auto">
           {!data ? <Loading /> : data.items.length === 0 ? <Empty /> : (
             <table className="table">
-              <thead><tr><th>کد</th><th>نام</th><th>موبایل</th><th>اینستاگرام</th><th>مجموع خرید</th><th>بیعانه باز</th><th>منبع</th></tr></thead>
+              <thead><tr><th>کد</th><th>نام</th><th>موبایل</th><th>مراجعه</th><th>آخرین مراجعه</th><th>مجموع خرید</th><th>بیعانه باز</th></tr></thead>
               <tbody>
                 {data.items.map((c: any) => (
                   <tr key={c.id} className="cursor-pointer" onClick={() => setView(c.id)}>
                     <td className="num muted">{c.code}</td>
-                    <td className="font-semibold">{c.full_name}</td>
+                    <td className="font-semibold">{c.full_name}{c.source === "import" && <span className="badge mr-2 bg-sky-500/10 text-[10px] text-sky-600 dark:text-sky-300">انتقالی</span>}</td>
                     <td className="num" dir="ltr">{c.mobile ?? (c.mobile_issue && c.mobile_issue !== "missing"
                       ? <span className={`badge ${MOBILE_ISSUE[c.mobile_issue].cls}`} title={MOBILE_ISSUE[c.mobile_issue].label}>{c.mobile_raw} ⚠</span> : "—")}</td>
-                    <td dir="ltr">{c.instagram ? "@" + c.instagram : "—"}</td>
-                    <td className="num">{money(c.total_spent)}</td>
+                    <td className="num">{c.visits ? num(c.visits) : "—"}</td>
+                    <td className="num text-xs">{c.last_visit ? jdate(c.last_visit) : "—"}</td>
+                    <td className="num">{c.total_spent ? money(c.total_spent) : "—"}{c.spent_old > 0 && c.spent_old < c.total_spent && <div className="muted text-[10px]">سیستم قبلی: {money(c.spent_old)}</div>}</td>
                     <td className="num">{c.deposits_held ? money(c.deposits_held) : "—"}</td>
-                    <td className="muted text-xs">{c.source}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
         </div>
+        {pages > 1 && (
+          <div className="flex items-center justify-center gap-2 p-3 text-sm">
+            <button className="btn btn-sm" disabled={page === 0} onClick={() => setPage(page - 1)}>قبلی</button>
+            <span className="num">صفحهٔ {num(page + 1)} از {num(pages)}</span>
+            <button className="btn btn-sm" disabled={page + 1 >= pages} onClick={() => setPage(page + 1)}>بعدی</button>
+          </div>
+        )}
       </Card>
       <Modal open={clean} onClose={() => setClean(false)} title="پاک‌سازی مشتریان مشکل‌دار" wide>{clean && <CustomerCleanup onDone={reload} />}</Modal>
       <Modal open={create} onClose={() => setCreate(false)} title="مشتری جدید"><CustomerForm onDone={() => { setCreate(false); reload(); }} /></Modal>

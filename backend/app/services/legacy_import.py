@@ -439,14 +439,15 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
                     not (_text(get(r, "date")) or _text(get(r, "service")) or _text(get(r, "appt_date"))):
                 continue
             row["errors"].append("نام و موبایل مشتری خالی است")
-        # deposits already used (settled) and refunded receipts are not brought over
+        # deposits already used (settled) and refunded receipts are not brought over - but their customer is
+        # (code, name, mobile), otherwise customers who only had settled deposits would lose their mobile
         status = _text(get(r, "status"))
         if kind == "deposits" and (re.search(r"تسویه|استفاده|مسترد|برگشت|باطل", status) or _text(get(r, "settled_date"))):
             skipped["settled"] += 1
-            continue
-        if _text(get(r, "refund_date")) or re.search(r"مسترد|برگشت|باطل", status):
+            row["customer_only"] = True
+        elif _text(get(r, "refund_date")) or re.search(r"مسترد|برگشت|باطل", status):
             skipped["refunded"] += 1
-            continue
+            row["customer_only"] = True
         d, t = parse_date(get(r, "date"))
         t = parse_time(get(r, "time")) or t
         if kind != "customers" and get(r, "date") not in (None, "") and d is None:
@@ -491,6 +492,11 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
                 row["warnings"].append("تاریخ مراجعه گذشته ولی بیعانه هنوز باز است؛ فقط بیعانه ثبت می‌شود")
             elif row["appt_date"] and not row["appt_time_known"]:
                 row["warnings"].append("ساعت نوبت مشخص نیست؛ نوبت با «ساعت نامشخص» ثبت می‌شود")
+        if row.get("customer_only"):  # only the customer's details are used from this line
+            row["errors"] = [e for e in row["errors"] if "مشتری" in e]
+            row["warnings"] = [w for w in row["warnings"] if "موبایل" in w]
+            parsed.append(row)
+            continue
         # fingerprint: the same record imported again (even from another file) is recognised and skipped
         who = row["code"] or row["mobile"] or _key(row["name"])
         base = "|".join(str(x) for x in (kind, who, row["receipt"] if kind == "history" else "", row["date"], row["service_name"],
@@ -502,36 +508,37 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
     unknown: dict[str, int] = {}
     unknown_staff: dict[str, int] = {}
     for p in parsed:
-        if p["service_name"] and not p["service_id"] and not p["errors"]:
+        if p["service_name"] and not p["service_id"] and not p["errors"] and not p.get("customer_only"):
             unknown[p["service_name"]] = unknown.get(p["service_name"], 0) + 1
         if p["staff_name"] and not p["staff_id"]:
             unknown_staff[p["staff_name"]] = unknown_staff.get(p["staff_name"], 0) + 1
-    ok = [p for p in parsed if not p["errors"]]
+    valid = [p for p in parsed if not p["errors"]]  # incl. lines used only for the customer's details
+    ok = [p for p in valid if not p.get("customer_only")]
     # one mobile for several customers (in the file or already in the system): only a warning, the code decides
     by_mobile: dict[str, set[str]] = {}
-    for p in ok:
+    for p in valid:
         if p["mobile"]:
             by_mobile.setdefault(p["mobile"], set()).add(p["code"] or _key(p["name"]))
     owners = {m: (code, name) for m, code, name in db.execute(
         select(Customer.mobile, Customer.legacy_code, Customer.full_name).where(Customer.mobile.in_(list(by_mobile))))} if by_mobile else {}
-    for p in ok:
+    for p in valid:
         m = p["mobile"]
         if m and len(by_mobile[m]) > 1:
             p["warnings"].append(f"موبایل {m} در فایل برای چند مشتری آمده (تکراری)")
         elif m and m in owners and p["code"] and owners[m][0] != p["code"] and _key(owners[m][1]) != _key(p["name"]):
             p["warnings"].append(f"موبایل {m} در سیستم متعلق به «{owners[m][1]}» (کد {owners[m][0]}) است (تکراری)")
-    people = {p["code"] or p["mobile"] or _key(p["name"]) for p in ok}
-    codes = {p["code"] for p in ok if p["code"]}
+    people = {p["code"] or p["mobile"] or _key(p["name"]) for p in valid}
+    codes = {p["code"] for p in valid if p["code"]}
     known = set(db.scalars(select(Customer.legacy_code).where(Customer.legacy_code.in_(codes)))) if codes else set()
-    loose = {p["mobile"] for p in ok if p["mobile"] and not p["code"]}
+    loose = {p["mobile"] for p in valid if p["mobile"] and not p["code"]}
     known_m = set(db.scalars(select(Customer.mobile).where(Customer.mobile.in_(loose)))) if loose else set()
     existing = {f"c:{c}" for c in known} | {f"m:{m}" for m in known_m}
-    mobile_issues = sum(1 for p in ok if (p.get("mobile_raw") and not p["mobile"]) or any("تکراری" in w for w in p["warnings"]))
+    mobile_issues = sum(1 for p in valid if (p.get("mobile_raw") and not p["mobile"]) or any("تکراری" in w for w in p["warnings"]))
     dates = sorted(p["date"] for p in ok if p["date"])
     return {
         "kind": kind, "kind_label": KINDS[kind], "unit": unit, "header_row": hi + 1, "headers": header, "mapping": mapping,
         "fields": FIELD_LABELS, "rows": parsed,
-        "summary": {"total": len(parsed), "ok": len(ok), "errors": len(parsed) - len(ok),
+        "summary": {"total": len(parsed), "ok": len(ok), "errors": len(parsed) - len(valid),
                     "warnings": sum(1 for p in ok if p["warnings"]), "customers": len(people),
                     "existing_customers": len(existing), "new_customers": max(0, len(people) - len(existing)),
                     "mobile_issues": mobile_issues,
@@ -697,6 +704,9 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
     for row in batch.rows:
         if row.get("errors"):
             counts["skipped_errors"] += 1
+            continue
+        if row.get("customer_only"):  # settled deposit / refunded receipt: keep the customer's details only
+            customer_for(row)
             continue
         if row.get("fp") in done_fps:
             counts["skipped_duplicates"] += 1

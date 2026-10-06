@@ -626,7 +626,10 @@ def test_chehreh_deposits_and_receipts_files(client, accounts):
     assert pv["summary"]["amount"] == 15_000_000
     assert any("ناقص" in w for r in pv["sample"] for w in r["warnings"])  # 0903395946 has a digit missing
     r = client.post(f"/api/import/legacy/{pv['id']}/commit", json={}).json()["result"]
-    assert r["deposits"] == 2 and r["appointments"] == 2 and r["customers_new"] == 2
+    assert r["deposits"] == 2 and r["appointments"] == 2 and r["customers_new"] == 3
+    # a customer who only had a settled deposit still comes over with code and mobile (but no deposit)
+    settled = client.get("/api/customers?q=91619").json()["items"][0]
+    assert settled["mobile"] == "09030395946" and settled["deposits_held"] == 0
     held = client.get("/api/deposits?status=held").json()
     mine = [d for d in held if d["customer"] == "رقیه پارسا چهره"][0]
     assert mine["service"] == "فیبروز ابرو" and mine["staff"] == "لیلا تاجیک چهره"  # the line's only service
@@ -661,8 +664,14 @@ def test_chehreh_deposits_and_receipts_files(client, accounts):
     assert p["headers"][hm["staff"]] == "نام پرسنل" and p["headers"][hm["amount"]] == "قابل پرداخت" and "mobile" not in hm
     assert p["summary"]["ok"] == 4 and p["summary"]["skipped_refunded"] == 1 and p["sample"][0]["receipt"] == "1403060034"
     r = client.post(f"/api/import/legacy/{p['id']}/commit", json={}).json()["result"]
-    assert r["appointments"] == 4 and r["customers_new"] == 1  # رقیه is matched by her code from the deposits file
+    assert r["appointments"] == 4 and r["customers_new"] == 2  # رقیه is matched by her code; the refunded line only brings its customer
     cust = client.get("/api/customers?q=09179305206").json()["items"][0]
+    # the list counts the previous software's receipts: purchases, visits, last visit
+    assert cust["total_spent"] == 80_000_000 and cust["spent_old"] == 80_000_000 and cust["visits"] == 1
+    assert cust["last_visit"][:10] == past.date().isoformat() and cust["deposits_held"] == 5_000_000
+    top = client.get("/api/customers?sort=spent&limit=5").json()["items"]
+    assert top[0]["total_spent"] >= top[-1]["total_spent"]
+    assert all(c["deposits_held"] > 0 for c in client.get("/api/customers?filter=held").json()["items"])
     hist = client.get(f"/api/customers/{cust['id']}").json()["history"]
     assert {h["service"] for h in hist} == {"فیبروز ابرو", "بن مژه چهره"} and hist[0]["amount"] in (45_000_000, 35_000_000)
     # the same file again: nothing new (two identical ozone lines of one receipt stay two)

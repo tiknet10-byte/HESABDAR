@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import Integer, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
@@ -33,22 +33,56 @@ def _c(c: Customer, extra: dict | None = None) -> dict:
             "created_at": c.created_at.isoformat(), **(extra or {})}
 
 
+def _activity():  # noqa: ANN202
+    """Per customer: purchases (invoices here + services brought over from the previous software), visits, last visit."""
+    inv = (select(Invoice.customer_id.label("cid"), func.sum(Invoice.total).label("amt"),
+                  func.count(func.distinct(func.date(Invoice.issued_at))).label("n"), func.max(Invoice.issued_at).label("last"))
+           .where(Invoice.status != "void").group_by(Invoice.customer_id).subquery())
+    # completed appointments without an invoice = history (e.g. receipts of the previous software)
+    hist = (select(Appointment.customer_id.label("cid"), func.sum(Appointment.quoted_price).label("amt"),
+                   func.count(func.distinct(func.date(Appointment.start_at))).label("n"), func.max(Appointment.start_at).label("last"))
+            .where(Appointment.status == "done", Appointment.invoice_id.is_(None)).group_by(Appointment.customer_id).subquery())
+    held = (select(Deposit.customer_id.label("cid"), func.sum(Deposit.amount).label("amt"))
+            .where(Deposit.status == "held").group_by(Deposit.customer_id).subquery())
+    spent = func.coalesce(inv.c.amt, 0) + func.coalesce(hist.c.amt, 0)
+    visits = func.coalesce(inv.c.n, 0) + func.coalesce(hist.c.n, 0)
+    last = func.max(func.coalesce(inv.c.last, hist.c.last), func.coalesce(hist.c.last, inv.c.last))
+    return inv, hist, held, spent, visits, last
+
+
+SORTS = {"recent", "code", "name", "spent", "last_visit", "visits"}
+
+
 @router.get("")
-def list_customers(q: str = "", limit: int = 100, offset: int = 0, db: Session = Depends(get_db), _=Depends(require("read"))):
-    stmt = select(Customer)
+def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "code", filter: str = "",  # noqa: A002
+                   db: Session = Depends(get_db), _=Depends(require("read"))):
+    inv, hist, held, spent, visits, last = _activity()
+    stmt = (select(Customer, spent.label("spent"), func.coalesce(hist.c.amt, 0).label("spent_old"),
+                   func.coalesce(held.c.amt, 0).label("held"), visits.label("visits"), last.label("last"))
+            .outerjoin(inv, inv.c.cid == Customer.id).outerjoin(hist, hist.c.cid == Customer.id).outerjoin(held, held.c.cid == Customer.id))
     if q:
         like = f"%{q}%"
         mob = normalize_mobile(q)
         code = to_en_digits(q).strip()
         stmt = stmt.where(or_(Customer.full_name.like(like), Customer.mobile.like(f"%{mob or code}%"), Customer.instagram.like(like),
                               Customer.legacy_code == code, Customer.mobile_raw.like(f"%{code}%")))
+    if filter == "held":
+        stmt = stmt.where(held.c.amt > 0)
+    elif filter == "no_mobile":
+        stmt = stmt.where(Customer.mobile.is_(None))
+    elif filter == "mobile_issue":
+        stmt = stmt.where(Customer.mobile_issue.in_(("invalid", "duplicate")))
+    elif filter == "no_history":
+        stmt = stmt.where(visits == 0, held.c.amt.is_(None))
+    order = {"recent": [Customer.id.desc()], "name": [Customer.full_name],
+             "code": [func.cast(Customer.legacy_code, Integer).desc(), Customer.id.desc()],
+             "spent": [spent.desc(), Customer.id.desc()], "visits": [visits.desc(), Customer.id.desc()],
+             "last_visit": [last.desc().nulls_last(), Customer.id.desc()]}[sort if sort in SORTS else "code"]
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
-    rows = db.scalars(stmt.order_by(Customer.id.desc()).limit(min(limit, 500)).offset(offset)).all()
-    stats = dict(db.execute(select(Invoice.customer_id, func.sum(Invoice.total)).where(Invoice.status != "void",
-                            Invoice.customer_id.in_([c.id for c in rows])).group_by(Invoice.customer_id)).all())
-    held = dict(db.execute(select(Deposit.customer_id, func.sum(Deposit.amount)).where(Deposit.status == "held",
-                           Deposit.customer_id.in_([c.id for c in rows])).group_by(Deposit.customer_id)).all())
-    return {"total": total, "items": [_c(c, {"total_spent": int(stats.get(c.id) or 0), "deposits_held": int(held.get(c.id) or 0)}) for c in rows]}
+    rows = db.execute(stmt.order_by(*order).limit(min(limit, 500)).offset(max(offset, 0))).all()
+    return {"total": total, "items": [_c(c, {"total_spent": int(sp or 0), "spent_old": int(old or 0), "deposits_held": int(h or 0),
+                                             "visits": int(v or 0), "last_visit": str(lv)[:16] if lv else None})
+                                      for c, sp, old, h, v, lv in rows]}
 
 
 @router.post("")
