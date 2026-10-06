@@ -1,0 +1,2 @@
+# Claude Code files are for development only - keep them out of the Windows zip (git archive)
+.claude export-ignore
