@@ -194,9 +194,10 @@ def create_app() -> FastAPI:
             if path.startswith("api/"):
                 return JSONResponse(status_code=404, content={"detail": "Not Found"})
             f = (dist / path).resolve()
-            if path and f.is_file() and dist.resolve() in f.parents:
+            if path and f.is_file() and dist.resolve() in f.parents and f.name != "index.html":
                 return FileResponse(f)
-            return FileResponse(dist / "index.html")
+            # never cache the page itself, so a new version shows right after an update (assets are content-hashed)
+            return FileResponse(dist / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
 
