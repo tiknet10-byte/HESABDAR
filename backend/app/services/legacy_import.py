@@ -35,7 +35,7 @@ from ..models import (
     WaitlistEntry,
     local_now,
 )
-from . import accounting
+from . import accounting, scheduling
 from .jalali import jalali_to_gregorian
 from .textutil import normalize_mobile, normalize_text, parse_amount, to_en_digits
 
@@ -43,25 +43,44 @@ KINDS = {"customers": "مشتریان", "history": "سوابق خدمات انج
 IMPORT_NOTE = "انتقال از نرم‌افزار قبلی"
 MAX_ROWS = 50_000
 
-# column titles seen in Persian salon software exports -> field
+# column titles seen in Persian salon software exports (e.g. «چهره») -> field
 SYNONYMS: dict[str, list[str]] = {
+    "customer_code": ["کد مشتری", "شماره مشتری", "کد پرونده", "شماره پرونده", "کد"],
+    "receipt_no": ["شماره پذیرش", "شماره فیش", "شماره فاکتور", "شماره رسید"],
     "name": ["نام مشتری", "مشتری", "نام و نام خانوادگی", "نام ونام خانوادگی", "نام کامل", "اسم", "مراجعه کننده", "نام مراجعه کننده",
              "خانم", "customer", "name"],
     "first_name": ["نام"],
     "last_name": ["نام خانوادگی", "فامیل", "فامیلی"],
-    "mobile": ["موبایل", "تلفن همراه", "همراه", "شماره همراه", "شماره موبایل", "شماره تماس", "تلفن", "تماس", "شماره", "mobile", "phone"],
+    "mobile": ["موبایل", "تلفن همراه", "همراه", "شماره همراه", "شماره موبایل", "شماره تماس", "تلفن", "mobile", "phone"],
     "date": ["تاریخ", "تاریخ مراجعه", "تاریخ خدمت", "تاریخ انجام", "تاریخ دریافت", "تاریخ پرداخت", "تاریخ ثبت", "تاریخ فاکتور", "date"],
     "time": ["ساعت", "زمان", "ساعت مراجعه", "ساعت نوبت", "time"],
     "appt_date": ["تاریخ نوبت", "نوبت", "زمان نوبت", "تاریخ رزرو", "تاریخ مراجعه بعدی"],
     "service": ["خدمت", "خدمات", "نام خدمت", "عنوان خدمت", "شرح خدمت", "نوع خدمت", "شرح", "عنوان", "service"],
+    "line": ["لاین", "بخش", "لاین خدمت", "دپارتمان", "واحد"],
     "staff": ["پرسنل", "آرایشگر", "کارشناس", "اپراتور", "نام پرسنل", "انجام دهنده", "متخصص", "کارمند", "staff"],
-    "amount": ["مبلغ", "مبلغ بیعانه", "بیعانه", "پیش پرداخت", "مبلغ کل", "قیمت", "مبلغ پرداختی", "مبلغ دریافتی", "جمع", "amount"],
+    "amount": ["قابل پرداخت", "مبلغ", "مبلغ بیعانه", "بیعانه", "پیش پرداخت", "مبلغ کل", "قیمت", "مبلغ پرداختی", "مبلغ دریافتی",
+               "amount"],
+    "status": ["وضعیت", "وضعیت بیعانه"],
+    "settled_date": ["تاریخ تسویه"],
+    "refund_date": ["تاریخ استرداد", "تاریخ برگشت"],
     "notes": ["توضیحات", "یادداشت", "ملاحظات", "توضیح", "notes"],
     "birth_date": ["تاریخ تولد", "تولد"],
 }
-FIELD_LABELS = {"name": "نام مشتری", "first_name": "نام", "last_name": "نام خانوادگی", "mobile": "موبایل", "date": "تاریخ",
-                "time": "ساعت", "appt_date": "تاریخ نوبت", "service": "خدمت", "staff": "پرسنل", "amount": "مبلغ",
-                "notes": "توضیحات", "birth_date": "تاریخ تولد"}
+# per file kind: deposits are paid on one date and the visit is another («تاریخ مراجعه» = appointment)
+KIND_SYNONYMS: dict[str, dict[str, list[str]]] = {
+    "deposits": {"date": ["تاریخ پرداخت", "تاریخ دریافت", "تاریخ واریز", "تاریخ", "تاریخ ثبت"],
+                 "appt_date": ["تاریخ مراجعه", "تاریخ نوبت", "نوبت", "زمان نوبت", "تاریخ رزرو"],
+                 "time": ["ساعت نوبت", "ساعت مراجعه"],
+                 "amount": ["مبلغ بیعانه", "بیعانه", "پیش پرداخت", "مبلغ", "مبلغ دریافتی", "مبلغ پرداختی", "amount"]},
+}
+# report columns that are never imported (kept out so no other field grabs them by a partial match)
+IGNORED = ["ردیف", "صندوقدار", "کد اشتراک", "کارتخوان", "دستیار", "درصد دستیار", "درصد", "سهم پرسنل", "تخفیف پرسنل", "تخفیف سالن",
+           "غیرنقدی", "کدپیگیری", "کد پیگیری", "عروس", "پکیج", "مسترد کننده", "ساعت استرداد", "ویرایش کننده", "تاریخ ویرایش",
+           "ساعت ویرایش", "ساعت ثبت", "شماره قرارگاه"]
+FIELD_LABELS = {"customer_code": "کد مشتری (نرم‌افزار قبلی)", "receipt_no": "شماره فیش/پذیرش", "name": "نام مشتری", "first_name": "نام",
+                "last_name": "نام خانوادگی", "mobile": "موبایل", "date": "تاریخ", "time": "ساعت", "appt_date": "تاریخ نوبت / مراجعه",
+                "service": "خدمت", "line": "لاین", "staff": "پرسنل", "amount": "مبلغ", "status": "وضعیت", "settled_date": "تاریخ تسویه",
+                "refund_date": "تاریخ استرداد", "notes": "توضیحات", "birth_date": "تاریخ تولد"}
 TEMPLATES = {
     "customers": ["نام مشتری", "موبایل", "تاریخ تولد", "توضیحات"],
     "history": ["نام مشتری", "موبایل", "تاریخ", "ساعت", "خدمت", "پرسنل", "مبلغ", "توضیحات"],
@@ -78,7 +97,14 @@ def _key(text: object) -> str:
     return re.sub(r"[\s\-_‌.:]+", "", normalize_text(str(text or "")))
 
 
-_SYN = {field: [_key(s) for s in words] for field, words in SYNONYMS.items()}
+def _syn(kind: str | None) -> dict[str, list[str]]:
+    merged = {**SYNONYMS, **KIND_SYNONYMS.get(kind or "", {})}
+    if kind == "deposits":  # here «تاریخ مراجعه» is the appointment, never the payment date
+        merged["date"] = [w for w in merged["date"] if w != "تاریخ مراجعه"]
+    return {f: [_key(w) for w in words] for f, words in merged.items()}
+
+
+_IGNORED = {_key(w) for w in IGNORED}
 
 
 # ------------------------------------------------------------------ reading files
@@ -97,9 +123,37 @@ def read_table(filename: str, data: bytes) -> list[list[object]]:
                 best = rows
         wb.close()
         return best[:MAX_ROWS + 20]
-    if name.endswith(".xls"):
-        raise ImportProblem("این فایل اکسل قدیمی (xls) است. آن را در Excel باز کنید و با «Save As» به صورت "
-                            "«Excel Workbook (.xlsx)» یا «CSV UTF-8» ذخیره کنید، بعد همان را بارگذاری کنید.")
+    head = data[:2048].lstrip().lower()
+    if head.startswith((b"<", b"\xef\xbb\xbf<")) or b"<table" in head or b"<html" in head:
+        return _html_table(data)  # some programs save an HTML table with an .xls name
+    if name.endswith(".xls") or data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        try:
+            import xlrd
+        except ImportError as exc:  # pragma: no cover - installed by requirements.txt
+            raise ImportProblem("برای فایل xls، update.bat را اجرا کنید یا فایل را در Excel با «Save As» به .xlsx تبدیل کنید") from exc
+        try:
+            book = xlrd.open_workbook(file_contents=data)
+        except Exception as exc:
+            raise ImportProblem("این فایل xls خوانده نشد. آن را در Excel باز کنید و با «Save As» به صورت "
+                                "«Excel Workbook (.xlsx)» ذخیره کنید، بعد همان را بارگذاری کنید.") from exc
+        best: list[list[object]] = []
+        for sh in book.sheets():
+            rows = []
+            for i in range(sh.nrows):
+                vals = []
+                for c in sh.row(i):
+                    v = c.value
+                    if c.ctype == xlrd.XL_CELL_DATE:
+                        try:
+                            v = xlrd.xldate.xldate_as_datetime(v, book.datemode)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    vals.append(v)
+                if any(v not in (None, "") for v in vals):
+                    rows.append(vals)
+            if len(rows) > len(best):
+                best = rows
+        return best[:MAX_ROWS + 20]
     for enc in ("utf-8-sig", "cp1256", "utf-16"):
         try:
             text = data.decode(enc)
@@ -113,17 +167,19 @@ def read_table(filename: str, data: bytes) -> list[list[object]]:
     return [r for r in csv.reader(io.StringIO(text), delimiter=delim) if any(c.strip() for c in r)][:MAX_ROWS + 20]
 
 
-def detect_mapping(header: list[object]) -> dict[str, int]:
+def detect_mapping(header: list[object], kind: str | None = None) -> dict[str, int]:
     """field -> column index, from the column titles."""
     keys = [_key(h) for h in header]
+    taken = {i for i, k in enumerate(keys) if k in _IGNORED}
     mapping: dict[str, int] = {}
-    # exact titles first, then titles that contain a known word (longest words first)
+    syn = _syn(kind)
+    # exact titles first (in each field's order of preference), then titles that contain a known word
     for exact in (True, False):
-        for field, words in _SYN.items():
+        for field, words in syn.items():
             if field in mapping:
                 continue
-            for w in sorted(words, key=len, reverse=True):
-                hit = next((i for i, k in enumerate(keys) if k and i not in mapping.values()
+            for w in (words if exact else sorted(words, key=len, reverse=True)):
+                hit = next((i for i, k in enumerate(keys) if k and i not in taken and i not in mapping.values()
                             and (k == w if exact else (len(w) >= 3 and w in k))), None)
                 if hit is not None:
                     mapping[field] = hit
@@ -133,9 +189,59 @@ def detect_mapping(header: list[object]) -> dict[str, int]:
     return mapping
 
 
-def _header_row(rows: list[list[object]]) -> int:
-    scores = [len(detect_mapping(r)) for r in rows[:15]]
+def _detect_line_column(rows: list[list[object]], mapping: dict[str, int]) -> int | None:
+    """A column whose values look like «لاین ...» is the service line even if its title is something else."""
+    width = max((len(r) for r in rows[:50]), default=0)
+    for i in range(width):
+        if i in mapping.values():
+            continue
+        vals = [_text(r[i]) for r in rows[:200] if i < len(r) and _text(r[i])]
+        if len(vals) >= 3 and sum(v.startswith("لاین") for v in vals) / len(vals) > 0.6:
+            return i
+    return None
+
+
+def _header_row(rows: list[list[object]], kind: str | None = None) -> int:
+    scores = [len(detect_mapping(r, kind)) for r in rows[:15]]
     return max(range(len(scores)), key=lambda i: scores[i]) if scores else 0
+
+
+def _html_table(data: bytes) -> list[list[object]]:
+    from html.parser import HTMLParser
+
+    text = data.decode("utf-8", errors="ignore") if b"\x00" not in data[:200] else data.decode("utf-16", errors="ignore")
+
+    class P(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rows: list[list[str]] = []
+            self.row: list[str] | None = None
+            self.cell: list[str] | None = None
+
+        def handle_starttag(self, tag, attrs):  # noqa: ANN001
+            if tag == "tr":
+                self.row = []
+            elif tag in ("td", "th") and self.row is not None:
+                self.cell = []
+
+        def handle_endtag(self, tag):  # noqa: ANN001
+            if tag in ("td", "th") and self.row is not None and self.cell is not None:
+                self.row.append(" ".join("".join(self.cell).split()))
+                self.cell = None
+            elif tag == "tr" and self.row is not None:
+                if any(self.row):
+                    self.rows.append(self.row)
+                self.row = None
+
+        def handle_data(self, d):  # noqa: ANN001
+            if self.cell is not None:
+                self.cell.append(d)
+
+    p = P()
+    p.feed(text)
+    if not p.rows:
+        raise ImportProblem("جدولی در فایل پیدا نشد")
+    return p.rows[:MAX_ROWS + 20]
 
 
 # ------------------------------------------------------------------ values
@@ -219,12 +325,26 @@ class _Catalog:
                 self.services.setdefault(_key(n), s.id)
             if s.line:  # "line / service" or "line - service" as written by some exports
                 self.services.setdefault(_key(f"{s.line.name}{s.name}"), s.id)
+        self.lines: dict[str, int] = {}
+        self.line_services: dict[int, list[int]] = {}
+        for ln in db.scalars(select(ServiceLine)):
+            self.lines.setdefault(_key(ln.name), ln.id)
+            self.lines.setdefault(_key(re.sub(r"^\s*لاین\s*", "", ln.name)), ln.id)
+        for sv in db.scalars(select(Service).where(Service.is_active.is_(True))):
+            self.line_services.setdefault(sv.line_id, []).append(sv.id)
+        self.staff_line: dict[int, int | None] = {}
         self.staff: dict[str, int] = {}
         for p in db.scalars(select(Staff)):
+            self.staff_line[p.id] = p.line_id
             self.staff.setdefault(_key(p.full_name), p.id)
             first = p.full_name.split()[0] if p.full_name.split() else ""
             if first:
                 self.staff.setdefault(_key(first), p.id)
+
+    def line(self, name: str) -> int | None:
+        if not name:
+            return None
+        return self.lines.get(_key(name)) or self.lines.get(_key(re.sub(r"^\s*لاین\s*", "", name)))
 
     def service(self, name: str) -> int | None:
         return self.services.get(_key(name)) if name else None
@@ -242,13 +362,17 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
         raise ImportProblem("نوع اطلاعات نامعتبر است")
     if not rows:
         raise ImportProblem("فایل خالی است")
-    hi = _header_row(rows)
+    hi = _header_row(rows, kind)
     header = [_text(h) for h in rows[hi]]
-    mapping = {k: int(v) for k, v in (mapping or detect_mapping(rows[hi])).items() if v is not None and int(v) >= 0}
+    mapping = {k: int(v) for k, v in (mapping or detect_mapping(rows[hi], kind)).items() if v is not None and int(v) >= 0}
+    if "line" not in mapping:
+        col = _detect_line_column(rows[hi + 1:], mapping)
+        if col is not None:
+            mapping["line"] = col
     if kind == "history" and "date" not in mapping and "appt_date" in mapping:
         mapping["date"] = mapping.pop("appt_date")
     need = {"customers": [], "history": ["date"], "deposits": ["amount"]}[kind]
-    if not ({"name", "mobile", "first_name", "last_name"} & mapping.keys()):
+    if not ({"name", "mobile", "first_name", "last_name", "customer_code"} & mapping.keys()):
         raise ImportProblem("ستون نام یا موبایل مشتری پیدا نشد؛ ستون‌ها را دستی مشخص کنید")
     missing = [FIELD_LABELS[f] for f in need if f not in mapping]
     if missing:
@@ -258,20 +382,38 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
     now = local_now()
     get = lambda r, f: r[mapping[f]] if f in mapping and mapping[f] < len(r) else None  # noqa: E731
     parsed: list[dict] = []
+    skipped = {"settled": 0, "refunded": 0}
+    receipt = ""  # grouped reports: a «شماره پذیرش: ...» line above the services of each receipt
+    seen: dict[str, int] = {}
     for n, r in enumerate(rows[hi + 1: hi + 1 + MAX_ROWS], start=hi + 2):
+        line_text = to_en_digits(" ".join(_text(c) for c in r if c not in (None, "")))
+        group = re.search(r"(?:شماره\s*پذیرش|شماره\s*فیش|شماره\s*فاکتور)\s*[:：]?\s*(\d{3,})", line_text)
+        if group and not _text(get(r, "service")) and not _text(get(r, "name")):
+            receipt = group.group(1)
+            continue
         name = _text(get(r, "name")) or " ".join(x for x in (_text(get(r, "first_name")), _text(get(r, "last_name"))) if x)
         if re.fullmatch(r"(جمع|جمع کل|total|مجموع).*", name or "", flags=re.I):
             continue
         raw_mobile = _text(get(r, "mobile"))
-        row = {"row": n, "name": name, "mobile": _mobile(get(r, "mobile")), "errors": [], "warnings": []}
+        code = _text(get(r, "customer_code"))
+        row = {"row": n, "name": name, "mobile": _mobile(get(r, "mobile")), "code": code if code not in ("0", "") else "",
+               "errors": [], "warnings": []}
         if raw_mobile and not row["mobile"]:
-            row["warnings"].append(f"موبایل «{raw_mobile}» معتبر نیست")
-        if not row["name"] and not row["mobile"]:
+            row["warnings"].append(f"موبایل «{raw_mobile}» ناقص یا نامعتبر است" + (" (مشتری با کد شناخته می‌شود)" if row["code"] else ""))
+        if not row["name"] and not row["mobile"] and not row["code"]:
             # blank lines, row numbers only, or a totals line ("جمع کل") - not a record
             if any(re.match(r"\s*(جمع|مجموع|total)", _text(c), flags=re.I) for c in r) or \
                     not (_text(get(r, "date")) or _text(get(r, "service")) or _text(get(r, "appt_date"))):
                 continue
             row["errors"].append("نام و موبایل مشتری خالی است")
+        # deposits already used (settled) and refunded receipts are not brought over
+        status = _text(get(r, "status"))
+        if kind == "deposits" and (re.search(r"تسویه|استفاده|مسترد|برگشت|باطل", status) or _text(get(r, "settled_date"))):
+            skipped["settled"] += 1
+            continue
+        if _text(get(r, "refund_date")) or re.search(r"مسترد|برگشت|باطل", status):
+            skipped["refunded"] += 1
+            continue
         d, t = parse_date(get(r, "date"))
         t = parse_time(get(r, "time")) or t
         if kind != "customers" and get(r, "date") not in (None, "") and d is None:
@@ -286,10 +428,17 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
         row["service_id"] = cat.service(row["service_name"])
         row["staff_name"] = _text(get(r, "staff"))
         row["staff_id"] = cat.person(row["staff_name"])
+        row["line_name"] = _text(get(r, "line"))
+        row["line_id"] = cat.line(row["line_name"]) or (cat.staff_line.get(row["staff_id"]) if row["staff_id"] else None)
+        if row["line_name"] and not cat.line(row["line_name"]):
+            row["warnings"].append(f"لاین «{row['line_name']}» در سیستم نیست")
+        if not row["service_id"] and not row["service_name"] and row["line_id"] and len(cat.line_services.get(row["line_id"], [])) == 1:
+            row["service_id"] = cat.line_services[row["line_id"]][0]  # the line has a single service
         if row["staff_name"] and not row["staff_id"]:
             row["warnings"].append(f"پرسنل «{row['staff_name']}» در سیستم نیست (در توضیحات ثبت می‌شود)")
         row["amount"] = _amount(get(r, "amount"), unit)
         row["notes"] = _text(get(r, "notes"))
+        row["receipt"] = receipt or _text(get(r, "receipt_no"))
         bd, _ = parse_date(get(r, "birth_date"))
         row["birth_date"] = bd.isoformat() if bd else None
         if kind == "history":
@@ -305,8 +454,16 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
             if d and d > now.date() and not ad:  # a single future date is the appointment, not the payment
                 row["appt_date"], row["date"] = row["date"], None
                 row["appt_time_known"] = bool(t)
-            if row["appt_date"] and datetime.fromisoformat(row["appt_date"]) < now:
-                row["warnings"].append("تاریخ نوبت گذشته است؛ فقط بیعانه ثبت می‌شود")
+            if row["appt_date"] and row["appt_date"][:10] < now.date().isoformat():
+                row["warnings"].append("تاریخ مراجعه گذشته ولی بیعانه هنوز باز است؛ فقط بیعانه ثبت می‌شود")
+            elif row["appt_date"] and not row["appt_time_known"]:
+                row["warnings"].append("ساعت نوبت مشخص نیست؛ نوبت با «ساعت نامشخص» ثبت می‌شود")
+        # fingerprint: the same record imported again (even from another file) is recognised and skipped
+        who = row["code"] or row["mobile"] or _key(row["name"])
+        base = "|".join(str(x) for x in (kind, who, row["receipt"] if kind == "history" else "", row["date"], row["service_name"],
+                                         row["amount"], row["appt_date"] if kind == "deposits" else "", row["staff_name"]))
+        seen[base] = seen.get(base, 0) + 1
+        row["fp"] = f"{base}|{seen[base]}"
         parsed.append(row)
 
     unknown: dict[str, int] = {}
@@ -319,14 +476,18 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
     ok = [p for p in parsed if not p["errors"]]
     mobiles = {p["mobile"] for p in ok if p["mobile"]}
     existing = set(db.scalars(select(Customer.mobile).where(Customer.mobile.in_(mobiles)))) if mobiles else set()
-    people = {p["mobile"] or _key(p["name"]) for p in ok}
+    people = {p["code"] or p["mobile"] or _key(p["name"]) for p in ok}
+    codes = {p["code"] for p in ok if p["code"]}
+    if codes:
+        existing |= {f"code:{c}" for c in db.scalars(select(Customer.legacy_code).where(Customer.legacy_code.in_(codes)))}
     dates = sorted(p["date"] for p in ok if p["date"])
     return {
         "kind": kind, "kind_label": KINDS[kind], "unit": unit, "header_row": hi + 1, "headers": header, "mapping": mapping,
         "fields": FIELD_LABELS, "rows": parsed,
         "summary": {"total": len(parsed), "ok": len(ok), "errors": len(parsed) - len(ok),
                     "warnings": sum(1 for p in ok if p["warnings"]), "customers": len(people),
-                    "existing_customers": len(existing), "new_customers": max(0, len(people) - len(existing)),
+                    "existing_customers": min(len(people), len(existing)), "new_customers": max(0, len(people) - len(existing)),
+                    "skipped_settled": skipped["settled"], "skipped_refunded": skipped["refunded"],
                     "amount": sum(p["amount"] or 0 for p in ok), "first_date": dates[0] if dates else None,
                     "last_date": dates[-1] if dates else None,
                     "future_appointments": sum(1 for p in ok if p.get("appt_date") and p["appt_date"] >= now.isoformat()[:16])},
@@ -381,13 +542,21 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
     customers: dict[str, Customer] = {}
 
     def customer_for(row: dict) -> Customer:
-        key = row["mobile"] or "name:" + _key(row["name"])
+        key = f"code:{row['code']}" if row.get("code") else (row["mobile"] or "name:" + _key(row["name"]))
         if key in customers:
             return customers[key]
-        c = accounting.find_customer(db, row["mobile"]) if row["mobile"] else db.scalar(
-            select(Customer).where(Customer.mobile.is_(None), Customer.full_name == row["name"]))
+        c = None
+        if row.get("code"):  # the old software's customer code links its different reports together
+            c = db.scalar(select(Customer).where(Customer.legacy_code == row["code"]))
+        if c is None and row["mobile"]:
+            c = accounting.find_customer(db, row["mobile"])
+        if c is None and row["name"] and not row["mobile"]:
+            q = select(Customer).where(Customer.full_name == row["name"])
+            q = q.where(Customer.legacy_code.is_(None)) if row.get("code") else q.where(Customer.mobile.is_(None))
+            c = db.scalar(q)
         if c is None:
-            c = Customer(full_name=row["name"] or f"مشتری {row['mobile']}", mobile=row["mobile"], source="import")
+            c = Customer(full_name=row["name"] or f"مشتری {row['mobile'] or row.get('code')}", mobile=row["mobile"], source="import",
+                         legacy_code=row.get("code") or None)
             db.add(c)
             db.flush()
             created["customers"].append(c.id)
@@ -395,6 +564,10 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
         else:
             if row["name"] and (not c.full_name or c.full_name.startswith("مشتری ")):
                 c.full_name = row["name"]
+            if row.get("code") and not c.legacy_code:
+                c.legacy_code = row["code"]
+            if row["mobile"] and not c.mobile and not db.scalar(select(Customer.id).where(Customer.mobile == row["mobile"])):
+                c.mobile = row["mobile"]
             counts["customers_updated"] += 1
         if row.get("birth_date") and not c.birth_date:
             c.birth_date = row["birth_date"]
@@ -409,6 +582,10 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
             parts.append(f"خدمت: {row['service_name']}")
         if row.get("staff_name") and not row.get("staff_id"):
             parts.append(f"پرسنل: {row['staff_name']}")
+        if row.get("line_name") and not svc_id:
+            parts.append(row["line_name"] if row["line_name"].startswith("لاین") else f"لاین: {row['line_name']}")
+        if row.get("receipt"):
+            parts.append(f"فیش {row['receipt']}")
         if row.get("notes"):
             parts.append(row["notes"])
         return " - ".join(parts)
@@ -420,23 +597,27 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
         if account is None:
             raise ImportProblem("ابتدا در تنظیمات یک حساب دریافت (کارتخوان/کارت/صندوق) تعریف کنید")
 
+    # records already brought over by an earlier (not undone) import of the same kind
+    done_fps: set[str] = set()
+    for b in db.scalars(select(ImportBatch).where(ImportBatch.kind == batch.kind, ImportBatch.status == "committed")):
+        done_fps.update((b.summary or {}).get("fps", []))
+    fps: list[str] = []
+
     for row in batch.rows:
         if row.get("errors"):
             counts["skipped_errors"] += 1
             continue
+        if row.get("fp") in done_fps:
+            counts["skipped_duplicates"] += 1
+            continue
+        if row.get("fp"):
+            fps.append(row["fp"])
         c = customer_for(row)
         if kind == "customers":
             continue
         svc_id = service_for(row)
         if kind == "history":
             at = datetime.fromisoformat(row["date"])
-            day_start = datetime.combine(at.date(), time())
-            dup = db.scalar(select(Appointment.id).where(
-                Appointment.customer_id == c.id, Appointment.service_id.is_(svc_id) if svc_id is None else Appointment.service_id == svc_id,
-                Appointment.start_at >= day_start, Appointment.start_at < datetime.combine(at.date(), time.max)))
-            if dup:
-                counts["skipped_duplicates"] += 1
-                continue
             a = Appointment(customer_id=c.id, service_id=svc_id, staff_id=row.get("staff_id"), start_at=at,
                             status="done" if at <= now else "booked", quoted_price=row.get("amount") or 0, notes=note(row, svc_id))
             db.add(a)
@@ -446,16 +627,15 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
         elif kind == "deposits":
             received = datetime.fromisoformat(row["date"]) if row.get("date") else now
             received = min(received, now)
-            dup = db.scalar(select(Deposit.id).where(
-                Deposit.customer_id == c.id, Deposit.amount == row["amount"], Deposit.source == "import",
-                func.date(Deposit.received_at) == received.date().isoformat()))
-            if dup:
-                counts["skipped_duplicates"] += 1
-                continue
             appt_id = None
-            if row.get("appt_date") and datetime.fromisoformat(row["appt_date"]) >= now:
+            unknown_time = not row.get("appt_time_known")
+            if row.get("appt_date") and (row["appt_date"][:10] >= now.date().isoformat() if unknown_time
+                                         else datetime.fromisoformat(row["appt_date"]) >= now):
+                start = datetime.fromisoformat(row["appt_date"])
+                if unknown_time:
+                    start = datetime.combine(start.date(), scheduling._hours(db)[0])
                 a = Appointment(customer_id=c.id, service_id=svc_id, staff_id=accounting.default_staff_id(db, svc_id, row.get("staff_id")),
-                                start_at=datetime.fromisoformat(row["appt_date"]), status="booked",
+                                start_at=start, status="booked", time_unknown=True if unknown_time else None,
                                 quoted_price=(db.get(Service, svc_id).base_price if svc_id else 0), notes=note(row, svc_id))
                 db.add(a)
                 db.flush()
@@ -472,12 +652,12 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
             accounting.post(db, f"بیعانه انتقالی {c.full_name}", [
                 accounting.Leg(accounting.account(db, accounting.OPENING), debit=dep.amount, customer_id=c.id),
                 accounting.Leg(accounting.account(db, accounting.DEPOSITS), credit=dep.amount, customer_id=c.id,
-                               line_id=svc.line_id if svc else None, staff_id=dep.staff_id),
+                               line_id=svc.line_id if svc else row.get("line_id"), staff_id=dep.staff_id),
             ], "deposit", dep.id, at=received)
             created["deposits"].append(dep.id)
             counts["deposits"] += 1
     batch.status = "committed"
-    batch.summary = {**batch.summary, "created": created, "result": counts, "committed_at": now.isoformat(timespec="minutes")}
+    batch.summary = {**batch.summary, "created": created, "result": counts, "fps": fps, "committed_at": now.isoformat(timespec="minutes")}
     return counts
 
 

@@ -9,5 +9,6 @@ cryptography>=42
 python-multipart>=0.0.9
 httpx>=0.27
 openpyxl>=3.1  # importing Excel files (data from the previous software)
+xlrd>=2.0  # old .xls exports
 # Optional: Claude AI assistant, vision OCR and smart parsing
 anthropic>=1.0

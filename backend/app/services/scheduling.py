@@ -54,7 +54,9 @@ class _Calendar:
         self.line_services = set(db.scalars(select(Service.id).where(Service.line_id == svc.line_id)))
         cache: dict[int, int] = {}
         # an appointment done earlier than booked (original_start_at set) is history: it holds no time any more
+        # an appointment whose hour is not known yet holds no slot either (it is listed for the day, marked "time unknown")
         q = select(Appointment).where(Appointment.status.in_(OCCUPYING), Appointment.original_start_at.is_(None),
+                                      Appointment.time_unknown.is_not(True),
                                       Appointment.start_at >= start - timedelta(days=1), Appointment.start_at <= end)
         if exclude_id:
             q = q.where(Appointment.id != exclude_id)
@@ -176,13 +178,22 @@ def line_calendar(db: Session, line_id: int, start: date, days: int = 182, now: 
     by_day: dict[date, list] = {}
     for iv in cal.intervals:
         by_day.setdefault(iv[0].date(), []).append(iv)
+    # appointments whose hour is unknown (e.g. from the previous software): counted per day, no slot held
+    unknown: dict[date, int] = {}
+    line_staff = set(cal.line_staff) | set(db.scalars(select(Staff.id).where(Staff.line_id == line_id)))
+    for a in db.scalars(select(Appointment).where(Appointment.status == "booked", Appointment.time_unknown.is_(True),
+                                                  Appointment.start_at >= datetime.combine(start, time()),
+                                                  Appointment.start_at < datetime.combine(end, time()))):
+        if a.service_id in cal.line_services or (a.service_id is None and a.staff_id in line_staff):
+            unknown[a.start_at.date()] = unknown.get(a.start_at.date(), 0) + 1
     day_minutes = max(1, (datetime.combine(start, close_t) - datetime.combine(start, open_t)).total_seconds() / 60) * cal.capacity
     for i in range(days):
         d = start + timedelta(days=i)
         cal.intervals = by_day.get(d, []) + [iv for iv in by_day.get(d - timedelta(days=1), []) if iv[1].date() >= d]
         mine = [(s, e) for s, e, a in cal.intervals if a.service_id in cal.line_services and s.date() == d]
         booked = sum((e - s).total_seconds() / 60 for s, e in mine)
-        info = {"date": d.isoformat(), "count": len(mine), "booked_minutes": int(booked), "fill": round(min(1.0, booked / day_minutes), 2),
+        info = {"date": d.isoformat(), "count": len(mine) + unknown.get(d, 0), "unknown_time": unknown.get(d, 0),
+                "booked_minutes": int(booked), "fill": round(min(1.0, booked / day_minutes), 2),
                 "first_free": None}
         if d < now.date():
             info["status"] = "past"
@@ -199,6 +210,6 @@ def line_calendar(db: Session, line_id: int, start: date, days: int = 182, now: 
                     info["first_free"] = t.strftime("%H:%M")
                     break
                 t += step
-            info["status"] = "full" if info["first_free"] is None else ("empty" if not mine else "partial")
+            info["status"] = "full" if info["first_free"] is None else ("empty" if not info["count"] else "partial")
         out["days"].append(info)
     return out

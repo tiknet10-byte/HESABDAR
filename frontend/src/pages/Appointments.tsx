@@ -141,7 +141,11 @@ export default function Appointments() {
             {list.map((a) => (
               <div key={a.id} className="flex flex-wrap items-center justify-between gap-2 rounded-2xl px-4 py-3" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
                 <div className="flex items-center gap-3">
-                  <span className="num rounded-xl bg-violet-500/10 px-2 py-1 text-center font-bold leading-tight text-violet-700 dark:text-violet-300">{faDigits(a.start_at.slice(11, 16))}<span className="block text-[10px] font-semibold opacity-70">تا {faDigits(endTime(a.start_at, a.duration_minutes ?? 60))}</span></span>
+                  {a.time_unknown ? (
+                    <span className="rounded-xl bg-amber-500/15 px-2 py-1 text-center text-[11px] font-bold leading-tight text-amber-700 dark:text-amber-300" title="ساعت این نوبت مشخص نیست؛ با «تغییر زمان» ساعتش را ثبت کنید">ساعت<span className="block">نامشخص</span></span>
+                  ) : (
+                    <span className="num rounded-xl bg-violet-500/10 px-2 py-1 text-center font-bold leading-tight text-violet-700 dark:text-violet-300">{faDigits(a.start_at.slice(11, 16))}<span className="block text-[10px] font-semibold opacity-70">تا {faDigits(endTime(a.start_at, a.duration_minutes ?? 60))}</span></span>
+                  )}
                   <div>
                     <div className="font-semibold">{a.customer}</div>
                     <div className="muted text-xs">{a.line ? `${a.line} / ` : ""}{a.service ?? "—"} · {faDigits(a.duration_minutes ?? 60)} دقیقه · {money(a.quoted_price)}</div>
@@ -156,7 +160,7 @@ export default function Appointments() {
                   {a.status === "booked" && (
                     <>
                       <Link className="btn btn-sm btn-primary" to={`/invoices?new=1&appointment=${a.id}`}>صدور فاکتور</Link>
-                      <button className="btn btn-sm" onClick={() => setEdit(a)}>تغییر زمان</button>
+                      <button className={`btn btn-sm ${a.time_unknown ? "ring-2 ring-amber-400" : ""}`} onClick={() => setEdit(a.time_unknown ? { ...a, start_at: "" } : a)}>{a.time_unknown ? "تعیین ساعت" : "تغییر زمان"}</button>
                       <button className="btn btn-sm" onClick={() => setStatus(a, "no_show")}>نیامد</button>
                       <button className="btn btn-sm" onClick={() => setStatus(a, "cancelled")}>لغو</button>
                     </>

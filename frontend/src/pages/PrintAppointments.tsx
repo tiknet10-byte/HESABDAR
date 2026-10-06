@@ -76,7 +76,7 @@ export default function PrintAppointments() {
                     {rows.map((a, i) => (
                       <tr key={a.id} className={a.status === "cancelled" ? "line-through opacity-60" : ""}>
                         <td className="text-center">{faDigits(i + 1)}</td>
-                        <td className="text-center font-bold">{hm(a.start_at)}–{end(a.start_at, a.duration_minutes ?? 60)}</td>
+                        <td className="text-center font-bold">{a.time_unknown ? "نامشخص" : `${hm(a.start_at)}–${end(a.start_at, a.duration_minutes ?? 60)}`}</td>
                         <td className="font-semibold">{a.customer}</td>
                         <td className="text-center" dir="ltr">{a.customer_mobile ?? ""}</td>
                         <td>{a.service ?? "—"}</td>

@@ -593,3 +593,89 @@ def test_legacy_import_rejects_old_xls_and_missing_columns(client):
     bad = "نام مشتری,موبایل\nسارا,09120000000\n".encode()
     r = client.post("/api/import/legacy/preview", files={"file": ("x.csv", bad, "text/csv")}, data={"kind": "deposits"})
     assert r.status_code == 400 and "مبلغ" in r.json()["detail"]
+
+
+def test_chehreh_deposits_and_receipts_files(client, accounts):
+    """The two real export layouts of «چهره»: open deposits (صندوق ودیعه) and grouped receipts (شماره پذیرش)."""
+    from datetime import datetime, timedelta
+
+    from app.services.jalali import gregorian_to_jalali
+    j = lambda d: "%04d/%02d/%02d" % gregorian_to_jalali(d.year, d.month, d.day)  # noqa: E731
+    line = client.post("/api/lines", json={"name": "آرایش دائم چهره"}).json()
+    client.post("/api/services", json={"line_id": line["id"], "name": "فیبروز ابرو", "base_price": 45_000_000, "duration_minutes": 120})
+    client.post("/api/staff", json={"full_name": "لیلا تاجیک چهره", "line_id": line["id"]})
+    today, soon, past = datetime.now(), datetime.now() + timedelta(days=6), datetime.now() - timedelta(days=20)
+    hdr = ["", "صندوقدار", "کد مشتری", "کد اشتراک", "نام مشتری", "تلفن", "تاریخ پرداخت", "تاریخ مراجعه", "تاریخ تسویه", "وضعیت",
+           "مبلغ بیعانه", "غیرنقدی", "کدپیگیری", "عروس", "پکیج", "شماره قرارگاه", "", "پرسنل", "تاریخ ثبت", "ساعت ثبت"]
+    deposits = _xlsx([hdr,
+        ["", "مدیر", 93500, 9305206, "رقیه پارسا چهره", "09179305206", j(today), j(soon), "", "صندوق ودیعه", 500000, 500000, "", False,
+         "", "", "لاین آرایش دائم چهره", "لیلا تاجیک چهره", j(today), "10:57"],
+        ["", "مدیر", 93522, 3395946, "فاطمه حقیقی چهره", "0903395946", j(today), j(soon), "", "صندوق ودیعه", 1000000, 1000000, "", False,
+         "", "", "لاین آرایش دائم چهره", "لیلا تاجیک چهره", j(today), "11:34"],
+        ["", "مدیر", 91619, 395946, "فاطمه حقیقی دوم", "09030395946", j(past), j(past), j(past), "تسویه", 500000, 500000, "", False,
+         "", "", "لاین آرایش دائم چهره", "لیلا تاجیک چهره", j(past), "12:04"],
+    ])
+    p = client.post("/api/import/legacy/preview", files={"file": ("bey.xlsx", deposits, "application/octet-stream")},
+                    data={"kind": "deposits", "unit": "toman"})
+    assert p.status_code == 200, p.text
+    pv = p.json()
+    m = pv["mapping"]
+    assert pv["headers"][m["date"]] == "تاریخ پرداخت" and pv["headers"][m["appt_date"]] == "تاریخ مراجعه"
+    assert pv["headers"][m["customer_code"]] == "کد مشتری" and pv["headers"][m["staff"]] == "پرسنل" and "time" not in m
+    assert m["line"] == 16 and pv["summary"]["ok"] == 2 and pv["summary"]["skipped_settled"] == 1
+    assert pv["summary"]["amount"] == 15_000_000
+    assert any("ناقص" in w for r in pv["sample"] for w in r["warnings"])  # 0903395946 has a digit missing
+    r = client.post(f"/api/import/legacy/{pv['id']}/commit", json={}).json()["result"]
+    assert r["deposits"] == 2 and r["appointments"] == 2 and r["customers_new"] == 2
+    held = client.get("/api/deposits?status=held").json()
+    mine = [d for d in held if d["customer"] == "رقیه پارسا چهره"][0]
+    assert mine["service"] == "فیبروز ابرو" and mine["staff"] == "لیلا تاجیک چهره"  # the line's only service
+    appt = client.get(f"/api/appointments/{mine['appointment_id']}").json()
+    assert appt["time_unknown"] and appt["start_at"][:10] == soon.date().isoformat()
+    cal = client.get(f"/api/appointments/calendar?line_id={line['id']}&days=10").json()
+    day = [d for d in cal["days"] if d["date"] == soon.date().isoformat()][0]
+    assert day["unknown_time"] == 2 and day["status"] != "full"  # listed, but no slot taken
+    # setting the real hour makes it a normal appointment
+    when = soon.replace(hour=11, minute=0, second=0, microsecond=0).isoformat(timespec="minutes")
+    e = client.put(f"/api/appointments/{appt['id']}", json={"start_at": when, "allow_outside_hours": True})
+    assert e.status_code == 200 and not e.json()["time_unknown"]
+
+    # receipts: grouped by «شماره پذیرش», no mobile - linked to the deposit customer by customer code
+    rh = ["", "", "نام پرسنل", "نام مشتری", "شماره فیش", "صندوقدار", "تاریخ", "ساعت", "کد مشتری", "کد اشتراک", "مبلغ کل", "درصد",
+          "سهم پرسنل", "تخفیف پرسنل", "تخفیف سالن", "قابل پرداخت", "خدمت", "توضیحات", "دستیار", "درصد دستیار", "کارتخوان",
+          "مسترد کننده", "تاریخ استرداد"]
+    group = lambda no: ["شماره پذیرش: %s (مبلغ کل فیش: ۸,۰۰۰,۰۰۰) (مبلغ بیعانه : ۵۰۰,۰۰۰)" % no] + [""] * 22  # noqa: E731
+    item = lambda staff, cust, code, svc, amt, refund="": ["", "", staff, cust, 1, "مدیر", j(past), "19:15", code, "", amt, 0, 0, 0, 0,  # noqa: E731
+                                                         amt, svc, "", "", 0, "پوز صادرات", "", refund]
+    receipts = _xlsx([rh, group("1403060034"),
+                      item("لیلا تاجیک چهره", "رقیه پارسا چهره", 93500, "فیبروز ابرو", 4500000),
+                      item("لیلا تاجیک چهره", "رقیه پارسا چهره", 93500, "بن مژه چهره", 3500000),
+                      group("1403060035"),
+                      item("مریم ناشناس", "مشتری بدون موبایل", 90408, "اوزون تراپی", 200000),
+                      item("مریم ناشناس", "مشتری بدون موبایل", 90408, "اوزون تراپی", 200000),
+                      group("1403060036"),
+                      item("لیلا تاجیک چهره", "مسترد شده", 90409, "فیبروز ابرو", 4500000, j(past))])
+    p = client.post("/api/import/legacy/preview", files={"file": ("fish.xlsx", receipts, "application/octet-stream")},
+                    data={"kind": "history", "unit": "toman"}).json()
+    hm = p["mapping"]
+    assert p["headers"][hm["staff"]] == "نام پرسنل" and p["headers"][hm["amount"]] == "قابل پرداخت" and "mobile" not in hm
+    assert p["summary"]["ok"] == 4 and p["summary"]["skipped_refunded"] == 1 and p["sample"][0]["receipt"] == "1403060034"
+    r = client.post(f"/api/import/legacy/{p['id']}/commit", json={}).json()["result"]
+    assert r["appointments"] == 4 and r["customers_new"] == 1  # رقیه is matched by her code from the deposits file
+    cust = client.get("/api/customers?q=09179305206").json()["items"][0]
+    hist = client.get(f"/api/customers/{cust['id']}").json()["history"]
+    assert {h["service"] for h in hist} == {"فیبروز ابرو", "بن مژه چهره"} and hist[0]["amount"] in (45_000_000, 35_000_000)
+    # the same file again: nothing new (two identical ozone lines of one receipt stay two)
+    p2 = client.post("/api/import/legacy/preview", files={"file": ("fish.xlsx", receipts, "application/octet-stream")},
+                     data={"kind": "history", "unit": "toman"}).json()
+    r2 = client.post(f"/api/import/legacy/{p2['id']}/commit", json={}).json()["result"]
+    assert r2["appointments"] == 0 and r2["skipped_duplicates"] == 4
+
+
+def test_legacy_import_reads_html_table_saved_as_xls(client):
+    html = ("<html><body><table><tr><th>نام مشتری</th><th>تلفن</th><th>تاریخ</th><th>خدمت</th></tr>"
+            "<tr><td>آزمون اچ‌تی‌ام‌ال</td><td>09125556677</td><td>1404/01/15</td><td>مانیکور</td></tr></table></body></html>").encode()
+    r = client.post("/api/import/legacy/preview", files={"file": ("report.xls", html, "application/vnd.ms-excel")},
+                    data={"kind": "history"})
+    assert r.status_code == 200, r.text
+    assert r.json()["summary"]["ok"] == 1 and r.json()["sample"][0]["date"].startswith("2025-04-04")

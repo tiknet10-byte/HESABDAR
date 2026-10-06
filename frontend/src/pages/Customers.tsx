@@ -45,6 +45,7 @@ function CustomerView({ id }: { id: number }) {
             {data.mobile && <span className="num flex items-center gap-1" dir="ltr"><Phone size={13} />{data.mobile}</span>}
             {data.instagram && <span className="flex items-center gap-1"><AtSign size={13} />{data.instagram}</span>}
             <span>عضویت: {jdate(data.created_at)}</span>
+            {data.legacy_code && <span>کد در نرم‌افزار قبلی: <b className="num">{data.legacy_code}</b></span>}
           </div>
         </div>
         <button className="btn btn-sm" onClick={() => setEdit(true)}>ویرایش</button>

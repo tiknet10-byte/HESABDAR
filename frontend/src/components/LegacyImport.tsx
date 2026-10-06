@@ -8,13 +8,15 @@ import { faDigits, formatJ } from "../lib/jalali";
 
 const KINDS = [
   { key: "customers", title: "۱. مشتریان", text: "نام، موبایل، تاریخ تولد" },
-  { key: "history", title: "۲. سوابق خدمات انجام‌شده", text: "مشتری، تاریخ، خدمت (پرسنل و مبلغ اختیاری)" },
-  { key: "deposits", title: "۳. بیعانه‌های نوبت‌های آینده", text: "مشتری، مبلغ، تاریخ دریافت، خدمت، تاریخ نوبت" },
+  { key: "deposits", title: "۲. بیعانه‌های باز", text: "گزارش بیعانه چهره: فقط «صندوق ودیعه»ها منتقل می‌شوند" },
+  { key: "history", title: "۳. فیش‌های صادرشده (سوابق خدمات)", text: "گزارش فیش‌ها: تاریخ، خدمت، پرسنل و مبلغ هر مشتری" },
 ] as const;
 const FIELDS: Record<string, string[]> = {
-  customers: ["name", "first_name", "last_name", "mobile", "birth_date", "notes"],
-  history: ["name", "first_name", "last_name", "mobile", "date", "time", "service", "staff", "amount", "notes"],
-  deposits: ["name", "first_name", "last_name", "mobile", "date", "amount", "service", "appt_date", "time", "staff", "notes"],
+  customers: ["customer_code", "name", "first_name", "last_name", "mobile", "birth_date", "notes"],
+  history: ["customer_code", "name", "first_name", "last_name", "mobile", "receipt_no", "date", "time", "service", "line", "staff", "amount",
+    "refund_date", "notes"],
+  deposits: ["customer_code", "name", "first_name", "last_name", "mobile", "date", "amount", "appt_date", "time", "service", "line", "staff",
+    "status", "settled_date", "notes"],
 };
 const STATUS: Record<string, string> = { review: "بررسی", committed: "ثبت شد", undone: "برگشت خورد", discarded: "کنار گذاشته شد" };
 
@@ -26,7 +28,7 @@ export default function LegacyImport() {
   const accounts = (useApi<any[]>("/api/accounts").data ?? []).filter((a) => a.is_active);
   const history = useApi<any[]>("/api/import/legacy");
   const [kind, setKind] = useState<string>("customers");
-  const [unit, setUnit] = useState("rial");
+  const [unit, setUnit] = useState("toman");
   const [file, setFile] = useState<File | null>(null);
   const [pv, setPv] = useState<any>(null);
   const [mapping, setMapping] = useState<Record<string, number>>({});
@@ -96,9 +98,9 @@ export default function LegacyImport() {
         <div className="space-y-2 text-sm leading-7">
           <p>اطلاعات را از نرم‌افزار قبلی به صورت <b>فایل Excel</b> خروجی بگیرید و به ترتیب زیر وارد کنید. ستون‌ها خودکار شناخته می‌شوند (نام، موبایل، تاریخ شمسی، خدمت، مبلغ…) و قبل از ثبت، پیش‌نمایش و خطاها نشان داده می‌شود.</p>
           <ol className="list-inside list-decimal space-y-1 rounded-2xl bg-violet-500/5 p-3">
-            <li>در «چهره» گزارش <b>لیست مشتریان</b> را باز کنید و خروجی Excel بگیرید ← اینجا «مشتریان».</li>
-            <li>گزارش <b>سوابق/خدمات انجام‌شده مشتریان</b> (یا گزارش فروش/فاکتورها با نام خدمت) را برای کل بازه بگیرید ← «سوابق خدمات». فقط تاریخ و خدمت ثبت می‌شود و <b>هیچ مبلغی وارد حساب‌ها نمی‌شود</b> (در سیستم قبلی حساب شده).</li>
-            <li>گزارش <b>نوبت‌های آینده / بیعانه‌ها (پیش‌پرداخت‌ها)</b> را بگیرید ← «بیعانه‌ها». بیعانه‌ها باز ثبت می‌شوند و در فاکتور همان مشتری کسر می‌شوند؛ چون پولش قبلاً گرفته شده، به موجودی کارت/کارتخوان اضافه نمی‌شود (در حساب «مانده افتتاحیه»).</li>
+            <li>(اختیاری) <b>لیست مشتریان</b> ← «مشتریان».</li>
+            <li>گزارش <b>بیعانه‌ها</b> ← «بیعانه‌های باز». مشتری‌ها با «کد مشتری» و موبایل ساخته می‌شوند؛ ردیف‌های «تسویه» رد می‌شوند و «صندوق ودیعه»ها بیعانهٔ باز می‌شوند و در فاکتور همان مشتری کسر می‌شوند. چون پولش قبلاً گرفته شده، به موجودی کارت/کارتخوان اضافه نمی‌شود (حساب «مانده افتتاحیه»). اگر «تاریخ مراجعه» در آینده باشد، نوبت آن روز با «ساعت نامشخص» ثبت می‌شود.</li>
+            <li>گزارش <b>فیش‌های صادرشده</b> ← «فیش‌ها». با «کد مشتری» به همان مشتری وصل می‌شود؛ تاریخ، خدمت، پرسنل و مبلغ در پروندهٔ مشتری ثبت می‌شود و <b>هیچ مبلغی وارد حساب‌ها نمی‌شود</b>. فیش‌های مسترد شده رد می‌شوند.</li>
           </ol>
           <p className="muted text-xs">اگر فایل خروجی پسوند <b>xls</b> دارد: در Excel باز کنید ← Save As ← «Excel Workbook (.xlsx)». اگر نرم‌افزار خروجی Excel ندارد، از قالب‌های زیر استفاده کنید. مشتری تکراری (با موبایل یکسان) دوباره ساخته نمی‌شود و وارد کردن دوبارهٔ یک فایل، سابقه یا بیعانهٔ تکراری نمی‌سازد.</p>
           <div className="flex flex-wrap gap-2">
@@ -156,6 +158,9 @@ export default function LegacyImport() {
               <Stat label="ردیف قابل ثبت" value={s.ok} tone="emerald" />
               <Stat label="ردیف دارای خطا (ثبت نمی‌شود)" value={s.errors} tone={s.errors ? "rose" : "zinc"} />
               <Stat label="مشتری (جدید / موجود)" value={`${faDigits(s.new_customers)} / ${faDigits(s.existing_customers)}`} tone="violet" />
+              {(s.skipped_settled > 0 || s.skipped_refunded > 0) && (
+                <Stat label={pv.kind === "deposits" ? "بیعانهٔ تسویه‌شده (منتقل نمی‌شود)" : "فیش مسترد شده (منتقل نمی‌شود)"} value={s.skipped_settled + s.skipped_refunded} tone="zinc" />
+              )}
               {pv.kind === "deposits" ? <Stat label="جمع بیعانه‌ها" value={money(s.amount)} tone="amber" />
                 : pv.kind === "history" ? <Stat label="بازهٔ تاریخ" value={s.first_date ? `${formatJ(s.first_date, false)} تا ${formatJ(s.last_date, false)}` : "—"} tone="amber" />
                 : <Stat label="هشدار" value={s.warnings} tone="amber" />}
@@ -217,20 +222,21 @@ export default function LegacyImport() {
               <div className="label">نمونهٔ ردیف‌ها (۳۰ ردیف اول)</div>
               <div className="overflow-x-auto rounded-2xl border" style={{ borderColor: "var(--border)" }}>
                 <table className="table text-xs">
-                  <thead><tr><th>ردیف</th><th>مشتری</th><th>موبایل</th>{pv.kind !== "customers" && <><th>تاریخ</th><th>خدمت</th><th>پرسنل</th><th>مبلغ</th></>}{pv.kind === "deposits" && <th>نوبت</th>}<th>وضعیت</th></tr></thead>
+                  <thead><tr><th>ردیف</th><th>کد</th><th>مشتری</th><th>موبایل</th>{pv.kind !== "customers" && <><th>تاریخ</th><th>خدمت</th><th>پرسنل</th><th>مبلغ</th></>}{pv.kind === "deposits" && <th>نوبت</th>}<th>وضعیت</th></tr></thead>
                   <tbody>
                     {pv.sample.map((r: any) => (
                       <tr key={r.row} className={r.errors.length ? "bg-rose-500/10" : r.warnings.length ? "bg-amber-500/5" : ""}>
                         <td className="num">{faDigits(r.row)}</td>
-                        <td className="font-semibold">{r.name}</td>
+                        <td className="num">{r.code}</td>
+                        <td className="font-semibold">{r.name}{r.receipt ? <div className="muted num text-[10px]">فیش {r.receipt}</div> : null}</td>
                         <td className="num" dir="ltr">{r.mobile ?? ""}</td>
                         {pv.kind !== "customers" && <>
                           <td>{r.date ? formatJ(r.date, pv.kind === "history" && !r.date.endsWith("12:00")) : ""}</td>
-                          <td>{r.service_name}{r.service_name && (r.service_id ? <span className="text-emerald-600"> ✓</span> : <span className="text-amber-600"> (جدید)</span>)}</td>
+                          <td>{r.service_name}{r.service_name && (r.service_id ? <span className="text-emerald-600"> ✓</span> : <span className="text-amber-600"> (جدید)</span>)}{!r.service_name && r.line_name ? <span className="muted">{r.line_name}</span> : null}</td>
                           <td>{r.staff_name}</td>
                           <td className="num">{r.amount ? money(r.amount) : ""}</td>
                         </>}
-                        {pv.kind === "deposits" && <td>{r.appt_date ? formatJ(r.appt_date, r.appt_time_known) : "—"}</td>}
+                        {pv.kind === "deposits" && <td>{r.appt_date ? formatJ(r.appt_date, r.appt_time_known) : "—"}{r.appt_date && !r.appt_time_known ? <div className="text-[10px] text-amber-600">ساعت نامشخص</div> : null}</td>}
                         <td className="max-w-56">{r.errors.length ? <span className="text-rose-600">✕ {r.errors.join("، ")}</span> : r.warnings.length ? <span className="text-amber-600">⚠ {r.warnings.join("، ")}</span> : <span className="text-emerald-600">✓</span>}</td>
                       </tr>
                     ))}

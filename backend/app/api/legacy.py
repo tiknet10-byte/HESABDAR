@@ -29,7 +29,7 @@ def _batch(db: Session, bid: int) -> ImportBatch:
 def _out(b: ImportBatch, rows: bool = True) -> dict:
     s = b.summary or {}
     out = {"id": b.id, "file_name": b.file_name, "status": b.status, "created_at": b.created_at.isoformat(timespec="minutes"),
-           **{k: v for k, v in s.items() if k != "created"}}
+           **{k: v for k, v in s.items() if k not in ("created", "fps")}}
     if rows:
         bad = [r for r in b.rows if r.get("errors")]
         warn = [r for r in b.rows if not r.get("errors") and r.get("warnings")]

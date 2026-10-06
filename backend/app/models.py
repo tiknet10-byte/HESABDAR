@@ -121,6 +121,7 @@ class Customer(TimestampMixin, Base):
     tags: Mapped[list] = mapped_column(JSON, default=list)
     source: Mapped[str] = mapped_column(String(32), default="manual")  # manual|chat|ocr|import
     known_cards: Mapped[list] = mapped_column(JSON, default=list)  # masked cards customer paid from
+    legacy_code: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)  # customer code in the previous software
 
 
 # ---------------------------------------------------------------- money accounts
@@ -156,6 +157,8 @@ class Appointment(TimestampMixin, Base):
     # when a service is done on another day than booked, start_at moves to when it was really done and the
     # originally reserved time is kept here (that slot is free again for other customers)
     original_start_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # day known but hour not (e.g. brought over from the previous software): shown, but holds no time slot until set
+    time_unknown: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
 
 

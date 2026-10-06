@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
@@ -76,6 +76,7 @@ def _appt(db: Session, a: Appointment, customer: str | None = None) -> dict:
             "staff_id": a.staff_id, "start_at": a.start_at.isoformat(timespec="minutes"), "status": a.status,
             "quoted_price": a.quoted_price, "notes": a.notes, "invoice_id": a.invoice_id,
             "original_start_at": a.original_start_at.isoformat(timespec="minutes") if a.original_start_at else None,
+            "time_unknown": bool(a.time_unknown),
             "deposits": [{"id": d.id, "amount": d.amount, "status": d.status, "received_at": d.received_at.isoformat(timespec="minutes")}
                          for d in deps]}
 
@@ -115,7 +116,9 @@ def appointments(start: date | None = None, end: date | None = None, customer_id
     """Appointments in a date range; with customer_id, all of that customer's (open) appointments."""
     q = select(Appointment, Customer.full_name, Customer.mobile).join(Customer, Customer.id == Appointment.customer_id)
     if line_id:
-        q = q.where(Appointment.service_id.in_(select(Service.id).where(Service.line_id == line_id)))
+        # by service line; an appointment without a service (brought over with only a line/staff) follows its staff's line
+        q = q.where(or_(Appointment.service_id.in_(select(Service.id).where(Service.line_id == line_id)),
+                        Appointment.service_id.is_(None) & Appointment.staff_id.in_(select(Staff.id).where(Staff.line_id == line_id))))
     if customer_id:
         q = q.where(Appointment.customer_id == customer_id)
     else:
@@ -128,7 +131,7 @@ def appointments(start: date | None = None, end: date | None = None, customer_id
     out = [{**_appt(db, a, n), "customer_mobile": m} for a, n, m in rows]
     # flag overlaps that already exist in the data (e.g. created before the strict rules), so they can be fixed
     active = [(x, datetime.fromisoformat(x["start_at"]), datetime.fromisoformat(x["start_at"]) + timedelta(minutes=x["duration_minutes"] or 60))
-              for x in out if x["status"] in scheduling.OCCUPYING and not x["original_start_at"]]
+              for x in out if x["status"] in scheduling.OCCUPYING and not x["original_start_at"] and not x["time_unknown"]]
     for i, (x, s1, e1) in enumerate(active):
         for y, s2, e2 in active[i + 1:]:
             if s2 >= e1:
@@ -207,10 +210,12 @@ def edit_appointment(aid: int, body: AppointmentUpdate, db: Session = Depends(ge
         raise HTTPException(400, "فقط نوبت‌های رزرو (انجام‌نشده) قابل جابه‌جایی هستند")
     for k, v in data.items():
         setattr(a, k, v)
+    if "start_at" in data:
+        a.time_unknown = None  # the real hour is set now
     svc = db.get(Service, a.service_id) if a.service_id else None
     if svc and a.duration_minutes == svc.duration_minutes:
         a.duration_minutes = None
-    if timing:
+    if timing and not a.time_unknown:
         a.staff_id = accounting.default_staff_id(db, a.service_id, a.staff_id)
         db.flush()
         _ensure_bookable(db, a.service_id, a.staff_id, a.start_at, customer_id=a.customer_id, duration_minutes=a.duration_minutes,

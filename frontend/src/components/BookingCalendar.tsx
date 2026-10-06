@@ -7,7 +7,7 @@ import { money } from "../lib/format";
 import { useApi } from "../lib/hooks";
 import { faDigits, formatJ, J_MONTHS, J_WEEKDAYS, J_WEEKDAYS_SHORT, jWeekday, parseLocal, toJalali, toLocalIso } from "../lib/jalali";
 
-type Day = { date: string; status: "past" | "closed" | "empty" | "partial" | "full"; count: number; fill: number; first_free: string | null; booked_minutes: number };
+type Day = { date: string; status: "past" | "closed" | "empty" | "partial" | "full"; count: number; unknown_time?: number; fill: number; first_free: string | null; booked_minutes: number };
 type Cal = { line: string; capacity: number; min_duration: number; open: string; close: string; days: Day[] };
 
 export const DAY_STYLE: Record<Day["status"], { label: string; cell: string; dot: string }> = {
@@ -113,7 +113,7 @@ export default function BookingCalendar({ refresh, onBook }: { refresh: number; 
                           title={`${formatJ(d.date + "T12:00", false)} - ${st.label}${d.count ? ` - ${d.count} نوبت` : ""}${d.first_free ? ` - اولین زمان خالی ${d.first_free}` : ""}`}
                           className={`relative flex h-11 flex-col items-center justify-center rounded-lg text-xs font-bold transition ${st.cell} ${sel ? "ring-2 ring-violet-600 ring-offset-1" : ""} ${jd === 1 ? "border-r-2 border-violet-500" : ""}`}>
                           <span>{faDigits(jd)}</span>
-                          {d.count > 0 && d.status !== "past" && <span className="text-[9px] font-semibold opacity-80">{faDigits(d.count)} نوبت</span>}
+                          {d.count > 0 && d.status !== "past" && <span className="text-[9px] font-semibold opacity-80">{faDigits(d.count)} نوبت{d.unknown_time ? " ؟" : ""}</span>}
                           {d.status === "partial" && <span className="absolute bottom-0.5 left-1 right-1 h-0.5 rounded bg-amber-600/40"><span className="block h-full rounded bg-amber-600" style={{ width: `${Math.max(8, d.fill * 100)}%` }} /></span>}
                         </button>
                       );
@@ -164,6 +164,7 @@ function DayPanel({ lineId, day, services, onBook, refresh }: { lineId: number; 
         <div>
           <div className="font-extrabold">{J_WEEKDAYS[jWeekday(dateOf(day.date))]} {formatJ(day.date + "T12:00", false).split(" ").slice(1).join(" ")}</div>
           <div className="flex items-center gap-1.5 text-xs"><span className={`h-2.5 w-2.5 rounded ${st.dot}`} />{st.label}{day.first_free ? ` · اولین زمان خالی ${faDigits(day.first_free)}` : ""}</div>
+          {!!day.unknown_time && <div className="text-xs font-semibold text-amber-600">{faDigits(day.unknown_time)} نوبت با ساعت نامشخص (از سیستم قبلی) - در صفحهٔ نوبت‌ها ساعتشان را تعیین کنید</div>}
         </div>
         {day.status !== "past" && <button className="btn btn-sm btn-primary" onClick={() => onBook({ service_id: serviceId || undefined })}><CalendarPlus size={14} />نوبت جدید</button>}
       </div>
@@ -175,7 +176,9 @@ function DayPanel({ lineId, day, services, onBook, refresh }: { lineId: number; 
             {list.map((a) => (
               <div key={a.id} className={`flex items-center justify-between gap-2 rounded-xl px-2.5 py-1.5 text-sm ${a.status === "cancelled" ? "opacity-50" : ""}`} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
                 <div className="flex items-center gap-2">
-                  <span className="num rounded-lg bg-violet-500/10 px-1.5 py-0.5 text-xs font-bold text-violet-700 dark:text-violet-300">{hm(a.start_at)}–{hm(addMin(a.start_at, a.duration_minutes ?? 60))}</span>
+                  {a.time_unknown
+                    ? <span className="rounded-lg bg-amber-500/15 px-1.5 py-0.5 text-xs font-bold text-amber-700 dark:text-amber-300">ساعت نامشخص</span>
+                    : <span className="num rounded-lg bg-violet-500/10 px-1.5 py-0.5 text-xs font-bold text-violet-700 dark:text-violet-300">{hm(a.start_at)}–{hm(addMin(a.start_at, a.duration_minutes ?? 60))}</span>}
                   <div>
                     <div className="font-semibold">{a.customer} <span className="muted num text-xs">{a.customer_mobile}</span></div>
                     <div className="muted text-xs">{a.service}{a.staff ? ` · ${a.staff}` : ""}{a.deposits?.length ? ` · بیعانه ${a.deposits.map((d: any) => money(d.amount)).join(" + ")}` : ""}</div>

@@ -28,7 +28,7 @@ class CustomerIn(BaseModel):
 def _c(c: Customer, extra: dict | None = None) -> dict:
     return {"id": c.id, "full_name": c.full_name, "mobile": c.mobile, "instagram": c.instagram, "whatsapp": c.whatsapp,
             "birth_date": c.birth_date, "notes": c.notes, "tags": c.tags, "source": c.source, "known_cards": c.known_cards,
-            "created_at": c.created_at.isoformat(), **(extra or {})}
+            "legacy_code": c.legacy_code, "created_at": c.created_at.isoformat(), **(extra or {})}
 
 
 @router.get("")
@@ -37,7 +37,8 @@ def list_customers(q: str = "", limit: int = 100, offset: int = 0, db: Session =
     if q:
         like = f"%{q}%"
         mob = normalize_mobile(q)
-        stmt = stmt.where(or_(Customer.full_name.like(like), Customer.mobile.like(f"%{mob or q}%"), Customer.instagram.like(like)))
+        stmt = stmt.where(or_(Customer.full_name.like(like), Customer.mobile.like(f"%{mob or q}%"), Customer.instagram.like(like),
+                                Customer.legacy_code == q.strip()))
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = db.scalars(stmt.order_by(Customer.id.desc()).limit(min(limit, 500)).offset(offset)).all()
     stats = dict(db.execute(select(Invoice.customer_id, func.sum(Invoice.total)).where(Invoice.status != "void",
