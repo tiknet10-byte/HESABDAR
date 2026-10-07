@@ -1284,16 +1284,23 @@ def test_tizpardaz_customers_products_and_journal(client, accounts, services):
     client.post("/api/customers", json={"full_name": "فاطمه  بستانی", "mobile": "09125550103"})
     cust = up("customers", [["لیست حساب‌ها"], ["کد حساب", "عنوان حساب", "بدهکار", "بستانکار"],
                             [1, "محمودي(سياوش)", None, None], [4, "تاجيک(ساناز)", 500_000, None], [9, "بستاني(فاطمه)", None, 200_000],
-                            [12, "مرادي(سحر)", None, None]])
+                            [12, "مرادي(سحر)", None, None], [13, "متفرقه", None, None]])
     rows = {r["code"]: r for r in cust["rows"]}
     assert rows["1"]["name"] == "سیاوش محمودی" and rows["1"]["status"] == "new"
     assert rows["4"]["status"] == "found" and rows["4"]["customer_id"] == sanaz["id"]
     assert rows["9"]["status"] == "ambiguous" and len(rows["9"]["candidates"]) == 2
+    assert rows["13"]["status"] == "generic"  # «متفرقه» is not a person: not made a customer unless asked
     res = client.post(f"/api/import/tizpardaz/{cust['id']}/commit", json={"choices": {str(rows["9"]["row"]): f1["id"]}, "balances": True}).json()
     assert res["result"]["new"] == 2 and res["result"]["linked"] == 2
     prof = client.get(f"/api/customers/{sanaz['id']}").json()
     assert prof["balance"]["receivable"] == 5_000_000  # 500,000 toman owed, brought over as an opening balance
     assert client.get(f"/api/customers/{f1['id']}").json()["balance"]["deposits_held"] == 2_000_000
+    debtors = client.get("/api/customers?filter=debt").json()["items"]
+    assert (sanaz["id"], 5_000_000) in [(c["id"], c["debt"]) for c in debtors] and all(c["debt"] > 0 for c in debtors)
+    pos = next(iter(accounts.values()))
+    assert client.post(f"/api/customers/{sanaz['id']}/receive", json={"amount": 6_000_000, "payment_account_id": pos}).status_code == 400
+    got = client.post(f"/api/customers/{sanaz['id']}/receive", json={"amount": 2_000_000, "payment_account_id": pos}).json()
+    assert got["paid"] == [{"invoice": None, "amount": 2_000_000}] and got["balance"]["receivable"] == 3_000_000
 
     # products: one already here (exact name), one sold as a "service" in Chehreh
     old = client.post("/api/products", json={"name": "دور چشم نامبوزین +9", "sale_price": 1}).json()
@@ -1334,6 +1341,7 @@ def test_tizpardaz_customers_products_and_journal(client, accounts, services):
     jr = up("journal", jrows)
     assert jr["summary"]["counts"] == {"purchase": 1, "sale": 3, "expense": 1}
     assert [u["name"] for u in jr["unknown_products"]] == ["کرم ناشناخته"]
+    assert [(u["party"], u["generic"]) for u in jr["unknown_customers"]] == [("متفرقه", True)]
     sale14 = next(r for r in jr["rows"] if r["doc_no"] == "14")
     assert sale14["customer_id"] == sanaz["id"] and sale14["amount"] == 49_500_000
     assert next(r for r in jr["rows"] if r["doc_no"] == "20")["customer_id"] == sanaz["id"]  # «به 4» = Tizpardaz code 4
@@ -1350,3 +1358,17 @@ def test_tizpardaz_customers_products_and_journal(client, accounts, services):
     # undo the journal: the history is gone
     client.post(f"/api/import/tizpardaz/{jr['id']}/undo")
     assert not any(r["code"] == "1" for r in client.get("/api/reports/products").json()["products"])
+
+
+def test_receiving_a_customers_debt_settles_unpaid_invoices_first(client, accounts):
+    cid = client.post("/api/customers", json={"full_name": "مشتری نسیه", "mobile": "09125550909"}).json()["id"]
+    a = client.post("/api/invoices", json={"customer_id": cid, "items": [{"description": "مانیکور", "unit_price": 3_000_000}],
+                                           "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 1_000_000}]}).json()
+    b = client.post("/api/invoices", json={"customer_id": cid, "items": [{"description": "پدیکور", "unit_price": 4_000_000}]}).json()
+    assert (a["status"], b["status"]) == ("partial", "issued")
+    got = client.post(f"/api/customers/{cid}/receive", json={"amount": 3_000_000, "payment_account_id": accounts["کارتخوان ملت"]}).json()
+    assert got["paid"] == [{"invoice": a["number"], "amount": 2_000_000}, {"invoice": b["number"], "amount": 1_000_000}]
+    assert got["balance"]["receivable"] == 3_000_000
+    assert client.get(f"/api/invoices/{a['id']}").json()["status"] == "paid"
+    assert client.get(f"/api/invoices/{b['id']}").json()["paid"] == 1_000_000
+    balanced(client)

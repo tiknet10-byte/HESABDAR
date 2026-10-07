@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import Integer, String, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
-from ..models import Appointment, Customer, Deposit, Invoice, Payment, Product, Service, Staff, TradeHistory, WaitlistEntry
-from ..services import accounting, customer_merge
+from ..models import (Appointment, Customer, Deposit, Invoice, JournalLine, Payment, PaymentAccount, Product, Service, Staff, TradeHistory,
+                      WaitlistEntry)
+from ..services import accounting, customer_merge, routing
 from ..services.audit import audit
 from ..services.search import fa_like
 from ..services.textutil import normalize_mobile, to_en_digits
@@ -31,7 +34,7 @@ def _c(c: Customer, extra: dict | None = None) -> dict:
     return {"id": c.id, "full_name": c.full_name, "mobile": c.mobile, "instagram": c.instagram, "whatsapp": c.whatsapp,
             "birth_date": c.birth_date, "notes": c.notes, "tags": c.tags, "source": c.source, "known_cards": c.known_cards,
             "code": c.legacy_code, "legacy_code": c.legacy_code, "mobile_issue": c.mobile_issue, "mobile_raw": c.mobile_raw,
-            "other_mobiles": c.other_mobiles or [], "other_codes": c.other_codes or [],
+            "other_mobiles": c.other_mobiles or [], "other_codes": c.other_codes or [], "tp_code": c.tp_code,
             "created_at": c.created_at.isoformat(), **(extra or {})}
 
 
@@ -62,16 +65,25 @@ def _activity():  # noqa: ANN202
     return inv, hist, held, spent, visits, last
 
 
-SORTS = {"recent", "code", "name", "spent", "last_visit", "visits"}
+SORTS = {"recent", "code", "name", "spent", "last_visit", "visits", "debt"}
+
+
+def _debt(db: Session):  # noqa: ANN202
+    """What each customer owes (receivable), from the books."""
+    ar = accounting.account(db, accounting.AR).id
+    return (select(JournalLine.customer_id.label("cid"), func.sum(JournalLine.debit - JournalLine.credit).label("amt"))
+            .where(JournalLine.account_id == ar, JournalLine.customer_id.is_not(None)).group_by(JournalLine.customer_id).subquery())
 
 
 @router.get("")
 def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "code", filter: str = "",  # noqa: A002
                    db: Session = Depends(get_db), _=Depends(require("read"))):
     inv, hist, held, spent, visits, last = _activity()
+    debt = _debt(db)
     stmt = (select(Customer, spent.label("spent"), func.coalesce(hist.c.amt, 0).label("spent_old"),
-                   func.coalesce(held.c.amt, 0).label("held"), visits.label("visits"), last.label("last"))
-            .outerjoin(inv, inv.c.cid == Customer.id).outerjoin(hist, hist.c.cid == Customer.id).outerjoin(held, held.c.cid == Customer.id))
+                   func.coalesce(held.c.amt, 0).label("held"), visits.label("visits"), last.label("last"), func.coalesce(debt.c.amt, 0))
+            .outerjoin(inv, inv.c.cid == Customer.id).outerjoin(hist, hist.c.cid == Customer.id).outerjoin(held, held.c.cid == Customer.id)
+            .outerjoin(debt, debt.c.cid == Customer.id))
     if q:
         like = f"%{q}%"
         mob = normalize_mobile(q)
@@ -83,6 +95,8 @@ def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "
                               cast(Customer.other_codes, String).like(f'%"{code}"%')))
     if filter == "held":
         stmt = stmt.where(held.c.amt > 0)
+    elif filter == "debt":
+        stmt = stmt.where(debt.c.amt > 0)
     elif filter == "no_mobile":
         stmt = stmt.where(Customer.mobile.is_(None))
     elif filter == "mobile_issue":
@@ -92,12 +106,13 @@ def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "
     order = {"recent": [Customer.id.desc()], "name": [Customer.full_name],
              "code": [func.cast(Customer.legacy_code, Integer).desc(), Customer.id.desc()],
              "spent": [spent.desc(), Customer.id.desc()], "visits": [visits.desc(), Customer.id.desc()],
-             "last_visit": [last.desc().nulls_last(), Customer.id.desc()]}[sort if sort in SORTS else "code"]
+             "last_visit": [last.desc().nulls_last(), Customer.id.desc()],
+             "debt": [func.coalesce(debt.c.amt, 0).desc(), Customer.id.desc()]}[sort if sort in SORTS else "code"]
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = db.execute(stmt.order_by(*order).limit(min(limit, 500)).offset(max(offset, 0))).all()
     return {"total": total, "items": [_c(c, {"total_spent": int(sp or 0), "spent_old": int(old or 0), "deposits_held": int(h or 0),
-                                             "visits": int(v or 0), "last_visit": str(lv)[:16] if lv else None})
-                                      for c, sp, old, h, v, lv in rows]}
+                                             "visits": int(v or 0), "last_visit": str(lv)[:16] if lv else None, "debt": max(int(d or 0), 0)})
+                                      for c, sp, old, h, v, lv, d in rows]}
 
 
 @router.post("")
@@ -291,6 +306,49 @@ def _trade_history(db: Session, cid: int) -> list[dict]:
                     "amount": -h.amount if h.kind == "sale_return" else h.amount, "source": h.source, "product": True,
                     "notes": f"سند {h.doc_no}" if h.doc_no else None})
     return out
+
+
+class ReceiveIn(BaseModel):
+    amount: int
+    payment_account_id: int | None = None  # empty = the default POS of the deposits / products
+    paid_at: datetime | None = None
+    reference: str | None = None
+
+
+@router.post("/{cid}/receive")
+def receive_debt(cid: int, body: ReceiveIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+    """The customer pays (part of) what they owe, e.g. a debt brought over from the previous software.
+    It settles their unpaid invoices first, oldest first; the rest reduces their old (opening) debt."""
+    c = db.get(Customer, cid) or _404()
+    owed = accounting.customer_balance(db, cid)["receivable"]
+    if body.amount <= 0:
+        raise HTTPException(400, "مبلغ باید مثبت باشد")
+    if body.amount > owed:
+        raise HTTPException(400, "مبلغ از بدهی مشتری بیشتر است؛ مازاد را به‌عنوان بیعانه ثبت کنید")
+    aid = body.payment_account_id or routing.default_account(db, "products") or routing.default_account(db, "deposits")
+    pa = db.get(PaymentAccount, aid) if aid else None
+    if pa is None:
+        raise HTTPException(400, "حساب دریافت را انتخاب کنید")
+    left, paid = body.amount, []
+    try:
+        for inv in db.scalars(select(Invoice).where(Invoice.customer_id == cid, Invoice.status.in_(("issued", "partial")))
+                              .order_by(Invoice.issued_at, Invoice.id)):
+            part = min(left, inv.total - inv.paid)
+            if part <= 0:
+                continue
+            accounting.record_payment(db, payment_account=pa, amount=part, invoice=inv, reference=body.reference, paid_at=body.paid_at, user=user)
+            paid.append({"invoice": inv.number, "amount": part})
+            left -= part
+            if not left:
+                break
+        if left:
+            accounting.record_payment(db, payment_account=pa, amount=left, customer=c, reference=body.reference, paid_at=body.paid_at, user=user)
+            paid.append({"invoice": None, "amount": left})
+    except accounting.AccountingError as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return {"paid": paid, "balance": accounting.customer_balance(db, cid)}
 
 
 @router.put("/{cid}")

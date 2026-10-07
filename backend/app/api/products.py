@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..core.db import get_db
 from ..models import (
+    Customer,
     Invoice,
     InvoiceItem,
     PaymentAccount,
@@ -167,8 +168,13 @@ def product_detail(pid: int, db: Session = Depends(get_db), _=Depends(require("r
                      "balance_qty": qty, "balance_value": value, "note": m.note,
                      "invoice": ref[0] if ref else None, "invoice_id": ref[1] if ref else None})
     hist = []
+    names: dict[int, str] = {}
     for h in db.scalars(select(TradeHistory).where(TradeHistory.product_id == pid).order_by(TradeHistory.at.desc(), TradeHistory.id.desc()).limit(300)):
+        if h.customer_id and h.customer_id not in names:
+            c = db.get(Customer, h.customer_id)
+            names[h.customer_id] = c.full_name if c else ""
         hist.append({"at": h.at.isoformat(timespec="minutes"), "kind": h.kind, "source": h.source, "doc_no": h.doc_no, "party": h.party,
+                     "customer_id": h.customer_id, "customer": names.get(h.customer_id) if h.customer_id else None,
                      "qty": h.qty, "unit_price": h.unit_price, "amount": h.amount, "cost": h.cost})
     return {**_p(p), "moves": card[::-1], "history": hist}
 
@@ -385,7 +391,7 @@ def product_profit(db: Session, start: date | None = None, end: date | None = No
         q = q.where(Invoice.issued_at <= e)
     if channel in ("online", "in_person"):
         q = q.where(Invoice.channel == "online") if channel == "online" else q.where(or_(Invoice.channel.is_(None), Invoice.channel == "in_person"))
-    rows = db.execute(q).all()
+    rows = db.execute(q).all() if channel != "history" else []
     cogs: dict[int, int] = defaultdict(int)
     estimated: set[int] = set()
     ids = [it.id for it, _, _ in rows]
@@ -430,13 +436,14 @@ def product_profit(db: Session, start: date | None = None, end: date | None = No
             if h.kind == "expense":
                 expenses += h.amount
                 continue
-            if h.product_id is None:
-                continue
             sign = -1 if h.kind == "sale_return" else 1
-            p = products.get(h.product_id)
-            r = per.setdefault(h.product_id, {"id": h.product_id, "code": p.code if p else None, "sku": p.sku if p else None,
-                                              "name": p.name if p else h.description, "qty": 0, "revenue": 0, "cogs": 0, "profit": 0,
-                                              "online": 0, "estimated": False})
+            p = products.get(h.product_id) if h.product_id else None
+            r = per.setdefault(h.product_id or 0, {"id": h.product_id, "code": p.code if p else None, "sku": p.sku if p else None,
+                                                   "name": p.name if p else "کالای نامشخص (سوابق)", "qty": 0, "revenue": 0, "cogs": 0,
+                                                   "profit": 0, "online": 0, "estimated": False})
+            if h.product_id is None:  # which product it was is not known, so neither is its cost
+                r["unknown_cost"] = True
+                tot["unknown_cost"] = tot.get("unknown_cost", 0) + sign * h.amount
             r["history"] = r.get("history", 0) + sign * h.qty
             for bucket in (r, tot, months.setdefault(_jm(h.at), {"key": _jm(h.at), "qty": 0, "revenue": 0, "cogs": 0, "profit": 0}),
                            chans.setdefault("history", {"channel": "history", "qty": 0, "revenue": 0, "cogs": 0, "profit": 0})):

@@ -3,6 +3,7 @@ import {
   Settings as Cog, ShieldCheck, Stethoscope, Calculator, FileSpreadsheet, Package, Save, Trash2, UserCog, Users, Wrench,
 } from "lucide-react";
 import LegacyImport from "../components/LegacyImport";
+import TizpardazImport from "../components/TizpardazImport";
 import AccountRouting from "../components/AccountRouting";
 import { MergeDialog, ServiceHealth } from "../components/ServiceTools";
 import JalaliPicker from "../components/JalaliPicker";
@@ -1032,6 +1033,7 @@ const TABS: { key: string; label: string; icon: ReactNode; perm?: string; el: ()
   { key: "alerts", label: "هشدارها", icon: <Bell size={16} />, el: () => <Alerts /> },
   { key: "security", label: "امنیت و ممیزی", icon: <ShieldCheck size={16} />, perm: "settings", el: () => <Security /> },
   { key: "import", label: "انتقال از نرم‌افزار قبلی", icon: <FileSpreadsheet size={16} />, perm: "settings", el: () => <LegacyImport /> },
+  { key: "tizpardaz", label: "انتقال از تیزپرداز", icon: <Package size={16} />, perm: "settings", el: () => <TizpardazImport /> },
   { key: "data", label: "مدیریت داده‌ها", icon: <Database size={16} />, perm: "users", el: () => <DataManagement /> },
 ];
 

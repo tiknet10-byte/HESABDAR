@@ -141,6 +141,7 @@ function ProductFile({ id, onChange }: { id: number; onChange: () => void }) {
           </div>
         )}
       </div>
+      {p.history?.length > 0 && <TradeHistoryList rows={p.history} />}
       {finance && p.is_active && (
         <button className="btn btn-sm text-rose-600" onClick={async () => {
           if (!confirm(`«${p.name}» حذف شود؟ (اگر گردش دارد بایگانی می‌شود)`)) return;
@@ -150,6 +151,39 @@ function ProductFile({ id, onChange }: { id: number; onChange: () => void }) {
         }}><Trash2 size={14} />حذف</button>
       )}
     </div>
+  );
+}
+
+const H_KINDS: Record<string, string> = { sale: "فروش", sale_return: "برگشت از فروش", purchase: "خرید", purchase_return: "برگشت از خرید" };
+const H_SOURCE: Record<string, string> = { tizpardaz: "تیزپرداز", chehreh: "چهره" };
+
+/** Sales and purchases of this product brought over from Tizpardaz / Chehreh (history only: stock came over as a count). */
+function TradeHistoryList({ rows }: { rows: any[] }) {
+  const sales = rows.filter((h) => h.kind === "sale" || h.kind === "sale_return");
+  const sign = (h: any) => (h.kind === "sale_return" ? -1 : 1);
+  const qty = sales.reduce((t, h) => t + sign(h) * h.qty, 0);
+  const revenue = sales.reduce((t, h) => t + sign(h) * h.amount, 0);
+  const cost = sales.reduce((t, h) => t + sign(h) * (h.cost ?? 0), 0);
+  return (
+    <details open={!rows.length || rows.length < 30}>
+      <summary className="mb-1 cursor-pointer font-bold">سوابق خرید و فروش در نرم‌افزار قبلی ({num(rows.length)})</summary>
+      <div className="muted mb-2 text-xs">فروش: {num(qty)} عدد · {money(revenue)} · سود ناخالص {money(revenue - cost)}. این‌ها فقط سابقه‌اند؛ موجودی بالا همان موجودی نهایی تیزپرداز است.</div>
+      <div className="max-h-72 overflow-y-auto">
+        <table className="table text-xs [&_td]:px-2 [&_th]:px-2">
+          <thead><tr><th>تاریخ</th><th>نوع</th><th>طرف حساب</th><th>تعداد</th><th>مبلغ</th><th>سود</th></tr></thead>
+          <tbody>{rows.map((h: any, k: number) => (
+            <tr key={k}>
+              <td className="num whitespace-nowrap">{formatJ(h.at, false)}</td>
+              <td>{H_KINDS[h.kind] ?? h.kind}<span className="muted"> · {H_SOURCE[h.source] ?? h.source}{h.doc_no ? ` · سند ${h.doc_no}` : ""}</span></td>
+              <td>{h.customer ?? h.party ?? ""}</td>
+              <td className="num">{num(h.qty)}</td>
+              <td className="num">{money(h.amount, false)}</td>
+              <td className="num">{h.kind === "sale" || h.kind === "sale_return" ? money(sign(h) * (h.amount - (h.cost ?? 0)), false) : ""}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </details>
   );
 }
 
@@ -391,7 +425,7 @@ function Profit() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <Tabs value={period} onChange={setPeriod} items={Object.entries(PERIODS).map(([value, p]) => ({ value, label: p.label }))} />
-        <Tabs value={channel} onChange={setChannel} items={[{ value: "", label: "همهٔ فروش‌ها" }, { value: "in_person", label: "حضوری" }, { value: "online", label: "آنلاین (سایت)" }]} />
+        <Tabs value={channel} onChange={setChannel} items={[{ value: "", label: "همهٔ فروش‌ها" }, { value: "in_person", label: "حضوری" }, { value: "online", label: "آنلاین (سایت)" }, { value: "history", label: "سوابق تیزپرداز/چهره" }]} />
       </div>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="فروش محصولات (پس از تخفیف)" value={cmoney(t.revenue)} hint={`${num(t.qty)} عدد فروخته شده`} tone="sky" />
@@ -399,6 +433,13 @@ function Profit() {
         <Stat label="سود ناخالص" value={cmoney(t.profit)} tone={t.profit < 0 ? "pink" : "emerald"} icon={<TrendingUp size={20} />} />
         <Stat label="حاشیهٔ سود" value={pct(t.margin)} hint="سود ناخالص ÷ فروش" />
       </div>
+      {t.unknown_cost > 0 && <div className="flex items-start gap-2 rounded-xl bg-amber-500/10 p-2.5 text-xs text-amber-800 dark:text-amber-200"><AlertTriangle size={15} className="shrink-0" />{money(t.unknown_cost)} از فروش‌های سوابق، کالای مشخص ندارد و بهایش معلوم نیست؛ سود آن کامل حساب شده است. برای دقت، فایل دفتر روزنامه را برگردانید و دوباره وارد کنید و کالای آن ردیف‌ها را انتخاب کنید.</div>}
+      {t.expenses > 0 && (
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Stat label="هزینه‌های ثبت‌شده در تیزپرداز" value={cmoney(t.expenses)} hint="از دفتر روزنامهٔ هزینه (سابقه)" tone="pink" />
+          <Stat label="سود خالص (سود ناخالص − این هزینه‌ها)" value={cmoney(t.net)} tone={t.net < 0 ? "pink" : "emerald"} />
+        </div>
+      )}
       {t.estimated > 0 && <div className="flex items-start gap-2 rounded-xl bg-amber-500/10 p-2.5 text-xs text-amber-800 dark:text-amber-200"><AlertTriangle size={15} className="shrink-0" />بعضی محصولات قبل از ثبت خرید فروخته شده‌اند؛ بهای آن‌ها فعلاً تخمینی است و با ثبت خرید یا موجودی اول دوره دقیق می‌شود.</div>}
       <Card pad={false} title="سود هر محصول">
         <div className="px-5 pt-1"><Tabs value={sort} onChange={setSort} items={[{ value: "profit", label: "بیشترین سود" }, { value: "revenue", label: "بیشترین فروش" }, { value: "margin", label: "حاشیهٔ سود" }, { value: "qty", label: "تعداد" }]} /></div>
@@ -407,11 +448,11 @@ function Profit() {
             <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
               <thead><tr><th>کد</th><th>محصول</th><th>تعداد</th><th>فروش</th><th>بهای تمام‌شده</th><th>سود ناخالص</th><th>حاشیه</th></tr></thead>
               <tbody>{rows.map((r: any) => (
-                <tr key={r.id}>
+                <tr key={r.id ?? 0}>
                   <td className="num text-sky-600">{r.code}</td>
-                  <td><span className="font-semibold">{r.name}</span>{r.online > 0 && <span className="muted text-xs"> · {num(r.online)} آنلاین</span>}{r.estimated && <span className="badge mr-1 bg-amber-500/15 text-amber-700">تخمینی</span>}</td>
-                  <td className="num">{num(r.qty)}</td><td className="num">{money(r.revenue, false)}</td><td className="num">{money(r.cogs, false)}</td>
-                  <td className={`num font-bold ${r.profit < 0 ? "text-rose-600" : ""}`}>{money(r.profit, false)}</td><td className="num">{pct(r.margin)}</td>
+                  <td><span className="font-semibold">{r.name}</span>{r.online > 0 && <span className="muted text-xs"> · {num(r.online)} آنلاین</span>}{r.history ? <span className="muted text-xs"> · {num(r.history)} از سوابق</span> : null}{r.estimated && <span className="badge mr-1 bg-amber-500/15 text-amber-700">تخمینی</span>}</td>
+                  <td className="num">{num(r.qty)}</td><td className="num">{money(r.revenue, false)}</td><td className="num">{r.unknown_cost ? <span className="text-amber-600">نامعلوم</span> : money(r.cogs, false)}</td>
+                  <td className={`num font-bold ${r.profit < 0 ? "text-rose-600" : ""}`}>{r.unknown_cost ? "—" : money(r.profit, false)}</td><td className="num">{r.unknown_cost ? "—" : pct(r.margin)}</td>
                 </tr>
               ))}</tbody>
             </table>
@@ -427,11 +468,11 @@ function Profit() {
             </table>
           )}
         </Card>
-        <Card title="حضوری و آنلاین">
+        <Card title="حضوری، آنلاین و سوابق">
           {!data.channels.length ? <Empty text="—" /> : (
             <table className="table text-sm [&_td]:px-2 [&_th]:px-2">
               <thead><tr><th>کانال</th><th>تعداد</th><th>فروش</th><th>سود</th><th>حاشیه</th></tr></thead>
-              <tbody>{data.channels.map((c: any) => <tr key={c.channel}><td>{c.channel === "online" ? "آنلاین (سایت)" : "حضوری"}</td><td className="num">{num(c.qty)}</td><td className="num">{money(c.revenue, false)}</td><td className="num font-bold">{money(c.profit, false)}</td><td className="num">{pct(c.margin)}</td></tr>)}</tbody>
+              <tbody>{data.channels.map((c: any) => <tr key={c.channel}><td>{c.channel === "online" ? "آنلاین (سایت)" : c.channel === "history" ? "سوابق تیزپرداز/چهره" : "حضوری"}</td><td className="num">{num(c.qty)}</td><td className="num">{money(c.revenue, false)}</td><td className="num font-bold">{money(c.profit, false)}</td><td className="num">{pct(c.margin)}</td></tr>)}</tbody>
             </table>
           )}
         </Card>

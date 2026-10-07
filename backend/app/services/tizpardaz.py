@@ -60,6 +60,9 @@ SYN = {
                 "account": ["عنوان حساب"], "account_code": ["کد حساب"], "desc": ["شرح"], "qty": ["مقدار", "تعداد"], "price": ["فی"],
                 "debit": ["بدهکار"], "credit": ["بستانکار"]},
 }
+# accounts that are not a person (walk-in sales, cash, bank): not made into customers unless the user says so
+GENERIC = {"متفرقه", "مشتری متفرقه", "مشتریان متفرقه", "فروش متفرقه", "نقدی", "فروش نقدی", "مشتری نقدی", "مشتری عمومی", "عمومی",
+           "مشتری گذری", "گذری", "صندوق", "بانک", "سایت", "فروش سایت", "فروش اینترنتی", "مشتری سایت"}
 NEED = {"customers": ["name"], "products": ["code", "name"], "journal": ["doc_type", "date", "desc"]}
 _AR = str.maketrans({"ي": "ی", "ى": "ی", "ك": "ک", "ة": "ه", "‌": " "})
 
@@ -142,6 +145,10 @@ def sku_map_text(db: Session) -> str:
 
 
 # ------------------------------------------------------------------ customers
+def is_generic(name: str) -> bool:
+    return person_key(name) in {person_key(g) for g in GENERIC}
+
+
 def _customer_index(db: Session) -> dict[str, list[Customer]]:
     idx: dict[str, list[Customer]] = defaultdict(list)
     for c in db.scalars(select(Customer)):
@@ -185,7 +192,9 @@ def preview_customers(db: Session, rows: list[list[object]], mapping: dict[str, 
                "debit": debit, "credit": credit, "balance": debit - credit}
         linked = by_tp.get(code) if code else None
         matches = idx.get(person_key(name), [])
-        if linked is not None:
+        if linked is None and is_generic(name):  # «متفرقه», «صندوق» ...: not a person
+            row.update(status="generic", customer_id=None, candidates=[])
+        elif linked is not None:
             row.update(status="linked", customer_id=linked.id, candidates=[linked])
         elif len(matches) == 1:
             row.update(status="found", customer_id=matches[0].id, candidates=matches)
@@ -216,7 +225,7 @@ def commit_customers(db: Session, batch: ImportBatch, choices: dict[str, int | s
     account = db.get(PaymentAccount, account_id) if account_id else db.scalar(select(PaymentAccount).order_by(PaymentAccount.id))
     for row in batch.rows:
         key = str(row["row"])
-        choice = choices.get(key, row.get("customer_id") or ("" if row["status"] == "ambiguous" else "new"))
+        choice = choices.get(key, row.get("customer_id") or {"ambiguous": "", "generic": "skip"}.get(row["status"], "new"))
         if choice == "skip":
             counts["skipped"] += 1
             continue
@@ -463,6 +472,8 @@ def _party_customer(db: Session, party: str, idx: dict[str, list[Customer]], by_
     if code.isdigit():
         c = by_tp.get(code)
         return (c.id if c else None), ([c] if c else [])
+    if is_generic(tp_name(party)):
+        return None, []
     matches = idx.get(person_key(tp_name(party)), [])
     if len(matches) == 1:
         return matches[0].id, matches
@@ -522,7 +533,7 @@ def preview_journal(db: Session, rows: list[list[object]], mapping: dict[str, in
                 cid, cands = _party_customer(db, party, idx, by_tp)
                 row["customer_id"] = cid
                 if cid is None:
-                    u = unknown_c.setdefault(party, {"party": party, "name": tp_name(party), "count": 0,
+                    u = unknown_c.setdefault(party, {"party": party, "name": tp_name(party), "count": 0, "generic": is_generic(tp_name(party)),
                                                      "candidates": [{"id": c.id, "full_name": c.full_name, "code": c.legacy_code, "mobile": c.mobile} for c in cands]})
                     u["count"] += 1
         base = "|".join(str(x) for x in (row["kind"], row["doc_no"], row["date"], row["description"], row["qty"], row["amount"]))
@@ -560,7 +571,8 @@ def commit_journal(db: Session, batch: ImportBatch, product_map: dict[str, int |
         cid = row.get("customer_id")
         if row["kind"] in ("sale", "sale_return") and cid is None and row.get("party"):
             # a written-out person («نام‌خانوادگی(نام)» or a code) becomes a customer; a word like «متفرقه» stays a name
-            choice = customer_map.get(row["party"], "new" if "(" in row["party"] or to_en_digits(row["party"]).strip().isdigit() else "skip")
+            person = ("(" in row["party"] or to_en_digits(row["party"]).strip().isdigit()) and not is_generic(tp_name(row["party"]))
+            choice = customer_map.get(row["party"], "new" if person else "skip")
             if isinstance(choice, int) or str(choice).isdigit():
                 cid = int(choice)
             elif choice == "new":
