@@ -69,8 +69,15 @@ and how to use it. Commit messages end with the attribution lines the session as
   "دریافت بدهی" (settles unpaid invoices first).
 * Imports: Chehreh (previous salon software) customers / deposits / receipts (`legacy_import.py`, history only);
   Tizpardaz (product accounting software) customers matched by NAME only («نام‌خانوادگی(نام)»), balances as
-  opening balances, products as reference (code, SKU from `tizpardaz_defaults.py`, final stock), journal as history
-  (`TradeHistory`, no money/stock effect). Every import batch can be undone.
+  opening balances (a seller's credit = opening payable, not a deposit), products as reference (code, SKU from
+  `tizpardaz_defaults.py`, final stock), journal as history: invoices (`TradeDoc` header: number, date, person, total
+  from the person's row, paid, other rows) with items (`TradeHistory`), no money/stock effect; purchase sellers are
+  linked to the person and a `Supplier` (`Supplier.customer_id`). Old rows are grouped by `backfill_docs` at start.
+  Every import batch can be undone.
+* People: one list (customers) also holds sellers; the customer file shows sales and purchase invoices (here and
+  Tizpardaz) with clickable details, what we owe them; `customer_merge.LINKED/RECORDS` = every table that belongs to
+  a customer (merge moves them; a customer with any of them is never deleted).
+* Data reset (`services/maintenance.py`): TRANSACTIONS order is children-first (FKs) - add new tables there.
 * Website shop (WooCommerce, `services/woo.py`, Settings > «فروشگاه سایت»): the local program **polls** the site
   every N minutes (the clinic PC is not reachable from the internet). Orders -> online invoices (customer by mobile;
   a namesake without mobile gets it; else new customer), payment on the chosen account when paid, cancel/refund ->
@@ -79,7 +86,7 @@ and how to use it. Commit messages end with the attribution lines the session as
   +; stock count = exact) and sent to the product with the same SKU. Tested against `backend/tests/fake_woo.py`
   (in-memory WooCommerce); **not yet tried on the real site**.
 
-## Status (1.18.0)
+## Status (1.19.0)
 * GitHub: `tiknet10-byte/HESABDAR`, branch `claude/beauty-salon-accounting-system-9zzoep` holds the full history
   (pushed after the Claude GitHub App was installed). Work on that branch and push to it.
 * Next possible work: connect the real website and fix what differs (currency IRT/IRR, security plugins blocking
