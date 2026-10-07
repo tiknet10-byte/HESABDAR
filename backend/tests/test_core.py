@@ -1106,3 +1106,48 @@ def test_refunded_deposit_is_money_out_on_the_dashboard(client, accounts, servic
         db.commit()
         dep = db.get(Deposit, d["id"])
         assert dep.closed_at is not None and dep.refund_account_id == accounts[acc_name]
+
+
+def test_same_name_customers_ask_and_merge_everything(client, accounts, services):
+    """Same first and last name, different mobile: offered as a possible duplicate; merged on request with all
+    invoices, deposits, appointments and balance; or remembered as different people."""
+    acc = accounts["کارتخوان ملت"]
+    a = client.post("/api/customers", json={"full_name": "سارا  محمدی", "mobile": "09121110001", "code": "77001"}).json()
+    b = client.post("/api/customers", json={"full_name": "سارا محمدي", "mobile": "09121110002", "code": "77002"}).json()
+    c = client.post("/api/customers", json={"full_name": "سارا محمدی", "mobile": "09121110003"}).json()
+    # asked when adding: same name (ی/ي, extra spaces don't matter)
+    same = client.get("/api/customers/same-name", params={"name": "سارا محمدی"}).json()
+    assert {a["id"], b["id"], c["id"]} <= {x["id"] for x in same}
+    # history on both records: an unpaid invoice on a, an open deposit and an appointment on b
+    svc = services["پدیکور"]
+    client.post("/api/invoices", json={"customer_id": a["id"], "items": [{"service_id": svc["id"], "unit_price": 2_000_000}],
+                                       "payments": [{"payment_account_id": acc, "amount": 500_000}]})
+    client.post("/api/deposits", json={"customer_id": b["id"], "amount": 700_000, "payment_account_id": acc, "service_id": svc["id"]})
+    slots = client.get(f"/api/appointments/suggest?service_id={svc['id']}&count=1").json()
+    client.post("/api/appointments", json={"customer_id": b["id"], "service_id": svc["id"], "start_at": slots[0]["start_at"]})
+    group = next(g for g in client.get("/api/customers/duplicates").json() if a["id"] in [x["id"] for x in g["customers"]])
+    assert {a["id"], b["id"], c["id"]} == {x["id"] for x in group["customers"]}
+    # c is a different person
+    client.post("/api/customers/not-same", json={"ids": [a["id"], c["id"]]})
+    client.post("/api/customers/not-same", json={"ids": [b["id"], c["id"]]})
+    before_a = client.get(f"/api/customers/{a['id']}").json()
+    before_b = client.get(f"/api/customers/{b['id']}").json()
+    r = client.post("/api/customers/merge", json={"keep_id": a["id"], "drop_ids": [b["id"]]}).json()
+    assert r["other_mobiles"] == ["09121110002"] and r["other_codes"] == ["77002"]
+    assert client.get(f"/api/customers/{b['id']}").status_code == 404
+    after = client.get(f"/api/customers/{a['id']}").json()
+    for k in ("receivable", "deposits_held", "net"):  # what they owe and their open deposits simply add up
+        assert after["balance"][k] == before_a["balance"][k] + before_b["balance"][k], k
+    assert after["balance"]["receivable"] == 1_500_000 and after["balance"]["deposits_held"] == 700_000
+    assert len(after["invoices"]) == len(before_a["invoices"]) + len(before_b["invoices"])
+    assert len(after["deposits"]) == len(before_a["deposits"]) + len(before_b["deposits"])
+    # the merged record's number and code still find the person
+    found = client.get("/api/customers", params={"q": "09121110002"}).json()["items"]
+    assert [x["id"] for x in found] == [a["id"]]
+    assert client.get("/api/customers", params={"q": "77002"}).json()["items"][0]["id"] == a["id"]
+    assert client.post("/api/customers", json={"full_name": "کسی دیگر", "mobile": "09121110002"}).status_code == 409
+    # the group is resolved: a+c were marked different
+    assert not any(a["id"] in [x["id"] for x in g["customers"]] for g in client.get("/api/customers/duplicates").json())
+    # the books still balance
+    tb = client.get("/api/ledger/trial-balance").json()
+    assert tb["total_debit"] == tb["total_credit"] and tb["total_debit"] > 0

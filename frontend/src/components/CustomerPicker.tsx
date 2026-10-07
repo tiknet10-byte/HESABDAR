@@ -1,6 +1,7 @@
 import { UserPlus, UserRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
+import { SameNameHint } from "./SameName";
 
 export type CustomerChoice = { customer_id?: number; customer_name?: string; customer_mobile?: string; label?: string };
 
@@ -47,6 +48,10 @@ export default function CustomerPicker({ value, onChange }: { value: CustomerCho
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <input className="input" placeholder="نام و نام خانوادگی" value={value.customer_name ?? ""} onChange={(e) => onChange({ ...value, customer_name: e.target.value })} />
           <input className="input num" dir="ltr" placeholder="09xxxxxxxxx" value={value.customer_mobile ?? ""} onChange={(e) => onChange({ ...value, customer_mobile: e.target.value })} />
+          <div className="sm:col-span-2">
+            <SameNameHint name={value.customer_name} mobile={value.customer_mobile}
+              onPick={(c) => { setMode("search"); onChange({ customer_id: c.id, label: `${c.full_name}${c.mobile ? " · " + c.mobile : ""}${c.code ? " · کد " + c.code : ""}` }); }} />
+          </div>
         </div>
       )}
       <button type="button" className="btn btn-ghost btn-sm text-violet-600 dark:text-violet-300" onClick={() => { setMode(mode === "search" ? "new" : "search"); onChange({}); }}>

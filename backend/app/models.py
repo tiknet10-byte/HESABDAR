@@ -128,6 +128,9 @@ class Customer(TimestampMixin, Base):
     # a mobile that could not be stored: invalid / incomplete number, or one already used by another customer
     mobile_issue: Mapped[str | None] = mapped_column(String(16), nullable=True)  # invalid | duplicate | missing
     mobile_raw: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # when two records of the same person are merged, the other one's numbers and codes are kept here
+    other_mobiles: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    other_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 # ---------------------------------------------------------------- money accounts

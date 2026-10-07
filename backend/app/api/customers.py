@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import Integer, func, or_, select
+from sqlalchemy import Integer, String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
 from ..models import Appointment, Customer, Deposit, Invoice, Payment, Service, Staff, WaitlistEntry
-from ..services import accounting
+from ..services import accounting, customer_merge
 from ..services.audit import audit
 from ..services.search import fa_like
 from ..services.textutil import normalize_mobile, to_en_digits
@@ -31,6 +31,7 @@ def _c(c: Customer, extra: dict | None = None) -> dict:
     return {"id": c.id, "full_name": c.full_name, "mobile": c.mobile, "instagram": c.instagram, "whatsapp": c.whatsapp,
             "birth_date": c.birth_date, "notes": c.notes, "tags": c.tags, "source": c.source, "known_cards": c.known_cards,
             "code": c.legacy_code, "legacy_code": c.legacy_code, "mobile_issue": c.mobile_issue, "mobile_raw": c.mobile_raw,
+            "other_mobiles": c.other_mobiles or [], "other_codes": c.other_codes or [],
             "created_at": c.created_at.isoformat(), **(extra or {})}
 
 
@@ -66,7 +67,10 @@ def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "
         mob = normalize_mobile(q)
         code = to_en_digits(q).strip()
         stmt = stmt.where(or_(fa_like(Customer.full_name, q), Customer.mobile.like(f"%{mob or code}%"), Customer.instagram.like(like),
-                              Customer.legacy_code == code, Customer.mobile_raw.like(f"%{code}%")))
+                              Customer.legacy_code == code, Customer.mobile_raw.like(f"%{code}%"),
+                              # numbers / codes of duplicate records merged into this customer
+                              cast(Customer.other_mobiles, String).like(f"%{mob or code}%"),
+                              cast(Customer.other_codes, String).like(f'%"{code}"%')))
     if filter == "held":
         stmt = stmt.where(held.c.amt > 0)
     elif filter == "no_mobile":
@@ -91,7 +95,7 @@ def create_customer(body: CustomerIn, db: Session = Depends(get_db), user=Depend
     mobile = normalize_mobile(body.mobile)
     if body.mobile and not mobile:
         raise HTTPException(400, "شماره موبایل معتبر نیست")
-    if mobile and db.scalar(select(Customer).where(Customer.mobile == mobile)):
+    if mobile and (db.scalar(select(Customer).where(Customer.mobile == mobile)) or customer_merge.find_by_other_mobile(db, mobile)):
         raise HTTPException(409, "مشتری با این شماره موبایل وجود دارد")
     code = _free_code(db, body.code)
     data = body.model_dump(exclude={"code"})
@@ -111,6 +115,73 @@ def _unused(cids: list[int] | None = None):  # noqa: ANN202
     if cids is not None:
         q = q.where(Customer.id.in_(cids or [-1]))
     return q
+
+
+@router.get("/same-name")
+def same_name(name: str, exclude: int | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Customers with exactly this first and last name - asked about before adding a new one (same person?)."""
+    return customer_merge.same_name(db, name, exclude)
+
+
+@router.get("/duplicates")
+def duplicates(db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Groups of customers with the same full name (and different / missing mobiles) for the user to check."""
+    return customer_merge.duplicate_groups(db)
+
+
+class MergeIn(BaseModel):
+    keep_id: int
+    drop_ids: list[int]
+
+
+@router.post("/merge")
+def merge_customers(body: MergeIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+    """Same person registered more than once: everything of the others moves to `keep_id`."""
+    keep = db.get(Customer, body.keep_id) or _404()
+    done = []
+    for did in dict.fromkeys(body.drop_ids):
+        if did == keep.id:
+            continue
+        drop = db.get(Customer, did) or _404()
+        done.append(customer_merge.merge(db, keep, drop, user=user))
+    db.commit()
+    return {**_c(keep), "merged": done}
+
+
+class IdsIn(BaseModel):
+    ids: list[int]
+
+
+@router.post("/not-same")
+def not_same(body: IdsIn, db: Session = Depends(get_db), user=Depends(require("write"))):
+    """Same name, different people: don't suggest them as duplicates again."""
+    n = customer_merge.mark_different(db, body.ids, user=user)
+    db.commit()
+    return {"ok": True, "pairs": n}
+
+
+class MobileIn(BaseModel):
+    mobile: str
+
+
+@router.post("/{cid}/mobiles")
+def add_mobile(cid: int, body: MobileIn, db: Session = Depends(get_db), user=Depends(require("write"))):
+    """Another number of the same person (e.g. chosen as 'same person' when adding a customer with a new number)."""
+    c = db.get(Customer, cid) or _404()
+    m = normalize_mobile(body.mobile)
+    if not m:
+        raise HTTPException(400, "شماره موبایل معتبر نیست")
+    owner = db.scalar(select(Customer).where(Customer.mobile == m)) or customer_merge.find_by_other_mobile(db, m)
+    if owner is not None and owner.id != c.id:
+        raise HTTPException(409, f"این شماره متعلق به «{owner.full_name}» است؛ اگر یک نفرند، از «مشتریان هم‌نام» یکی کنید")
+    if owner is None:
+        if not c.mobile:
+            c.mobile, c.mobile_issue, c.mobile_raw = m, None, None
+        else:
+            c.other_mobiles = [*(c.other_mobiles or []), m]
+        audit(db, "customer.add_mobile", "customer", c.id, {"mobile": m}, user=user)
+    db.commit()
+    return _c(c)
 
 
 @router.get("/cleanup")
@@ -202,9 +273,12 @@ def update_customer(cid: int, body: CustomerIn, db: Session = Depends(get_db), u
     mobile = normalize_mobile(body.mobile)
     if body.mobile and not mobile:
         raise HTTPException(400, "شماره موبایل معتبر نیست")
-    other = db.scalar(select(Customer).where(Customer.mobile == mobile, Customer.id != cid)) if mobile else None
-    if other:
+    other = (db.scalar(select(Customer).where(Customer.mobile == mobile, Customer.id != cid))
+             or customer_merge.find_by_other_mobile(db, mobile)) if mobile else None
+    if other and other.id != cid:
         raise HTTPException(409, f"این شماره متعلق به «{other.full_name}» است")
+    if mobile and mobile in (c.other_mobiles or []):  # one of their extra numbers becomes the main one
+        c.other_mobiles = [x for x in [*(c.other_mobiles or []), c.mobile] if x and x != mobile] or None
     if body.code is not None and to_en_digits(body.code).strip() != (c.legacy_code or ""):
         c.legacy_code = _free_code(db, body.code, cid)
     for k, v in body.model_dump(exclude={"code"}).items():

@@ -204,6 +204,11 @@ def find_customer(db: Session, mobile: str | None = None, instagram: str | None 
         c = db.scalar(select(Customer).where(Customer.mobile == m))
         if c:
             return c
+        from .customer_merge import find_by_other_mobile
+
+        c = find_by_other_mobile(db, m)  # a number of a merged duplicate record
+        if c:
+            return c
     if instagram:
         handle = instagram.lstrip("@").lower()
         return db.scalar(select(Customer).where(func.lower(Customer.instagram) == handle))

@@ -661,7 +661,13 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
         c = None
         if code:  # the customer code links the old software's reports (deposits, receipts, customers) together
             c = db.scalar(select(Customer).where(Customer.legacy_code == code))
-            if c is not None and c.source != "import" and not same_person(c, row):
+            if c is None:  # the code of a duplicate record that was merged into another customer
+                from .customer_merge import find_by_other_code
+                c = find_by_other_code(db, code)
+                merged_code = c is not None
+            else:
+                merged_code = False
+            if c is not None and not merged_code and c.source != "import" and not same_person(c, row):
                 # that code was given automatically in this system to someone else: the old code wins, theirs moves
                 c.legacy_code = None
                 moved.append(c)
@@ -672,7 +678,10 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
                 m = accounting.find_customer(db, row["mobile"])
                 if m is not None and m.source != "import" and same_person(m, row):
                     c = m
-                    c.legacy_code = code
+                    if m.mobile == row["mobile"]:
+                        c.legacy_code = code
+                    else:  # found by the number of a merged duplicate: keep its own code, remember this one too
+                        c.other_codes = list(dict.fromkeys([*(c.other_codes or []), code]))
         elif row["mobile"]:
             c = accounting.find_customer(db, row["mobile"])
         elif row["name"]:
