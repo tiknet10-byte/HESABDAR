@@ -31,6 +31,7 @@ from ..services.accounting import AccountingError
 from ..services.search import fa_like
 from ..services.textutil import normalize_mobile, to_en_digits
 from ..services.audit import audit
+from ..core.security import has_permission
 from .deps import require
 
 router = APIRouter(prefix="/api", tags=["finance"])
@@ -80,8 +81,10 @@ def _appt(db: Session, a: Appointment, customer: str | None = None) -> dict:
             "quoted_price": a.quoted_price, "notes": a.notes, "invoice_id": a.invoice_id,
             "original_start_at": a.original_start_at.isoformat(timespec="minutes") if a.original_start_at else None,
             "time_unknown": bool(a.time_unknown),
-            "deposits": [{"id": d.id, "amount": d.amount, "status": d.status, "received_at": d.received_at.isoformat(timespec="minutes")}
-                         for d in deps]}
+            "deposits": [{"id": d.id, "amount": d.amount, "status": d.status, "received_at": d.received_at.isoformat(timespec="minutes"),
+                          "payment_account_id": d.payment_account_id} for d in deps],
+            # still booked although every deposit of it was refunded / forfeited (usually the customer cancelled)
+            "deposit_gone": a.status == "booked" and bool(deps) and all(d.status in ("refunded", "forfeited") for d in deps)}
 
 
 def _ensure_bookable(db: Session, service_id: int | None, staff_id: int | None, start_at: datetime, *, customer_id: int | None,
@@ -115,23 +118,31 @@ def _book(db: Session, customer: Customer, service_id: int | None, staff_id: int
 
 @router.get("/appointments")
 def appointments(start: date | None = None, end: date | None = None, customer_id: int | None = None, status: str | None = None,
-                 line_id: int | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
-    """Appointments in a date range; with customer_id, all of that customer's (open) appointments."""
-    q = select(Appointment, Customer.full_name, Customer.mobile).join(Customer, Customer.id == Appointment.customer_id)
+                 line_id: int | None = None, q: str = "", db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Appointments in a date range; with customer_id, all of that customer's (open) appointments; with q, the
+    appointments of customers matching a name, mobile or customer code (last year onwards). status may be a list: a,b."""
+    query = q
+    q = select(Appointment, Customer.full_name, Customer.mobile, Customer.legacy_code).join(Customer, Customer.id == Appointment.customer_id)
+    if query.strip():
+        digits = to_en_digits(query).strip()
+        q = q.where(or_(fa_like(Customer.full_name, query), Customer.legacy_code == digits,
+                        *([Customer.mobile.like(f"%{digits.lstrip('0')}%")] if digits.isdigit() and len(digits) >= 4 else [])))
     if line_id:
         # by service line; an appointment without a service (brought over with only a line/staff) follows its staff's line
         q = q.where(or_(Appointment.service_id.in_(select(Service.id).where(Service.line_id == line_id)),
                         Appointment.service_id.is_(None) & Appointment.staff_id.in_(select(Staff.id).where(Staff.line_id == line_id))))
     if customer_id:
         q = q.where(Appointment.customer_id == customer_id)
+    elif query.strip() and not start and not end:
+        q = q.where(Appointment.start_at >= datetime.combine(date.today() - timedelta(days=365), datetime.min.time()))
     else:
         s = datetime.combine(start or date.today() - timedelta(days=7), datetime.min.time())
         e = datetime.combine(end or date.today() + timedelta(days=60), datetime.max.time())
         q = q.where(Appointment.start_at.between(s, e))
     if status:
-        q = q.where(Appointment.status == status)
-    rows = db.execute(q.order_by(Appointment.start_at)).all()
-    out = [{**_appt(db, a, n), "customer_mobile": m} for a, n, m in rows]
+        q = q.where(Appointment.status.in_([x for x in status.split(",") if x]))
+    rows = db.execute(q.order_by(Appointment.start_at).limit(1500)).all()
+    out = [{**_appt(db, a, n), "customer_mobile": m, "customer_code": code} for a, n, m, code in rows]
     # flag overlaps that already exist in the data (e.g. created before the strict rules), so they can be fixed
     active = [(x, datetime.fromisoformat(x["start_at"]), datetime.fromisoformat(x["start_at"]) + timedelta(minutes=x["duration_minutes"] or 60))
               for x in out if x["status"] in scheduling.OCCUPYING and not x["original_start_at"] and not x["time_unknown"]]
@@ -192,6 +203,7 @@ def create_appointment(body: AppointmentIn, db: Session = Depends(get_db), user=
 
 
 class AppointmentUpdate(BaseModel):
+    customer_id: int | None = None  # the appointment was registered for the wrong customer
     service_id: int | None = None
     staff_id: int | None = None
     start_at: datetime | None = None
@@ -211,6 +223,15 @@ def edit_appointment(aid: int, body: AppointmentUpdate, db: Session = Depends(ge
     timing = {"service_id", "staff_id", "start_at", "duration_minutes"} & data.keys()
     if timing and a.status != "booked":
         raise HTTPException(400, "فقط نوبت‌های رزرو (انجام‌نشده) قابل جابه‌جایی هستند")
+    if data.get("customer_id") and data["customer_id"] != a.customer_id:
+        if a.invoice_id:
+            raise HTTPException(400, "این نوبت فاکتور دارد؛ مشتری آن قابل تغییر نیست")
+        _get(db, Customer, data["customer_id"], "مشتری")
+        # the old customer's deposits don't follow the appointment to someone else: they stay open for that customer
+        for d in db.scalars(select(Deposit).where(Deposit.appointment_id == a.id, Deposit.customer_id != data["customer_id"])):
+            d.appointment_id = None
+    elif "customer_id" in data:
+        data.pop("customer_id")
     for k, v in data.items():
         setattr(a, k, v)
     if "start_at" in data:
@@ -225,13 +246,19 @@ def edit_appointment(aid: int, body: AppointmentUpdate, db: Session = Depends(ge
                          exclude_id=a.id, allow_outside_hours=allow)
     audit(db, "appointment.update", "appointment", a.id, {k: str(v) for k, v in data.items()}, user=user)
     db.commit()
-    return _appt(db, a)
+    c = db.get(Customer, a.customer_id)
+    return {**_appt(db, a, c.full_name), "customer_mobile": c.mobile}
 
 
 @router.patch("/appointments/{aid}")
-def update_appointment(aid: int, status: str, db: Session = Depends(get_db), user=Depends(require("write"))):
+def update_appointment(aid: int, status: str, deposits: str = "keep", refund_account_id: int | None = None,
+                       db: Session = Depends(get_db), user=Depends(require("write"))):
+    """Change the status. When an appointment with open deposits is cancelled or missed, `deposits` says what happens
+    to the money: keep (stays the customer's open deposit for a next booking), refund (paid back) or forfeit."""
     if status not in ("booked", "done", "cancelled", "no_show"):
         raise HTTPException(400, "وضعیت نامعتبر")
+    if deposits not in ("keep", "refund", "forfeit"):
+        raise HTTPException(400, "انتخاب بیعانه نامعتبر است")
     a = _get(db, Appointment, aid, "نوبت")
     if status == "booked" and a.status != "booked":
         # re-activating a cancelled / no-show appointment takes its slot back: it must still be free and in the future
@@ -239,11 +266,51 @@ def update_appointment(aid: int, status: str, db: Session = Depends(get_db), use
                          exclude_id=a.id)
     was_booked = a.status == "booked"
     a.status = status
-    audit(db, "appointment.status", "appointment", a.id, {"status": status}, user=user)
+    settled = []
+    if status in ("cancelled", "no_show"):
+        held = list(db.scalars(select(Deposit).where(Deposit.appointment_id == a.id, Deposit.status == "held")))
+        if held and deposits != "keep" and not has_permission(user.role, "finance"):
+            raise HTTPException(403, "استرداد یا سوخت بیعانه فقط با دسترسی مالی ممکن است؛ «نزد سالن بماند» را انتخاب کنید")
+        for d in held:
+            if deposits == "keep":
+                d.appointment_id = None  # free for the customer's next booking
+            else:
+                try:
+                    accounting.close_deposit(db, d, deposits, db.get(PaymentAccount, refund_account_id) if refund_account_id else None,
+                                             user=user)
+                except AccountingError as exc:
+                    db.rollback()
+                    raise HTTPException(400, str(exc)) from exc
+            settled.append({"id": d.id, "amount": d.amount, "result": deposits})
+    audit(db, "appointment.status", "appointment", a.id, {"status": status, "deposits": deposits if settled else None}, user=user)
     db.commit()
     # a cancelled future appointment frees its time: tell the UI so it can offer it to the waiting (VIP) list
     freed = _freed_slot(db, a, a.start_at) if status == "cancelled" and was_booked else None
-    return {"ok": True, "freed": freed}
+    return {"ok": True, "freed": freed, "deposits": settled}
+
+
+@router.delete("/appointments/{aid}")
+def delete_appointment(aid: int, db: Session = Depends(get_db), user=Depends(require("write"))):
+    """Remove an appointment registered by mistake. Its deposits are kept (they become the customer's open deposits)."""
+    a = _get(db, Appointment, aid, "نوبت")
+    if a.invoice_id:
+        raise HTTPException(400, "این نوبت فاکتور دارد و حذف نمی‌شود؛ اگر اشتباه است، اول فاکتور را باطل کنید")
+    if a.status == "done":
+        raise HTTPException(400, "نوبت انجام‌شده جزو سوابق مشتری است و حذف نمی‌شود")
+    freed = _freed_slot(db, a, a.start_at) if a.status == "booked" else None
+    kept = 0
+    for d in db.scalars(select(Deposit).where(Deposit.appointment_id == a.id)):
+        d.appointment_id = None
+        kept += d.status == "held"
+    for w in db.scalars(select(WaitlistEntry).where(WaitlistEntry.appointment_id == a.id)):
+        w.appointment_id = None
+    c = db.get(Customer, a.customer_id)
+    svc = db.get(Service, a.service_id) if a.service_id else None
+    audit(db, "appointment.delete", "appointment", a.id, {"customer": c.full_name if c else a.customer_id, "start_at": a.start_at.isoformat(),
+                                                          "service": svc.name if svc else None, "status": a.status}, user=user)
+    db.delete(a)
+    db.commit()
+    return {"ok": True, "freed": freed, "deposits_kept": kept}
 
 
 def _freed_slot(db: Session, a: Appointment, start_at: datetime) -> dict | None:
@@ -279,6 +346,7 @@ class DepositIn(BaseModel):
 class DepositCloseIn(BaseModel):
     action: str  # refund | forfeit
     refund_account_id: int | None = None
+    appointment: str = "auto"  # its booked appointment: auto (cancel unless another open deposit holds it) | cancel | keep
 
 
 def _dep(d: Deposit, name: str | None = None, db: Session | None = None) -> dict:
@@ -481,8 +549,11 @@ def close_deposit(did: int, body: DepositCloseIn, db: Session = Depends(get_db),
         accounting.close_deposit(db, d, body.action, db.get(PaymentAccount, body.refund_account_id) if body.refund_account_id else None, user=user)
     except AccountingError as exc:
         raise HTTPException(400, str(exc)) from exc
+    a = accounting.follow_appointment(db, d, body.action, body.appointment, user=user)
     db.commit()
-    return _dep(d)
+    freed = _freed_slot(db, a, a.start_at) if a is not None and a.status == "cancelled" else None
+    return {**_dep(d), "appointment_change": {"id": a.id, "status": a.status, "start_at": a.start_at.isoformat(timespec="minutes")} if a else None,
+            "freed": freed}
 
 
 @router.post("/deposits/{did}/service")

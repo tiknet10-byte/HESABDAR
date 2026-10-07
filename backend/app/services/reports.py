@@ -153,12 +153,17 @@ def agenda(db: Session, now: datetime | None = None) -> dict:
     past_open = db.scalar(select(func.count(Appointment.id)).where(Appointment.status == "booked", Appointment.start_at < day)) or 0
     unknown_time = db.scalar(select(func.count(Appointment.id)).where(Appointment.status == "booked", Appointment.time_unknown.is_(True),
                                                                      Appointment.start_at >= day)) or 0
+    # booked although all of their deposits were refunded / forfeited (the customer most likely cancelled)
+    has_dep = select(Deposit.appointment_id).where(Deposit.appointment_id.is_not(None))
+    open_dep = select(Deposit.appointment_id).where(Deposit.appointment_id.is_not(None), Deposit.status.in_(("held", "applied")))
+    deposit_gone = db.scalar(select(func.count(Appointment.id)).where(Appointment.status == "booked", Appointment.id.in_(has_dep),
+                                                                     Appointment.id.not_in(open_dep))) or 0
     tomorrow_n = db.scalar(select(func.count(Appointment.id)).where(Appointment.status == "booked", Appointment.start_at >= tomorrow,
                                                                    Appointment.start_at < tomorrow + timedelta(days=1))) or 0
     return {"today": today, "upcoming": upcoming, "tomorrow_count": tomorrow_n,
             "todo": {"overdue_deposits": [overdue[0], int(overdue[1])], "deposits_without_appointment": [no_appt[0], int(no_appt[1])],
                      "unpaid_invoices": [unpaid[0], int(unpaid[1])], "past_open_appointments": past_open,
-                     "unknown_time_appointments": unknown_time}}
+                     "unknown_time_appointments": unknown_time, "deposit_gone_appointments": deposit_gone}}
 
 
 def daily_series(db: Session, start: date | None = None, end: date | None = None) -> list[dict]:

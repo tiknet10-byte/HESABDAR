@@ -6,6 +6,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { api } from "../lib/api";
 import ErrorBoundary from "./ErrorBoundary";
+import { GuideButton } from "./Guide";
 import { FreedSlotHost } from "./Waitlist";
 import { can, useAuth } from "../lib/hooks";
 import { jlong, ROLES } from "../lib/format";
@@ -134,6 +135,7 @@ export default function Layout() {
             <span className="muted hidden text-sm sm:inline">{jlong()}</span>
           </div>
           <div className="flex items-center gap-1">
+            <GuideButton />
             <NavLink to="/assistant" className="btn btn-sm btn-primary"><Bot size={16} /><span className="hidden sm:inline">بپرس</span></NavLink>
             <NavLink to="/settings?tab=alerts" className="btn btn-ghost btn-sm relative" aria-label="هشدارها">
               <Bell size={18} />

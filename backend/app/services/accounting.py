@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..core.events import bus
 from ..models import (
+    Appointment,
     Customer,
     Deposit,
     Expense,
@@ -320,6 +321,24 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
         raise AccountingError("unknown action")
     audit(db, f"deposit.{action}", "deposit", dep.id, {"amount": dep.amount}, user=user)
     return dep
+
+
+def follow_appointment(db: Session, dep: Deposit, action: str, mode: str = "auto", user=None) -> Appointment | None:
+    """After a deposit is refunded or forfeited, its booked appointment usually goes too: a refund means the customer
+    cancelled, a forfeit means they didn't come (or cancelled too late). mode: auto | cancel | keep.
+    auto keeps the appointment only while another of its deposits is still open."""
+    if mode == "keep" or not dep.appointment_id:
+        return None
+    a = db.get(Appointment, dep.appointment_id)
+    if a is None or a.status != "booked":
+        return None
+    others = db.scalar(select(func.count(Deposit.id)).where(Deposit.appointment_id == a.id, Deposit.id != dep.id,
+                                                             Deposit.status == "held")) or 0
+    if mode == "auto" and others:
+        return None
+    a.status = "no_show" if action == "forfeit" and a.start_at <= local_now() else "cancelled"
+    audit(db, "appointment.status", "appointment", a.id, {"status": a.status, "because": f"deposit.{action}", "deposit": dep.id}, user=user)
+    return a
 
 
 # --------------------------------------------------------------------- invoices

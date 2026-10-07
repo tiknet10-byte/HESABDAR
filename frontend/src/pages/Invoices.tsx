@@ -431,7 +431,7 @@ export default function Invoices() {
   useEffect(() => setPage(0), [status, period, sort, lineId, dq, start, end]);
   const qs = new URLSearchParams({ q: dq, status, sort, limit: String(PAGE), offset: String(page * PAGE), ...(start ? { start, end } : {}), ...(lineId ? { line_id: String(lineId) } : {}) });
   const { data, reload } = useApi<any>(`/api/invoices/search?${qs}`, [qs.toString()]);
-  const [view, setView] = useState<number | null>(null);
+  const [view, setView] = useState<number | null>(params.get("open") ? Number(params.get("open")) : null); // ?open=<id> from other pages
   const open = params.get("new") === "1";
   const st = data?.stats;
   const pages = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE));

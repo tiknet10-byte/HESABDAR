@@ -24,7 +24,9 @@ const hm = (iso: string) => faDigits(iso.slice(11, 16));
 const addMin = (iso: string, m: number) => toLocalIso(new Date(parseLocal(iso).getTime() + m * 60000));
 
 /** Six-month booking guide: per line, every day coloured by how booked it is; click a day for its appointments. */
-export default function BookingCalendar({ refresh, onBook }: { refresh: number; onBook: (preset: { service_id?: number; start_at?: string }) => void }) {
+export default function BookingCalendar({ refresh, onBook, onOpen }: {
+  refresh: number; onBook: (preset: { service_id?: number; start_at?: string }) => void; onOpen?: (a: any) => void;
+}) {
   const lines = useApi<any[]>("/api/lines").data ?? [];
   const services = useApi<any[]>("/api/services").data ?? [];
   const [lineId, setLineId] = useState<number>(0);
@@ -122,7 +124,7 @@ export default function BookingCalendar({ refresh, onBook }: { refresh: number; 
                 );
               })}
             </div>
-            <DayPanel lineId={lineId} day={cal.days.find((d) => d.date === day)} services={lineServices} onBook={onBook} refresh={refresh} />
+            <DayPanel lineId={lineId} day={cal.days.find((d) => d.date === day)} services={lineServices} onBook={onBook} onOpen={onOpen} refresh={refresh} />
           </div>
         </>
       )}
@@ -133,7 +135,9 @@ export default function BookingCalendar({ refresh, onBook }: { refresh: number; 
   );
 }
 
-function DayPanel({ lineId, day, services, onBook, refresh }: { lineId: number; day?: Day; services: any[]; onBook: (p: { service_id?: number; start_at?: string }) => void; refresh: number }) {
+function DayPanel({ lineId, day, services, onBook, onOpen, refresh }: {
+  lineId: number; day?: Day; services: any[]; onBook: (p: { service_id?: number; start_at?: string }) => void; onOpen?: (a: any) => void; refresh: number;
+}) {
   const [list, setList] = useState<any[] | null>(null);
   const [serviceId, setServiceId] = useState<number>(0);
   const [slots, setSlots] = useState<any[]>([]);
@@ -170,11 +174,12 @@ function DayPanel({ lineId, day, services, onBook, refresh }: { lineId: number; 
       </div>
 
       <div>
-        <div className="label">نوبت‌های این روز ({faDigits(active.length)})</div>
+        <div className="label">نوبت‌های این روز ({faDigits(active.length)}) <span className="muted font-normal">· برای تغییر، لغو یا حذف روی نوبت بزنید</span></div>
         {list === null ? <div className="muted text-xs">…</div> : list.length === 0 ? <div className="muted text-xs">نوبتی ثبت نشده است.</div> : (
           <div className="space-y-1.5">
             {list.map((a) => (
-              <div key={a.id} className={`flex items-center justify-between gap-2 rounded-xl px-2.5 py-1.5 text-sm ${a.status === "cancelled" ? "opacity-50" : ""}`} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
+              <button type="button" key={a.id} onClick={() => onOpen?.(a)} title="جزئیات، تغییر، لغو یا حذف این نوبت"
+                className={`flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-1.5 text-right text-sm transition hover:shadow-md ${a.status === "cancelled" ? "opacity-50" : ""}`} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
                 <div className="flex items-center gap-2">
                   {a.time_unknown
                     ? <span className="rounded-lg bg-amber-500/15 px-1.5 py-0.5 text-xs font-bold text-amber-700 dark:text-amber-300">ساعت نامشخص</span>
@@ -185,7 +190,7 @@ function DayPanel({ lineId, day, services, onBook, refresh }: { lineId: number; 
                   </div>
                 </div>
                 <Badge status={a.status} />
-              </div>
+              </button>
             ))}
           </div>
         )}

@@ -5,6 +5,7 @@ import BookingFields, { type BookingState } from "../components/Booking";
 import StaffSelect from "../components/StaffSelect";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
 import JalaliPicker from "../components/JalaliPicker";
+import { announceFreed } from "../components/Waitlist";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Stat, Tabs } from "../components/ui";
 import { api } from "../lib/api";
 import { ACCOUNT_KINDS, cmoney, money, num, svcLabel } from "../lib/format";
@@ -201,13 +202,18 @@ function DepositView({ id, onChange }: { id: number; onChange: () => void }) {
   const [booking, setBooking] = useState(false);
   const [refund, setRefund] = useState(false);
   const [refundAcc, setRefundAcc] = useState(0);
+  const [cancelAppt, setCancelAppt] = useState(true);
   if (!d) return <Loading />;
   const refreshAll = () => { reload(); onChange(); };
+  const booked = d.appointment?.status === "booked";
   async function close(action: string) {
-    if (action === "forfeit" && !confirm("بیعانه سوخت شود و به درآمد منتقل گردد؟ (معمولاً وقتی مشتری نیامده)")) return;
+    if (action === "forfeit" && !confirm(`بیعانه سوخت شود و به درآمد منتقل گردد؟ (معمولاً وقتی مشتری نیامده)${booked ? "\n\nنوبت این بیعانه هم «نیامد» (یا اگر هنوز نرسیده «لغو») ثبت می‌شود." : ""}`)) return;
     try {
-      await api(`/api/deposits/${id}/close`, { body: { action, refund_account_id: action === "refund" ? (refundAcc || d.payment_account_id) : null } });
-      toast(action === "refund" ? "بیعانه مسترد شد" : "بیعانه سوخت شد");
+      const r = await api(`/api/deposits/${id}/close`, { body: { action, refund_account_id: action === "refund" ? (refundAcc || d.payment_account_id) : null,
+        appointment: action === "refund" && !cancelAppt ? "keep" : "auto" } });
+      const ac = r.appointment_change;
+      toast((action === "refund" ? "بیعانه مسترد شد" : "بیعانه سوخت شد") + (ac ? ` · نوبت ${formatJ(ac.start_at)} ${ac.status === "no_show" ? "«نیامد» ثبت شد" : "لغو شد"}` : ""));
+      announceFreed([r.freed]);
       setRefund(false);
       refreshAll();
     } catch (e: any) { toast(e.message, "error"); }
@@ -309,6 +315,13 @@ function DepositView({ id, onChange }: { id: number; onChange: () => void }) {
               {accounts.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
             </select>
           </Field>
+          {booked && (
+            <label className="flex items-start gap-2 rounded-xl bg-white/50 p-2 text-sm dark:bg-black/20">
+              <input type="checkbox" className="mt-1" checked={cancelAppt} onChange={(e) => setCancelAppt(e.target.checked)} />
+              <span><b>نوبت این بیعانه ({formatJ(d.appointment.start_at)}) هم لغو شود</b>
+                <span className="muted block text-xs">معمولاً وقتی بیعانه پس داده می‌شود یعنی مشتری نمی‌آید. اگر مشتری می‌آید و فقط پولش برگشته، تیک را بردارید.</span></span>
+            </label>
+          )}
           <button className="btn btn-primary w-full" onClick={() => close("refund")}>تأیید استرداد {money(d.amount)}</button>
         </div>
       )}

@@ -1024,3 +1024,48 @@ def test_import_suggests_lookalike_service_and_uses_file_line(client):
                                                                               "مزوتراپی واردات": "new"}})
     new = [s for s in client.get("/api/services").json() if s["name"] == "مزوتراپی واردات"][0]
     assert new["line_id"] == line["id"] and new["code"].startswith(line["code"])
+
+
+def test_refunded_deposit_cancels_its_appointment_and_easy_appointment_changes(client, accounts, services):
+    """A deposit refunded -> its appointment is cancelled (the bug: it stayed booked). Appointments can be moved to
+    another customer, cancelled with a choice for the deposit, brought back and deleted when registered by mistake."""
+    svc = services["پدیکور"]
+    slots = client.get(f"/api/appointments/suggest?service_id={svc['id']}&count=6").json()
+    acc = accounts["کارتخوان ملت"]
+    d = client.post("/api/deposits", json={"customer_name": "میلاد تهمتن", "customer_mobile": "09121110099", "amount": 500_000,
+                                           "payment_account_id": acc, "service_id": svc["id"], "book_at": slots[0]["start_at"]}).json()
+    r = client.post(f"/api/deposits/{d['id']}/close", json={"action": "refund"}).json()
+    assert r["status"] == "refunded" and r["appointment_change"]["status"] == "cancelled"
+    assert client.get(f"/api/appointments/{d['appointment_id']}").json()["status"] == "cancelled"
+    # the appointment can be brought back (the deposit stays refunded) - it is then flagged on the dashboard
+    client.patch(f"/api/appointments/{d['appointment_id']}?status=booked")
+    listed = [a for a in client.get("/api/appointments?q=تهمتن").json() if a["id"] == d["appointment_id"]][0]
+    assert listed["deposit_gone"] is True and listed["customer_code"]
+    assert client.get("/api/dashboard").json()["agenda"]["todo"]["deposit_gone_appointments"] >= 1
+    # keep: refund without touching the appointment
+    d2 = client.post("/api/deposits", json={"customer_id": d["customer_id"], "amount": 300_000, "payment_account_id": acc,
+                                            "service_id": svc["id"], "book_at": slots[1]["start_at"]}).json()
+    assert client.post(f"/api/deposits/{d2['id']}/close", json={"action": "refund", "appointment": "keep"}).json()["appointment_change"] is None
+    assert client.get(f"/api/appointments/{d2['appointment_id']}").json()["status"] == "booked"
+    # cancelling an appointment: its open deposit stays with the customer (unlinked) or is refunded
+    d3 = client.post("/api/deposits", json={"customer_id": d["customer_id"], "amount": 200_000, "payment_account_id": acc,
+                                            "service_id": svc["id"], "book_at": slots[2]["start_at"]}).json()
+    c = client.patch(f"/api/appointments/{d3['appointment_id']}?status=cancelled&deposits=keep").json()
+    assert c["deposits"][0]["result"] == "keep"
+    dep3 = client.get(f"/api/deposits/{d3['id']}").json()
+    assert dep3["status"] == "held" and dep3["appointment"] is None
+    # wrong customer chosen: move the appointment to the right one
+    other = client.post("/api/customers", json={"full_name": "مشتری درست", "mobile": "09121110098"}).json()
+    moved = client.put(f"/api/appointments/{d2['appointment_id']}", json={"customer_id": other["id"]}).json()
+    assert moved["customer_id"] == other["id"] and moved["customer"] == "مشتری درست"
+    # registered by mistake: delete; a deposit on it is kept as the customer's open deposit
+    a4 = client.post("/api/appointments", json={"customer_id": d["customer_id"], "service_id": svc["id"], "start_at": slots[3]["start_at"],
+                                                "deposit_ids": [d3["id"]]}).json()
+    gone = client.delete(f"/api/appointments/{a4['id']}").json()
+    assert gone["ok"] and gone["deposits_kept"] == 1
+    assert client.get(f"/api/appointments/{a4['id']}").status_code == 404
+    assert client.get(f"/api/deposits/{d3['id']}").json()["status"] == "held"
+    # done appointments (history) are not deleted
+    hist = client.post("/api/appointments", json={"customer_id": d["customer_id"], "service_id": svc["id"], "start_at": slots[4]["start_at"]}).json()
+    client.patch(f"/api/appointments/{hist['id']}?status=done")
+    assert client.delete(f"/api/appointments/{hist['id']}").status_code == 400

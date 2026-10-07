@@ -77,10 +77,11 @@ function Agenda({ a }: { a: any }) {
   const todo = a.todo;
   const items = [
     { n: todo.overdue_deposits[0], amt: todo.overdue_deposits[1], text: "بیعانهٔ باز با نوبت گذشته", hint: "فاکتور، استرداد یا سوخت", to: "/deposits?filter=overdue", tone: "bg-rose-500/10 text-rose-700 dark:text-rose-300", icon: <HandCoins size={16} /> },
-    { n: todo.past_open_appointments, text: "نوبت گذشته که وضعیتش ثبت نشده", hint: "انجام شد / نیامد / لغو", to: "/appointments?tab=list", tone: "bg-amber-500/10 text-amber-700 dark:text-amber-300", icon: <CalendarX size={16} /> },
+    { n: todo.deposit_gone_appointments ?? 0, text: "نوبت فعال با بیعانهٔ پس‌داده‌شده", hint: "لغو نوبت یا بیعانهٔ جدید", to: "/appointments?tab=list&filter=deposit_gone", tone: "bg-rose-500/10 text-rose-700 dark:text-rose-300", icon: <CalendarX size={16} /> },
+    { n: todo.past_open_appointments, text: "نوبت گذشته که وضعیتش ثبت نشده", hint: "انجام شد / نیامد / لغو", to: "/appointments?tab=list&period=past", tone: "bg-amber-500/10 text-amber-700 dark:text-amber-300", icon: <CalendarX size={16} /> },
     { n: todo.unpaid_invoices[0], amt: todo.unpaid_invoices[1], text: "فاکتور با مانده پرداخت‌نشده", hint: "پیگیری دریافت", to: "/invoices?status=unpaid", tone: "bg-orange-500/10 text-orange-700 dark:text-orange-300", icon: <Receipt size={16} /> },
     { n: todo.deposits_without_appointment[0], amt: todo.deposits_without_appointment[1], text: "بیعانهٔ باز بدون نوبت", hint: "تعیین نوبت", to: "/deposits?filter=no_appointment", tone: "bg-violet-500/10 text-violet-700 dark:text-violet-300", icon: <CalendarClock size={16} /> },
-    { n: todo.unknown_time_appointments, text: "نوبت با ساعت نامشخص", hint: "تعیین ساعت", to: "/appointments?tab=list", tone: "bg-sky-500/10 text-sky-700 dark:text-sky-300", icon: <Clock size={16} /> },
+    { n: todo.unknown_time_appointments, text: "نوبت با ساعت نامشخص", hint: "تعیین ساعت", to: "/appointments?tab=list&filter=unknown_time", tone: "bg-sky-500/10 text-sky-700 dark:text-sky-300", icon: <Clock size={16} /> },
   ].filter((x) => x.n > 0);
   return (
     <div className="grid gap-4 lg:grid-cols-3">
