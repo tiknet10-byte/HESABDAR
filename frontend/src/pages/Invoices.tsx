@@ -30,7 +30,8 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   const [check, setCheck] = useState<{ warnings: string[]; held_deposits: any[] }>({ warnings: [], held_deposits: [] });
   const [issuedAt, setIssuedAt] = useState(toLocalIso(new Date()));
   const [channel, setChannel] = useState<"in_person" | "online">("in_person");
-  const listed = (p: any, ch = channel) => (ch === "online" && p.online_price ? p.online_price : p.sale_price);
+  // the price it was last sold at (in person / on the website); a new list price in the product replaces it
+  const listed = (p: any, ch = channel) => (ch === "online" ? p.price_online : p.price_in_person) ?? (ch === "online" && p.online_price ? p.online_price : p.sale_price);
   const switchChannel = (ch: "in_person" | "online") => {
     setChannel(ch);
     setItems((all) => all.map((it) => (it.product ? { ...it, unit_price: listed(it.product, ch) } : it)));
@@ -419,7 +420,7 @@ function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
     <div className="space-y-4 text-sm">
       <div className="flex flex-wrap items-start justify-between gap-2 rounded-2xl bg-gradient-to-l from-pink-500/10 to-violet-600/10 p-4">
         <div>
-          <div className="num text-lg font-extrabold">{data.number}</div>
+          <div className="num text-lg font-extrabold">{data.number}{data.source === "woocommerce" && <span className="badge mr-2 bg-sky-500/10 text-xs text-sky-700 dark:text-sky-300">{data.notes?.split(" - ")[0] || "سفارش سایت"}</span>}</div>
           <div className="font-semibold">{data.customer} {data.customer_code && <span className="num muted text-xs">کد {data.customer_code}</span>}</div>
           <div className="muted text-xs">{data.customer_mobile && <span className="num" dir="ltr">{data.customer_mobile} · </span>}{jdatetime(data.issued_at)}</div>
         </div>
@@ -461,6 +462,7 @@ function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
         voiding ? (
           <div className="space-y-2 rounded-2xl bg-rose-500/10 p-3">
             <div className="font-bold text-rose-700 dark:text-rose-300">ابطال فاکتور {data.number}</div>
+            {data.source === "woocommerce" && <div className="rounded-xl bg-amber-500/15 p-2 text-xs font-semibold text-amber-800 dark:text-amber-200">این فاکتور یک سفارش سایت است. بهتر است سفارش را در خود سایت «لغو» یا «مسترد» کنید؛ این‌جا خودکار باطل می‌شود و موجودی سایت هم درست می‌ماند. ابطال این‌جا به سایت خبر داده نمی‌شود.</div>}
             <div className="text-xs">سند فاکتور و سهم پرسنل معکوس می‌شود{data.deposits.length ? "، بیعانه‌های کسرشده دوباره باز می‌شوند" : ""} و نوبت‌های این فاکتور دوباره «رزرو» می‌شوند.</div>
             {cashPaid > 0 && (
               <div className="space-y-1">
@@ -570,7 +572,7 @@ export default function Invoices() {
               <tbody>
                 {data.items.map((i: any) => (
                   <tr key={i.id} className={`cursor-pointer ${i.status === "void" ? "opacity-50" : ""}`} onClick={() => setView(i.id)}>
-                    <td className="num font-semibold">{i.number}</td>
+                    <td className="num font-semibold">{i.number}{i.source === "woocommerce" && <span className="badge mr-1 bg-sky-500/10 text-[10px] text-sky-700 dark:text-sky-300">سایت</span>}</td>
                     <td className="num muted">{i.code}</td>
                     <td><div className="font-semibold">{i.customer}</div>{i.mobile && <div className="num muted text-xs" dir="ltr">{i.mobile}</div>}</td>
                     <td className="muted num text-xs">{jdatetime(i.issued_at)}</td>

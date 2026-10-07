@@ -39,6 +39,8 @@ def _connect(client, shop, start=None):
     assert cfg["url"] == "https://shop.example.com" and cfg["secret"] == woo.MASK and cfg["key"] != shop.key  # never sent back
     t = client.post("/api/woo/test").json()
     assert t["ok"] and t["currency"] == "IRT" and t["currency_label"] == "تومان"
+    client.put("/api/woo/config", json={**cfg, "unit": "", "auth": "basic"})  # the screen sends its whole form back
+    assert client.get("/api/woo/config").json()["config"]["unit"] == "IRT"
     assert "woo.config" not in client.get("/api/settings").json()
     return gw
 
@@ -130,8 +132,15 @@ def test_stock_changes_here_go_to_the_website(client, shop):
     assert "ONLY-HERE" in [x["sku"] for x in client.get("/api/woo/products").json()["not_on_site"]]
 
     # first alignment: the website = the stock here (and stock management is switched on where it was off)
+    neg = client.post("/api/products", json={"name": "فروخته قبل از خرید", "sku": "NEG-1", "sale_price": 1}).json()
+    sn = shop.add_product("فروخته قبل از خرید", "NEG-1", 100, stock=3)
+    client.post("/api/invoices", json={"customer_id": client.post("/api/customers", json={"full_name": "منفی", "mobile": "09158880009"}).json()["id"],
+                                       "items": [{"product_id": neg["id"], "quantity": 1, "unit_price": 10}]})
+    _sync(client)
+    assert shop.products[sn]["stock_quantity"] == 2  # the sale went to the website
     r = client.post("/api/woo/stock/align", json={"all": True}).json()
     assert r["queued"] == 2 and shop.products[sa]["stock_quantity"] == 6 and shop.products[sb]["manage_stock"] is True
+    assert shop.products[sn]["stock_quantity"] == 2  # stock -1 here is not a real quantity: not put on the website
     assert shop.products[sb]["stock_quantity"] == 0
 
     # a purchase adds to the website's stock, an in-person sale takes from it, a void puts it back

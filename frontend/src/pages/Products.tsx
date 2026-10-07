@@ -49,8 +49,9 @@ function ProductForm({ initial, onDone }: { initial?: any; onDone: (p: any) => v
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="برند"><input className="input" value={f.brand} onChange={(e) => setF({ ...f, brand: e.target.value })} /></Field>
         <Field label="دسته"><input className="input" value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} placeholder="مثلاً مراقبت پوست" /></Field>
-        <Field label="قیمت فروش حضوری"><MoneyInput value={f.sale_price} onChange={(v) => setF({ ...f, sale_price: v })} /></Field>
-        <Field label="قیمت فروش آنلاین (سایت)" hint="خالی = همان قیمت حضوری"><MoneyInput value={f.online_price ?? 0} onChange={(v) => setF({ ...f, online_price: v || null })} /></Field>
+        <Field label="قیمت فروش حضوری" hint={initial?.last_sale_price ? `آخرین فروش: ${money(initial.last_sale_price)} - فاکتور بعدی با آن پر می‌شود؛ اگر این قیمت را عوض کنید، قیمت جدید ملاک می‌شود` : "فاکتور با آخرین قیمت فروش پر می‌شود"}>
+          <MoneyInput value={f.sale_price} onChange={(v) => setF({ ...f, sale_price: v })} /></Field>
+        <Field label="قیمت فروش آنلاین (سایت)" hint="خالی = همان قیمت حضوری؛ اگر سایت وصل باشد، قیمت سایت خودکار اینجا می‌آید"><MoneyInput value={f.online_price ?? 0} onChange={(v) => setF({ ...f, online_price: v || null })} /></Field>
         <Field label="حداقل موجودی (هشدار)" hint="وقتی موجودی به این عدد برسد هشدار داده می‌شود"><input type="number" min={0} className="input num" value={f.reorder_level} onChange={(e) => setF({ ...f, reorder_level: e.target.value })} /></Field>
       </div>
       <Field label="یادداشت"><input className="input" value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} /></Field>
@@ -212,8 +213,8 @@ function ProductList({ onChanged }: { onChanged: () => void }) {
                 <td className="num text-xs" dir="ltr">{p.sku ?? "—"}</td>
                 <td><span className={`num badge ${p.stock_qty < 0 ? "bg-rose-500/15 text-rose-600" : p.low ? "bg-amber-500/15 text-amber-700" : "bg-sky-500/10 text-sky-700 dark:text-sky-300"}`}>{num(p.stock_qty)} {p.unit}</span></td>
                 <td className="num">{p.unit_cost != null ? money(p.unit_cost, false) : "—"}</td>
-                <td className="num">{money(p.sale_price, false)}</td>
-                <td className="num">{p.online_price ? money(p.online_price, false) : <span className="muted">همان</span>}</td>
+                <td className="num">{money(p.sale_price, false)}{p.last_sale_price && p.last_sale_price !== p.sale_price ? <div className="muted text-[10px]">آخرین فروش: {money(p.last_sale_price, false)}</div> : null}</td>
+                <td className="num">{p.online_price ? money(p.online_price, false) : <span className="muted">همان</span>}{p.last_online_price && p.last_online_price !== p.online_price ? <div className="muted text-[10px]">آخرین فروش سایت: {money(p.last_online_price, false)}</div> : null}</td>
                 <td className="num">{p.margin != null ? <>{money(p.margin, false)} <span className="muted text-xs">({pct(p.margin_pct)})</span></> : "—"}</td>
               </tr>
             ))}</tbody>

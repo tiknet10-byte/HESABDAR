@@ -231,7 +231,7 @@ export default function Customers() {
                 {data.items.map((c: any) => (
                   <tr key={c.id} className="cursor-pointer" onClick={() => setView(c.id)}>
                     <td className="num muted">{c.code}</td>
-                    <td className="font-semibold">{c.full_name}{c.source === "import" && <span className="badge mr-2 bg-sky-500/10 text-[10px] text-sky-600 dark:text-sky-300">انتقالی</span>}{c.source === "tizpardaz" && <span className="badge mr-2 bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-300">تیزپرداز</span>}</td>
+                    <td className="font-semibold">{c.full_name}{c.source === "import" && <span className="badge mr-2 bg-sky-500/10 text-[10px] text-sky-600 dark:text-sky-300">انتقالی</span>}{c.source === "tizpardaz" && <span className="badge mr-2 bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-300">تیزپرداز</span>}{c.source === "woocommerce" && <span className="badge mr-2 bg-sky-500/10 text-[10px] text-sky-700 dark:text-sky-300">سایت</span>}</td>
                     <td className="num" dir="ltr">{c.mobile ?? (c.mobile_issue && c.mobile_issue !== "missing"
                       ? <span className={`badge ${MOBILE_ISSUE[c.mobile_issue].cls}`} title={MOBILE_ISSUE[c.mobile_issue].label}>{c.mobile_raw} ⚠</span> : "—")}</td>
                     <td className="num">{c.visits ? num(c.visits) : "—"}</td>

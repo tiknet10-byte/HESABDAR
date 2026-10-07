@@ -1,9 +1,10 @@
 import {
-  AlertTriangle, Archive, Bell, BookOpen, Bot, Brain, CreditCard, Database, DatabaseBackup, GitMerge, KeyRound, Pencil, Plug, Plus, RotateCcw, Scissors,
+  AlertTriangle, Archive, Bell, BookOpen, Bot, Brain, CreditCard, Database, DatabaseBackup, GitMerge, Globe, KeyRound, Pencil, Plug, Plus, RotateCcw, Scissors,
   Settings as Cog, ShieldCheck, Stethoscope, Calculator, FileSpreadsheet, Package, Save, Trash2, UserCog, Users, Wrench,
 } from "lucide-react";
 import LegacyImport from "../components/LegacyImport";
 import TizpardazImport from "../components/TizpardazImport";
+import WooSync from "../components/WooSync";
 import AccountRouting from "../components/AccountRouting";
 import { MergeDialog, ServiceHealth } from "../components/ServiceTools";
 import JalaliPicker from "../components/JalaliPicker";
@@ -1026,6 +1027,7 @@ const TABS: { key: string; label: string; icon: ReactNode; perm?: string; el: ()
   { key: "catalog", label: "لاین‌ها و خدمات", icon: <Scissors size={16} />, el: () => <Catalog /> },
   { key: "accounts", label: "کارتخوان و کارت‌ها", icon: <CreditCard size={16} />, el: () => <Accounts /> },
   { key: "products", label: "محصولات", icon: <Package size={16} />, perm: "settings", el: () => <ProductSettings /> },
+  { key: "website", label: "فروشگاه سایت (ووکامرس)", icon: <Globe size={16} />, perm: "settings", el: () => <WooSync /> },
   { key: "people", label: "پرسنل و کاربران", icon: <Users size={16} />, el: () => <StaffAndUsers /> },
   { key: "plugins", label: "افزونه‌ها", icon: <Plug size={16} />, el: () => <Plugins /> },
   { key: "ai", label: "هوش مصنوعی", icon: <Bot size={16} />, perm: "settings", el: () => <AIIntegration /> },

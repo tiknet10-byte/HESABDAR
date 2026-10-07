@@ -100,7 +100,7 @@ def save_config(db: Session, body: dict) -> dict:
     old = config(db)
     cfg = {**old}
     for k in DEFAULTS:
-        if k in body and k not in ("key", "secret", "auth"):
+        if k in body and k not in ("key", "secret", "auth", "unit"):  # auth / unit: found by the connection test
             cfg[k] = body[k]
     cfg["url"] = normalize_url(cfg.get("url") or "")
     if body.get("key") and body["key"] != _mask_key(old["key"]):
@@ -677,6 +677,9 @@ def run_sync(db: Session, force_catalog: bool = False) -> dict:
         out: dict = {}
         st = state(db)
         try:
+            if (cfg.get("unit") or "") not in FACTORS:  # the store's currency isn't known yet: ask the website
+                test_connection(db)
+                cfg = config(db)
             catalog_at = _dt(st.get("catalog_at"))
             if force_catalog or catalog_at is None or local_now() - catalog_at > CATALOG_EVERY:
                 out["catalog"] = refresh_catalog(db, c, cfg)

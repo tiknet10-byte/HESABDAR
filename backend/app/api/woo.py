@@ -121,8 +121,8 @@ class AlignIn(BaseModel):
 def align(body: AlignIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
     """Website stock = stock here, for the chosen products (or all linked ones that differ); sent right away."""
     ids = body.product_ids
-    if body.all:
-        ids = [r["product"]["id"] for r in products(db)["rows"] if r["product"] and r["stock_differs"]]
+    if body.all:  # a negative stock here (sold before its purchase / opening stock was entered) is not a real quantity
+        ids = [r["product"]["id"] for r in products(db)["rows"] if r["product"] and r["stock_differs"] and r["product"]["stock_qty"] >= 0]
     n = woo.align_stock(db, ids)
     audit(db, "woo.align", "woo", None, {"products": ids}, user=user)
     db.commit()

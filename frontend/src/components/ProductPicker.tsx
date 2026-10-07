@@ -38,7 +38,7 @@ export default function ProductPicker({ value, onChange, className = "" }: { val
               <span className="min-w-0"><span className="num muted ml-2 text-xs">{p.code}</span><b>{p.name}</b>{p.sku && <span className="num muted mr-2 text-xs" dir="ltr">{p.sku}</span>}</span>
               <span className="flex shrink-0 items-center gap-2 text-xs">
                 <span className={`num rounded-md px-1.5 ${p.stock_qty <= 0 ? "bg-rose-500/15 text-rose-600" : p.low ? "bg-amber-500/15 text-amber-700" : "muted"}`}>موجودی {num(p.stock_qty)}</span>
-                <span className="num font-semibold">{money(p.sale_price, false)}</span>
+                <span className="num font-semibold" title={p.last_sale_price ? "آخرین قیمت فروش" : "قیمت فروش"}>{money(p.price_in_person ?? p.sale_price, false)}</span>
               </span>
             </button>
           ))}
