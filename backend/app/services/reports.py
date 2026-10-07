@@ -35,6 +35,23 @@ def _range(start: date | None, end: date | None) -> tuple[datetime, datetime]:
 # balances (received in the old system), so they never count as cash received here
 REAL_DEPOSIT = Deposit.source.not_in(("import", "void_credit"))  # void_credit: already counted as the invoice payment
 
+# product sales are reported as a line of their own (they have no service line)
+PRODUCTS_LINE = -1
+PRODUCTS_NAME = "فروش محصولات"
+PRODUCTS_COLOR = "#0ea5e9"
+
+
+def product_cogs(db: Session, s: datetime, e: datetime) -> int:
+    """Cost of the products sold on (non-void) invoices of the period."""
+    from ..models import StockMove
+
+    items = select(InvoiceItem.id).join(Invoice, Invoice.id == InvoiceItem.invoice_id).where(
+        InvoiceItem.product_id.is_not(None), Invoice.status != "void", Invoice.issued_at.between(s, e))
+    sold = db.scalar(select(func.coalesce(func.sum(StockMove.cost), 0)).where(StockMove.kind == "sale", StockMove.invoice_item_id.in_(items))) or 0
+    back = db.scalar(select(func.coalesce(func.sum(StockMove.cost), 0)).where(StockMove.kind == "sale_return", StockMove.invoice_item_id.in_(items))) or 0
+    return int(sold) - int(back)
+
+
 # money that went back to customers, and corrections of money wrongly recorded as received
 OUT_KINDS = {"deposit_refund": "استرداد بیعانه", "refund": "برگشت پول فاکتور", "void_cancel": "لغو دریافتِ فاکتور اشتباه"}
 
@@ -110,7 +127,7 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
         factor = (inv.total / inv.subtotal) if inv.subtotal else 1
         for it in inv.items:
             amt = round(it.amount * factor)
-            by_line[lines[it.line_id].name if it.line_id in lines else "سایر"] += amt
+            by_line[PRODUCTS_NAME if it.product_id else lines[it.line_id].name if it.line_id in lines else "سایر"] += amt
             key = it.description or "—"
             d = by_service.setdefault(key, {"name": key, "count": 0, "revenue": 0})
             d["count"] += it.quantity
@@ -132,7 +149,12 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
         "period": {"start": s.date().isoformat(), "end": e.date().isoformat()},
         "revenue": revenue,
         "expenses": expenses,
-        "net_profit": revenue - expenses,
+        # gross profit of products = their sales - what they cost (COGS); services have no stock cost
+        "cogs": (cogs := product_cogs(db, s, e)),
+        "product_revenue": (prod_rev := sum(round(it.amount * ((i.total / i.subtotal) if i.subtotal else 1))
+                                             for i in invoices for it in i.items if it.product_id)),
+        "product_profit": prod_rev - cogs,
+        "net_profit": revenue - cogs - expenses,
         # net money of customers: received minus paid back (a refunded deposit is not money kept)
         "cash_in": sum(r["amount"] for r in moves),
         "cash_received": sum(r["amount"] for r in moves if r["kind"] not in ("deposit_refund", "refund")),
@@ -438,13 +460,14 @@ def _revenue_rows(db: Session, s: datetime, e: datetime, source: str = "all") ->
     if source in ("all", "new"):
         amt = func.coalesce(InvoiceItem.net_amount, InvoiceItem.unit_price * InvoiceItem.quantity - InvoiceItem.discount)
         q = (select(func.date(Invoice.issued_at), InvoiceItem.line_id, InvoiceItem.staff_id, InvoiceItem.service_id,
-                    InvoiceItem.description, func.sum(amt), func.sum(InvoiceItem.quantity))
+                    InvoiceItem.product_id, InvoiceItem.description, func.sum(amt), func.sum(InvoiceItem.quantity))
              .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
              .where(Invoice.issued_at.between(s, e), Invoice.status != "void")
              .group_by(func.date(Invoice.issued_at), InvoiceItem.line_id, InvoiceItem.staff_id, InvoiceItem.service_id,
-                       InvoiceItem.description))
-        for day, line_id, staff_id, service_id, desc, total, n in db.execute(q):
-            rows.append({"day": str(day), "line_id": line_id, "staff_id": staff_id, "service_id": service_id, "name": desc,
+                       InvoiceItem.product_id, InvoiceItem.description))
+        for day, line_id, staff_id, service_id, product_id, desc, total, n in db.execute(q):
+            rows.append({"day": str(day), "line_id": PRODUCTS_LINE if product_id else line_id, "staff_id": staff_id,
+                         "service_id": service_id, "product_id": product_id, "name": desc,
                          "amount": int(total or 0), "count": int(n or 0), "old": False})
     if source in ("all", "old"):
         q = (select(func.date(Appointment.start_at), Service.line_id, Appointment.staff_id, Appointment.service_id,
@@ -466,9 +489,15 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
                              db.scalar(select(func.min(Appointment.start_at)).where(Appointment.status == "done"))) if x]
         start = min(first).date() if first else date.today()
     s, e = _range(start, end)
+    from types import SimpleNamespace
+
     services = {x.id: x for x in db.scalars(select(Service))}
     lines = {x.id: x for x in db.scalars(select(ServiceLine))}
+    lines[PRODUCTS_LINE] = SimpleNamespace(id=PRODUCTS_LINE, name=PRODUCTS_NAME, code="P", color=PRODUCTS_COLOR)
     people = {x.id: x for x in db.scalars(select(Staff))}
+    from ..models import Product
+
+    products = {x.id: x for x in db.scalars(select(Product))}
     # a line run by a single person: their services are attributed to them when the record has no staff
     by_line_staff: dict[int, list[int]] = defaultdict(list)
     for p in people.values():
@@ -485,7 +514,7 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
         lid = r["line_id"] or (svc.line_id if svc else None) or (people[r["staff_id"]].line_id if r["staff_id"] in people else None)
         sid = r["staff_id"]
         inferred = False
-        if not sid and lid and len(by_line_staff.get(lid, [])) == 1:
+        if not sid and lid and lid != PRODUCTS_LINE and len(by_line_staff.get(lid, [])) == 1:
             sid, inferred = by_line_staff[lid][0], True
         if line_id and lid != line_id:
             continue
@@ -504,16 +533,23 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
         L["revenue"] += amt
         L["count"] += n
         L["months"][mk] += amt
-        P = agg_staff.setdefault(sid or 0, {"id": sid or 0, "name": people[sid].full_name if sid in people else "بدون پرسنل",
-                                            "line": lines[people[sid].line_id].name if sid in people and people[sid].line_id in lines else None,
-                                            "revenue": 0, "count": 0, "inferred": 0, "last": None, "months": defaultdict(int)})
+        if lid == PRODUCTS_LINE:  # products are nobody's service: not in the staff table
+            P = {"revenue": 0, "count": 0, "inferred": 0, "months": defaultdict(int), "last": None}
+        else:
+            P = agg_staff.setdefault(sid or 0, {
+                "id": sid or 0, "name": people[sid].full_name if sid in people else "بدون پرسنل",
+                "line": lines[people[sid].line_id].name if sid in people and people[sid].line_id in lines else None,
+                "revenue": 0, "count": 0, "inferred": 0, "last": None, "months": defaultdict(int)})
         P["revenue"] += amt
         P["count"] += n
         P["inferred"] += n if inferred else 0
         P["months"][mk] += amt
         P["last"] = max(P["last"] or r["day"], r["day"])
-        key = str(r["service_id"]) if r["service_id"] else f"name:{r['name'] or 'نامشخص'}"
-        S = agg_svc.setdefault(key, {"id": r["service_id"], "code": svc.code if svc else None, "name": svc.name if svc else (r["name"] or "خدمت نامشخص"),
+        prod = products.get(r.get("product_id")) if r.get("product_id") else None
+        key = f"p:{prod.id}" if prod else str(r["service_id"]) if r["service_id"] else f"name:{r['name'] or 'نامشخص'}"
+        S = agg_svc.setdefault(key, {"id": r["service_id"], "product_id": prod.id if prod else None,
+                                     "code": prod.code if prod else svc.code if svc else None,
+                                     "name": prod.name if prod else svc.name if svc else (r["name"] or "خدمت نامشخص"),
                                      "line": lname, "revenue": 0, "count": 0, "last": None, "old": 0,
                                      "archived": bool(svc and not svc.is_active)})
         S["revenue"] += amt
@@ -526,6 +562,11 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
         total["inferred_staff"] += n if inferred else 0
     keys = sorted(months)
     rev = total["revenue"] or 1
+    if PRODUCTS_LINE in agg_line:  # products: what they cost and the gross profit
+        pl = agg_line[PRODUCTS_LINE]
+        pl["cogs"] = product_cogs(db, s, e)
+        pl["profit"] = pl["revenue"] - pl["cogs"]
+        pl["margin"] = round(pl["profit"] / pl["revenue"] * 100, 1) if pl["revenue"] else None
 
     def finish(d: dict) -> dict:
         d = {**d, "share": round(d["revenue"] / rev * 100, 1), "avg": d["revenue"] // d["count"] if d["count"] else 0}

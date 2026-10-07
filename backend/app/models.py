@@ -219,6 +219,7 @@ class Invoice(TimestampMixin, Base):
     paid: Mapped[int] = mapped_column(BigInteger, default=0)
     source: Mapped[str] = mapped_column(String(32), default="manual")
     notes: Mapped[str] = mapped_column(Text, default="")
+    channel: Mapped[str | None] = mapped_column(String(16), nullable=True)  # in_person (default) | online (website order)
     items: Mapped[list[InvoiceItem]] = relationship(cascade="all, delete-orphan", back_populates="invoice")
 
 
@@ -227,6 +228,7 @@ class InvoiceItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id"), index=True)
     service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id"), nullable=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True, index=True)
     line_id: Mapped[int | None] = mapped_column(ForeignKey("service_lines.id"), nullable=True)
     staff_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"), nullable=True)
     description: Mapped[str] = mapped_column(String(256), default="")
@@ -404,3 +406,91 @@ class PluginState(Base):
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     config: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+# ---------------------------------------------------------------- products (retail: in the clinic and online)
+class Product(TimestampMixin, Base):
+    """A product sold in person or on the website. `code` is this system's sales code, `sku` the website's."""
+    __tablename__ = "products"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    sku: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    name: Mapped[str] = mapped_column(String(160))
+    brand: Mapped[str] = mapped_column(String(80), default="")
+    category: Mapped[str] = mapped_column(String(80), default="")
+    unit: Mapped[str] = mapped_column(String(16), default="عدد")
+    sale_price: Mapped[int] = mapped_column(BigInteger, default=0)  # in the clinic
+    online_price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # on the website, when different
+    reorder_level: Mapped[int] = mapped_column(Integer, default=0)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # figures of the costing engine (recomputed from the stock moves; never edited by hand)
+    stock_qty: Mapped[int] = mapped_column(Integer, default=0)
+    stock_value: Mapped[int] = mapped_column(BigInteger, default=0)
+    unit_cost: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # current unit cost under the chosen method
+    last_purchase_cost: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class Supplier(TimestampMixin, Base):
+    __tablename__ = "suppliers"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    mobile: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
+class Purchase(TimestampMixin, Base):
+    """Buying products: their cost (incl. shipping, minus discount) goes into inventory; unpaid part = owed to the supplier."""
+    __tablename__ = "purchases"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    number: Mapped[str] = mapped_column(String(32), unique=True)
+    supplier_id: Mapped[int | None] = mapped_column(ForeignKey("suppliers.id"), nullable=True, index=True)
+    supplier_ref: Mapped[str] = mapped_column(String(64), default="")  # the supplier's invoice number
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    subtotal: Mapped[int] = mapped_column(BigInteger, default=0)
+    discount: Mapped[int] = mapped_column(BigInteger, default=0)
+    shipping: Mapped[int] = mapped_column(BigInteger, default=0)  # freight etc. - part of the goods' cost
+    total: Mapped[int] = mapped_column(BigInteger, default=0)
+    paid: Mapped[int] = mapped_column(BigInteger, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="open")  # open | partial | paid | void
+    notes: Mapped[str] = mapped_column(Text, default="")
+    items: Mapped[list[PurchaseItem]] = relationship(cascade="all, delete-orphan", back_populates="purchase")
+
+
+class PurchaseItem(Base):
+    __tablename__ = "purchase_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    purchase_id: Mapped[int] = mapped_column(ForeignKey("purchases.id"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_price: Mapped[int] = mapped_column(BigInteger)  # on the supplier's invoice
+    cost: Mapped[int] = mapped_column(BigInteger, default=0)  # landed cost of the whole row (share of discount/shipping included)
+    purchase: Mapped[Purchase] = relationship(back_populates="items")
+
+
+class SupplierPayment(TimestampMixin, Base):
+    __tablename__ = "supplier_payments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    supplier_id: Mapped[int | None] = mapped_column(ForeignKey("suppliers.id"), nullable=True, index=True)
+    purchase_id: Mapped[int | None] = mapped_column(ForeignKey("purchases.id"), nullable=True, index=True)
+    payment_account_id: Mapped[int] = mapped_column(ForeignKey("payment_accounts.id"))
+    amount: Mapped[int] = mapped_column(BigInteger)  # negative = reversed (purchase voided)
+    paid_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
+class StockMove(Base):
+    """Every change of a product's stock. qty > 0 in, < 0 out. `cost` is the money value of the move (Rial, >= 0):
+    given for purchases and opening stock, computed by the costing engine for everything else."""
+    __tablename__ = "stock_moves"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # opening | purchase | sale | sale_return | adjust_in | adjust_out
+    qty: Mapped[int] = mapped_column(Integer)
+    cost: Mapped[int] = mapped_column(BigInteger, default=0)
+    estimated: Mapped[bool] = mapped_column(Boolean, default=False)  # sold before stock was bought: cost not final yet
+    invoice_item_id: Mapped[int | None] = mapped_column(ForeignKey("invoice_items.id"), nullable=True, index=True)
+    purchase_item_id: Mapped[int | None] = mapped_column(ForeignKey("purchase_items.id"), nullable=True, index=True)
+    ref_move_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # a return points to the sale it reverses
+    note: Mapped[str] = mapped_column(String(256), default="")

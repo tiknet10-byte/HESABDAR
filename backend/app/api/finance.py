@@ -571,6 +571,7 @@ def set_deposit_service(did: int, service_id: int, db: Session = Depends(get_db)
 # ---------------------------------------------------------------- invoices
 class ItemIn(BaseModel):
     service_id: int | None = None
+    product_id: int | None = None
     description: str | None = None
     quantity: int = 1
     unit_price: int | None = None
@@ -595,6 +596,7 @@ class InvoiceIn(BaseModel):
     payments: list[PayIn] = []
     issued_at: datetime | None = None
     notes: str = ""
+    channel: str | None = None  # in_person | online (a website order)
     appointment_id: int | None = None
     appointment_ids: list[int] = []  # appointments this invoice settles (marked done)
 
@@ -628,8 +630,8 @@ def _line_names() -> dict[int, str]:
 def _inv(i: Invoice, name: str | None = None) -> dict:
     return {"id": i.id, "number": i.number, "customer_id": i.customer_id, "customer": name, "issued_at": i.issued_at.isoformat(),
             "status": i.status, "subtotal": i.subtotal, "discount": i.discount, "total": i.total, "paid": i.paid,
-            "due": i.total - i.paid, "source": i.source, "notes": i.notes,
-            "items": [{"service_id": it.service_id, "line_id": it.line_id, "staff_id": it.staff_id, "description": it.description,
+            "due": i.total - i.paid, "source": i.source, "notes": i.notes, "channel": i.channel or "in_person",
+            "items": [{"service_id": it.service_id, "product_id": it.product_id, "line_id": it.line_id, "staff_id": it.staff_id, "description": it.description,
                        "quantity": it.quantity, "unit_price": it.unit_price, "discount": it.discount, "amount": it.amount,
                        "net_amount": it.net_amount, "commission_amount": it.commission_amount,
                        "staff": _staff_names().get(it.staff_id), "line": _line_names().get(it.line_id)} for it in i.items]}
@@ -726,7 +728,7 @@ def create_invoice(body: InvoiceIn, db: Session = Depends(get_db), user=Depends(
         inv = accounting.issue_invoice(
             db, customer=c, items=[i.model_dump() for i in body.items], discount=body.discount,
             apply_deposit_ids=body.deposit_ids, apply_all_deposits=body.apply_deposits and not body.deposit_ids,
-            payments=[p.model_dump() for p in body.payments], issued_at=body.issued_at, notes=body.notes, user=user)
+            payments=[p.model_dump() for p in body.payments], issued_at=body.issued_at, notes=body.notes, channel=body.channel, user=user)
     except AccountingError as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc

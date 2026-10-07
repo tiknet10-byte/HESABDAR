@@ -1178,3 +1178,92 @@ def test_each_line_deposits_and_products_have_their_pos_and_card(client):
         assert routing.default_account(db, "deposits") == pos[-1]
         assert routing.default_account(db, "products", prefer="card") == card[-1]
         assert routing.default_account(db, int(next(iter(lines)))) == pos[0]
+
+
+def _bal(client, code):
+    rows = client.get("/api/ledger/trial-balance").json()["rows"]
+    r = next((x for x in rows if x["code"] == code), None)
+    return (r["debit"] - r["credit"]) if r else 0
+
+
+def test_products_purchase_sale_profit_exact_under_every_costing_method(client, accounts, services):
+    """Stock, inventory value, cost of goods sold, supplier debt and product profit - checked to the Rial, for
+    moving average, FIFO and monthly average, through a void, a sale before purchase, a count and a voided purchase."""
+    from datetime import datetime, timedelta
+    card = accounts["کارت پاسارگاد"]
+    inv0, cogs0, rev0, pay0 = _bal(client, "1300"), _bal(client, "5400"), _bal(client, "4200"), _bal(client, "2300")
+    client.put("/api/products-settings", json={"method": "average"})
+    a = client.post("/api/products", json={"name": "سرم ویتامین C", "sku": "VC-30", "sale_price": 300_000, "online_price": 320_000}).json()
+    assert a["code"] == "10001" or int(a["code"]) > 10000
+    assert client.post("/api/products", json={"name": "تکراری", "sku": "vc-30"}).status_code == 409
+    t0 = (datetime.now() - timedelta(hours=3)).replace(microsecond=0)
+    client.post(f"/api/products/{a['id']}/opening", json={"qty": 5, "unit_cost": 100_000, "at": t0.isoformat()})
+    pur = client.post("/api/purchases", json={"supplier_name": "پخش آرایشی", "items": [{"product_id": a["id"], "quantity": 10, "unit_price": 120_000}],
+                                              "shipping": 50_000, "at": (t0 + timedelta(minutes=5)).isoformat(),
+                                              "payments": [{"payment_account_id": card, "amount": 1_000_000}]}).json()
+    assert pur["total"] == 1_250_000 and pur["items"][0]["unit_cost"] == 125_000 and pur["due"] == 250_000 and pur["status"] == "partial"
+    p = client.get(f"/api/products/{a['id']}").json()
+    assert p["stock_qty"] == 15 and p["stock_value"] == 1_750_000
+    # sale with a service, a discount and online channel price for the product
+    svc = services["پدیکور"]
+    c = client.post("/api/customers", json={"full_name": "خریدار محصول", "mobile": "09124447791"}).json()
+    inv = client.post("/api/invoices", json={"customer_id": c["id"], "channel": "online", "discount": 100_000, "issued_at": (t0 + timedelta(minutes=10)).isoformat(),
+                                             "items": [{"product_id": a["id"], "quantity": 3}, {"service_id": svc["id"], "unit_price": 1_000_000}]}).json()
+    prod_item = next(i for i in inv["items"] if i["product_id"])
+    assert prod_item["unit_price"] == 320_000 and inv["channel"] == "online"  # online price used
+    assert inv["subtotal"] == 1_960_000 and inv["total"] == 1_860_000
+    # moving average: (500,000 + 1,250,000) / 15 units -> 3 units = 350,000
+    p = client.get(f"/api/products/{a['id']}").json()
+    assert p["stock_qty"] == 12 and p["stock_value"] == 1_400_000
+    rev = prod_item["net_amount"]
+    assert _bal(client, "5400") - cogs0 == 350_000 and _bal(client, "1300") - inv0 == 1_400_000
+    assert -(_bal(client, "4200") - rev0) == rev and -(_bal(client, "2300") - pay0) == 250_000
+    rep = client.get("/api/reports/products").json()
+    row = next(r for r in rep["products"] if r["id"] == a["id"])
+    assert row["revenue"] == rev and row["cogs"] == 350_000 and row["profit"] == rev - 350_000 and row["online"] == 3
+    # FIFO: the 3 units come from the opening stock at 100,000 -> 300,000; the books follow
+    assert client.put("/api/products-settings", json={"method": "fifo"}).json()["recosted"] >= 1
+    assert _bal(client, "5400") - cogs0 == 300_000 and _bal(client, "1300") - inv0 == 1_450_000
+    assert client.get(f"/api/products/{a['id']}").json()["stock_value"] == 1_450_000
+    # monthly average (one month here): same as the average of everything bought
+    client.put("/api/products-settings", json={"method": "periodic"})
+    assert _bal(client, "5400") - cogs0 == 350_000
+    client.put("/api/products-settings", json={"method": "average"})
+    # a mistaken invoice voided: the goods come back at their cost; nothing left in COGS
+    client.post(f"/api/invoices/{inv['id']}/void?payments=cancel")
+    assert client.get(f"/api/products/{a['id']}").json()["stock_qty"] == 15
+    assert _bal(client, "5400") - cogs0 == 0 and _bal(client, "1300") - inv0 == 1_750_000
+    assert not any(r["id"] == a["id"] for r in client.get("/api/reports/products").json()["products"])
+    # sold before it was bought: cost back-filled by the purchase entered afterwards
+    b = client.post("/api/products", json={"name": "ماسک مو", "sale_price": 500_000}).json()
+    inv2 = client.post("/api/invoices", json={"customer_id": c["id"], "items": [{"product_id": b["id"], "quantity": 2}],
+                                              "payments": [{"payment_account_id": card, "amount": 1_000_000}]}).json()
+    pb = client.get(f"/api/products/{b['id']}").json()
+    assert pb["stock_qty"] == -2 and pb["moves"][0]["estimated"] is True
+    client.post("/api/purchases", json={"supplier_name": "پخش آرایشی", "items": [{"product_id": b["id"], "quantity": 4, "unit_price": 200_000}],
+                                        "at": (t0 - timedelta(hours=1)).isoformat()})
+    pb = client.get(f"/api/products/{b['id']}").json()
+    sale = next(m for m in pb["moves"] if m["kind"] == "sale")
+    assert pb["stock_qty"] == 2 and sale["cost"] == 400_000 and not sale["estimated"] and pb["stock_value"] == 400_000
+    # physical count: 14 on the shelf instead of 15 -> 1 unit shortage at the average cost
+    cnt = client.post(f"/api/products/{a['id']}/count", json={"counted": 14}).json()
+    assert cnt["difference"] == -1 and cnt["difference_cost"] == 116_666 and cnt["stock_value"] == 1_750_000 - 116_666
+    # the purchase entered by mistake is voided: its goods leave the history, its payment and debt are reversed
+    owed = client.get("/api/products/summary").json()["owed_to_suppliers"]
+    client.post(f"/api/purchases/{pur['id']}/void")
+    pa = client.get(f"/api/products/{a['id']}").json()
+    assert pa["stock_qty"] == 4  # 5 opening - 1 shortage
+    assert client.get("/api/products/summary").json()["owed_to_suppliers"] == owed - 250_000
+    # inventory in the books == value of all products' stock; the books balance
+    total_value = sum(x["stock_value"] for x in client.get("/api/products?all=1").json())
+    assert _bal(client, "1300") == total_value
+    tb = client.get("/api/ledger/trial-balance").json()
+    assert tb["total_debit"] == tb["total_credit"]
+    assert inv2["total"] == 1_000_000
+    # products are a line of their own in the revenue report, with cost and gross profit
+    rev_rep = client.get("/api/reports/revenue").json()
+    pl = next(x for x in rev_rep["lines"] if x["id"] == -1)
+    assert pl["name"] == "فروش محصولات" and pl["revenue"] == 1_000_000 and pl["cogs"] == 400_000 and pl["profit"] == 600_000
+    assert not any(x["name"] == "فروش محصولات" for x in rev_rep["staff"])
+    month = client.get("/api/dashboard").json()["month"]
+    assert month["cogs"] == 400_000 and month["net_profit"] == month["revenue"] - 400_000 - month["expenses"]

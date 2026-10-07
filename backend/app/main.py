@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api import auth, catalog, customers, finance, legacy, system
+from .api import auth, catalog, customers, finance, legacy, products, system
 from .core import db as dbmod
 from .core.config import get_settings
 from .core.db import Base, SessionLocal
@@ -52,6 +52,9 @@ def init_db() -> None:
         assign_missing_codes(db)  # every customer has a customer code
         codes.assign_missing(db)  # every service line and service has a code
         backfill_deposit_closures(db)  # refund date/account of deposits refunded before it was recorded
+        from .services import inventory
+
+        inventory.ensure_chart(db)  # inventory, supplier payables, product revenue, cost of goods sold
         db.commit()
 
 
@@ -168,7 +171,7 @@ def create_app() -> FastAPI:
         response.headers.setdefault("Permissions-Policy", "camera=(self), microphone=()")
         return response
 
-    for r in (auth.router, catalog.router, customers.router, finance.router, legacy.router, system.router):
+    for r in (auth.router, catalog.router, customers.router, finance.router, legacy.router, products.router, system.router):
         app.include_router(r)
 
     manager.discover()

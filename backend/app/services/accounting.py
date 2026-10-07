@@ -375,28 +375,45 @@ def next_invoice_number(db: Session) -> str:
 def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discount: int = 0,
                   apply_deposit_ids: list[int] | None = None, apply_all_deposits: bool = False,
                   payments: list[dict] | None = None, issued_at: datetime | None = None,
-                  source: str = "manual", notes: str = "", user=None) -> Invoice:
-    """items: [{service_id?, description?, quantity, unit_price, discount?, staff_id?}]
-    payments: [{payment_account_id, amount, reference?}]"""
+                  source: str = "manual", notes: str = "", channel: str | None = None, user=None) -> Invoice:
+    """items: [{service_id? | product_id?, description?, quantity, unit_price, discount?, staff_id?}]
+    payments: [{payment_account_id, amount, reference?}]. Products leave the stock and their cost (COGS) is posted."""
+    from ..models import Product
+    from . import inventory
+
     if not items:
         raise AccountingError("فاکتور بدون آیتم قابل ثبت نیست")
     ensure_not_future(issued_at, "تاریخ فاکتور")
+    channel = channel if channel in ("online", "in_person") else None
     inv = Invoice(number=next_invoice_number(db), customer_id=customer.id, issued_at=issued_at or local_now(),
-                  discount=discount, source=source, notes=notes)
-    revenue_by_line: dict[int | None, int] = {}
-    line_names: dict[int | None, str] = {}
+                  discount=discount, source=source, notes=notes, channel=channel)
+    revenue_by_line: dict[int | str | None, int] = {}  # service line id, or "products"
+    line_names: dict[int | str | None, str] = {}
     for it in items:
-        svc = db.get(Service, it["service_id"]) if it.get("service_id") else None
+        prod = db.get(Product, it["product_id"]) if it.get("product_id") else None
+        if it.get("product_id") and prod is None:
+            raise AccountingError("محصول پیدا نشد")
+        svc = db.get(Service, it["service_id"]) if it.get("service_id") and not prod else None
         qty = int(it.get("quantity") or 1)
-        price = int(it["unit_price"] if it.get("unit_price") is not None else (svc.base_price if svc else 0))
-        item = InvoiceItem(service_id=svc.id if svc else None, line_id=svc.line_id if svc else it.get("line_id"),
-                           staff_id=default_staff_id(db, svc.id if svc else None, it.get("staff_id")),
-                           description=it.get("description") or (svc.name if svc else ""),
-                           quantity=qty, unit_price=price, discount=int(it.get("discount") or 0))
+        if qty <= 0:
+            raise AccountingError("تعداد باید مثبت باشد")
+        if prod:
+            listed = prod.online_price if channel == "online" and prod.online_price else prod.sale_price
+            price = int(it["unit_price"] if it.get("unit_price") is not None else listed)
+            # products carry no staff commission; their line in the books is "product sales"
+            item = InvoiceItem(product_id=prod.id, line_id=None, staff_id=None, description=it.get("description") or prod.name,
+                               quantity=qty, unit_price=price, discount=int(it.get("discount") or 0))
+        else:
+            price = int(it["unit_price"] if it.get("unit_price") is not None else (svc.base_price if svc else 0))
+            item = InvoiceItem(service_id=svc.id if svc else None, line_id=svc.line_id if svc else it.get("line_id"),
+                               staff_id=default_staff_id(db, svc.id if svc else None, it.get("staff_id")),
+                               description=it.get("description") or (svc.name if svc else ""),
+                               quantity=qty, unit_price=price, discount=int(it.get("discount") or 0))
         if item.amount < 0:
             raise AccountingError("مبلغ آیتم منفی است")
         inv.items.append(item)
-        revenue_by_line[item.line_id] = revenue_by_line.get(item.line_id, 0) + item.amount
+        key = "products" if prod else item.line_id
+        revenue_by_line[key] = revenue_by_line.get(key, 0) + item.amount
         if svc:
             line_names[item.line_id] = svc.line.name
     inv.subtotal = sum(i.amount for i in inv.items)
@@ -414,6 +431,9 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
         gross = revenue_by_line[line_id]
         share = remaining_discount if idx == len(keys) - 1 else (discount * gross // inv.subtotal if inv.subtotal else 0)
         remaining_discount -= share
+        if line_id == "products":
+            legs.append(Leg(inventory._acc(db, inventory.PRODUCT_REVENUE), credit=gross - share, customer_id=customer.id))
+            continue
         name = line_names.get(line_id) or "سایر خدمات"
         legs.append(Leg(revenue_account_for_line(db, name), credit=gross - share, customer_id=customer.id, line_id=line_id))
     post(db, f"فاکتور {inv.number} - {customer.full_name}", legs, "invoice", inv.id, at=inv.issued_at)
@@ -437,6 +457,11 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
             item.commission_percent, item.commission_amount = 0.0, 0
     if comm_legs:
         post(db, f"سهم پرسنل - فاکتور {inv.number}", comm_legs, "commission", inv.id, at=inv.issued_at)
+
+    # products leave the stock; the costing engine works out their cost and posts it (COGS / inventory)
+    sold = {inventory.sell(db, item, inv.issued_at).product_id for item in inv.items if item.product_id}
+    for pid in sold:
+        inventory.recost(db, pid)
 
     # apply customer deposits
     deposit_q = select(Deposit).where(Deposit.customer_id == customer.id, Deposit.status == "held")
@@ -569,6 +594,10 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payment
                 Leg(account(db, DEPOSITS), credit=pay.amount, customer_id=inv.customer_id),
             ], "deposit", credit.id)
     inv.paid = 0
+    # products come back to stock at the cost they were sold at
+    from . import inventory
+
+    inventory.return_invoice(db, inv.id, same_time=payments == "cancel")
     # appointments it settled are open again
     from .scheduling import validate_slot
 
@@ -731,6 +760,8 @@ REF_LABELS = {
     "opening_balance": "موجودی اولیه", "balance_adjust": "اصلاح موجودی (شمارش)",
     "deposit": "بیعانه", "deposit_apply": "تسویه بیعانه", "invoice": "فاکتور فروش", "invoice_void": "ابطال فاکتور",
     "payment": "دریافت وجه", "expense": "هزینه", "commission": "سهم پرسنل", "staff_payout": "پرداخت به پرسنل",
+    "purchase": "خرید محصول", "purchase_void": "ابطال خرید", "supplier_payment": "پرداخت به تأمین‌کننده",
+    "stock_move": "گردش انبار (بهای تمام‌شده)", "stock_opening": "موجودی اول دورهٔ کالا",
 }
 
 
