@@ -27,7 +27,7 @@ from . import codes, learning
 from .textutil import normalize_text
 
 IMPORT_LINE = "خدمات انتقالی"
-_EXTRA = str.maketrans({"ى": "ی", "أ": "ا", "إ": "ا", "ۀ": "ه", "آ": "ا"})
+_EXTRA = str.maketrans({"ى": "ی", "أ": "ا", "إ": "ا", "ۀ": "ه", "آ": "ا", "ئ": "ی", "ؤ": "و"})  # رضائی = رضایی
 
 
 def name_key(text: str | None) -> str:

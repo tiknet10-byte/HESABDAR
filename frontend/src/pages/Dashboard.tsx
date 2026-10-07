@@ -292,7 +292,8 @@ export default function Dashboard() {
           <div className="grid gap-4 lg:grid-cols-3">
             <Stat label="فروش ۳۰ روز" value={compactMoney(m.revenue)} icon={g ? (g.up ? <TrendingUp size={20} /> : <TrendingDown size={20} />) : undefined} tone={g && !g.up ? "pink" : "emerald"}
               hint={<>{g && <b className={g.up ? "text-emerald-600" : "text-rose-600"}>{g.up ? "▲" : "▼"} {faDigits(Math.abs(g.pct))}٪ نسبت به ۳۰ روز قبل · </b>}میانگین هر فاکتور {compactMoney(m.avg_ticket)}</>} />
-            <Stat label="سود خالص ۳۰ روز" value={compactMoney(m.net_profit)} hint={`هزینه‌ها ${compactMoney(m.expenses)}`} />
+            <Stat label="سود خالص ۳۰ روز" value={compactMoney(m.net_profit)}
+              hint={m.cogs ? `هزینه‌ها ${compactMoney(m.expenses)} · بهای کالای فروش‌رفته ${compactMoney(m.cogs)}` : `هزینه‌ها ${compactMoney(m.expenses)}`} />
             <Stat label="مشتریان بازگشتی" value={`${num(m.returning_customers)} از ${num(m.customers_served)}`} hint={`${num(m.new_customers)} مشتری جدید`} />
           </div>
 

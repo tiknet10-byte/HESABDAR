@@ -1,6 +1,6 @@
 import {
   AlertTriangle, Archive, Bell, BookOpen, Bot, Brain, CreditCard, Database, DatabaseBackup, GitMerge, KeyRound, Pencil, Plug, Plus, RotateCcw, Scissors,
-  Settings as Cog, ShieldCheck, Stethoscope, Calculator, FileSpreadsheet, Save, Trash2, UserCog, Users, Wrench,
+  Settings as Cog, ShieldCheck, Stethoscope, Calculator, FileSpreadsheet, Package, Save, Trash2, UserCog, Users, Wrench,
 } from "lucide-react";
 import LegacyImport from "../components/LegacyImport";
 import AccountRouting from "../components/AccountRouting";
@@ -454,6 +454,71 @@ function Catalog() {
           </form>
         )}
       </Modal>
+    </div>
+  );
+}
+
+const COSTING_HELP: Record<string, { title: string; text: string; example: string; tag?: string }> = {
+  average: { title: "میانگین موزون متحرک", tag: "پیشنهادی - رایج در نرم‌افزارهای حسابداری ایران",
+    text: "بعد از هر خرید، بهای هر واحد دوباره حساب می‌شود: (ارزش موجودی + مبلغ خرید) ÷ (تعداد موجود + تعداد خریداری‌شده). هر فروش با همین بها حساب می‌شود.",
+    example: "۱۰ عدد به ۱۰۰ و ۱۰ عدد به ۱۳۰ خریده‌اید ← هر واحد ۱۱۵؛ فروش ۱۵ عدد = ۱٬۷۲۵" },
+  fifo: { title: "اولین صادره از اولین وارده (FIFO)",
+    text: "فرض می‌شود کالاهای قدیمی‌تر زودتر فروخته می‌شوند؛ بهای هر فروش از قدیمی‌ترین خرید باقی‌مانده برداشته می‌شود. برای محصولات تاریخ‌دار منطقی است.",
+    example: "۱۰ عدد به ۱۰۰ و ۱۰ عدد به ۱۳۰ ← فروش ۱۵ عدد = ۱۰×۱۰۰ + ۵×۱۳۰ = ۱٬۶۵۰" },
+  periodic: { title: "میانگین موزون ماهانه (دوره‌ای)",
+    text: "همهٔ فروش‌های یک ماه با یک بها حساب می‌شوند: (ارزش موجودی اول ماه + خریدهای همان ماه) ÷ (تعداد اول ماه + تعداد خریدها). تا پایان ماه با هر خرید جدید، عدد آن ماه به‌روز می‌شود.",
+    example: "اول ماه ۱۰ عدد به ۱۰۰، وسط ماه ۱۰ عدد به ۱۳۰ ← همهٔ فروش‌های ماه هر واحد ۱۱۵" },
+};
+
+/** Costing method of products (how the cost of what is sold, and so the profit, is worked out). */
+function ProductSettings() {
+  const toast = useToast();
+  const { data, reload } = useApi<any>("/api/products-settings");
+  const [method, setMethod] = useState("");
+  const [allowNeg, setAllowNeg] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (!data) return <Loading />;
+  const m = method || data.method;
+  const neg = allowNeg ?? data.allow_negative;
+  async function save() {
+    if (m !== data.method && !confirm("با تغییر روش، بهای تمام‌شدهٔ همهٔ فروش‌های گذشتهٔ محصولات دوباره محاسبه و اسناد حسابداری آن‌ها به‌روز می‌شود. ادامه می‌دهید؟")) return;
+    setBusy(true);
+    try {
+      const r = await api("/api/products-settings", { method: "PUT", body: { method: m, allow_negative: neg } });
+      toast(r.recosted ? `روش محاسبه تغییر کرد؛ ${num(r.recosted)} محصول دوباره محاسبه شد` : "ذخیره شد");
+      setMethod("");
+      setAllowNeg(null);
+      reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="space-y-4">
+      <Card title="روش محاسبهٔ بهای تمام‌شده و سود محصولات">
+        <div className="space-y-2">
+          {Object.entries(COSTING_HELP).map(([k, h]) => (
+            <label key={k} className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-3 ${m === k ? "border-violet-500 bg-violet-500/5" : ""}`} style={m === k ? {} : { borderColor: "var(--border)" }}>
+              <input type="radio" className="mt-1" checked={m === k} onChange={() => setMethod(k)} />
+              <span className="text-sm">
+                <b>{h.title}</b>{h.tag && <span className="badge mr-2 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{h.tag}</span>}
+                <span className="muted mt-1 block text-xs leading-6">{h.text}</span>
+                <span className="mt-1 block text-xs">مثال: {h.example}</span>
+              </span>
+            </label>
+          ))}
+          <p className="muted text-xs leading-6">هر سه روش طبق استاندارد حسابداری (IAS 2 و استاندارد شمارهٔ ۸ ایران) مجازند؛ روش «اولین صادره از آخرین وارده» (LIFO) مجاز نیست و ارائه نشده. محاسبات با ریال صحیح و بدون گم شدن حتی یک ریال انجام می‌شود.</p>
+        </div>
+      </Card>
+      <Card title="فروش بیش از موجودی">
+        <label className="flex items-start gap-3 text-sm">
+          <input type="checkbox" className="mt-1" checked={neg} onChange={(e) => setAllowNeg(e.target.checked)} />
+          <span><b>اجازه داده شود</b><span className="muted block text-xs leading-6">اگر خرید یا موجودی اول دوره هنوز ثبت نشده باشد، فروش ثبت می‌شود و بهای آن بعد از ثبت خرید خودکار اصلاح می‌شود. اگر خاموش باشد، فاکتوری که از موجودی بیشتر است ثبت نمی‌شود.</span></span>
+        </label>
+      </Card>
+      <button className="btn btn-primary" disabled={busy || (m === data.method && neg === data.allow_negative)} onClick={save}><Save size={15} />ذخیره</button>
     </div>
   );
 }
@@ -959,6 +1024,7 @@ const TABS: { key: string; label: string; icon: ReactNode; perm?: string; el: ()
   { key: "general", label: "عمومی", icon: <Cog size={16} />, perm: "settings", el: () => <General /> },
   { key: "catalog", label: "لاین‌ها و خدمات", icon: <Scissors size={16} />, el: () => <Catalog /> },
   { key: "accounts", label: "کارتخوان و کارت‌ها", icon: <CreditCard size={16} />, el: () => <Accounts /> },
+  { key: "products", label: "محصولات", icon: <Package size={16} />, perm: "settings", el: () => <ProductSettings /> },
   { key: "people", label: "پرسنل و کاربران", icon: <Users size={16} />, el: () => <StaffAndUsers /> },
   { key: "plugins", label: "افزونه‌ها", icon: <Plug size={16} />, el: () => <Plugins /> },
   { key: "ai", label: "هوش مصنوعی", icon: <Bot size={16} />, perm: "settings", el: () => <AIIntegration /> },

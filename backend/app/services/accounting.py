@@ -379,7 +379,7 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     """items: [{service_id? | product_id?, description?, quantity, unit_price, discount?, staff_id?}]
     payments: [{payment_account_id, amount, reference?}]. Products leave the stock and their cost (COGS) is posted."""
     from ..models import Product
-    from . import inventory
+    from . import inventory, settings_store
 
     if not items:
         raise AccountingError("فاکتور بدون آیتم قابل ثبت نیست")
@@ -416,6 +416,15 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
         revenue_by_line[key] = revenue_by_line.get(key, 0) + item.amount
         if svc:
             line_names[item.line_id] = svc.line.name
+    wanted: dict[int, int] = {}
+    for it in inv.items:
+        if it.product_id:
+            wanted[it.product_id] = wanted.get(it.product_id, 0) + it.quantity
+    if wanted and not settings_store.get(db, "products.allow_negative", True):
+        for pid, q in wanted.items():
+            p = db.get(Product, pid)
+            if p.stock_qty < q:
+                raise AccountingError(f"موجودی «{p.name}» کافی نیست (موجودی: {p.stock_qty}، فروش: {q})")
     inv.subtotal = sum(i.amount for i in inv.items)
     inv.total = inv.subtotal - discount
     if inv.total < 0:

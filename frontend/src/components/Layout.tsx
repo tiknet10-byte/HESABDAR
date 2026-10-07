@@ -1,5 +1,5 @@
 import {
-  BarChart3, Bell, BookOpenCheck, Bot, CalendarClock, Camera, HandCoins, LayoutDashboard, LogOut, Menu, Moon, Receipt,
+  BarChart3, Bell, BookOpenCheck, Bot, CalendarClock, Camera, HandCoins, LayoutDashboard, LogOut, Menu, Moon, Package, Receipt,
   ScanLine, Settings, Sun, Users, UsersRound, Wallet, X,
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
@@ -21,6 +21,7 @@ const NAV: { group: string; items: Item[] }[] = [
       { to: "/deposits", label: "بیعانه‌ها", icon: <HandCoins size={19} /> },
       { to: "/appointments", label: "نوبت‌ها", icon: <CalendarClock size={19} /> },
       { to: "/customers", label: "مشتریان", icon: <Users size={19} /> },
+      { to: "/products", label: "محصولات", icon: <Package size={19} /> },
     ],
   },
   {

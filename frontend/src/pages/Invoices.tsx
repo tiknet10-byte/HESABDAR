@@ -1,8 +1,9 @@
-import { AlertTriangle, Plus, Printer, Receipt, Search, Trash2 } from "lucide-react";
+import { AlertTriangle, Package, Plus, Printer, Receipt, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import StaffSelect from "../components/StaffSelect";
 import CustomerPicker, { type CustomerChoice } from "../components/CustomerPicker";
+import ProductPicker from "../components/ProductPicker";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Stat, Tabs } from "../components/ui";
 import { api } from "../lib/api";
 import { ACCOUNT_KINDS, cmoney, jdatetime, money, num, svcLabel } from "../lib/format";
@@ -12,7 +13,7 @@ import { announceFreed } from "../components/Waitlist";
 import { splitDue } from "../lib/paysplit";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
 
-type Item = { service_id?: number; description?: string; unit_price: number; quantity: number; staff_id?: number };
+type Item = { service_id?: number; product_id?: number; product?: any; isProduct?: boolean; description?: string; unit_price: number; quantity: number; staff_id?: number };
 type Pay = { payment_account_id: number; amount: number; keys?: string[]; labels?: string[] };
 
 export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => void; preset?: CustomerChoice; appointmentId?: number }) {
@@ -28,6 +29,12 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   const [depOverride, setDepOverride] = useState<Record<number, boolean>>({}); // deposits the user ticked/unticked by hand
   const [check, setCheck] = useState<{ warnings: string[]; held_deposits: any[] }>({ warnings: [], held_deposits: [] });
   const [issuedAt, setIssuedAt] = useState(toLocalIso(new Date()));
+  const [channel, setChannel] = useState<"in_person" | "online">("in_person");
+  const listed = (p: any, ch = channel) => (ch === "online" && p.online_price ? p.online_price : p.sale_price);
+  const switchChannel = (ch: "in_person" | "online") => {
+    setChannel(ch);
+    setItems((all) => all.map((it) => (it.product ? { ...it, unit_price: listed(it.product, ch) } : it)));
+  };
   const [appts, setAppts] = useState<any[]>([]);
   const [override, setOverride] = useState<Record<number, "done" | "keep">>({});
 
@@ -121,7 +128,7 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   const due = Math.max(0, total - Math.min(heldSum, total));
   // what the customer pays, split per line onto that line's own POS / card (Settings -> each line's accounts)
   const lineOf = (serviceId?: number) => services.find((x) => x.id === serviceId)?.line_id;
-  const groupOf = (it: Item) => (it.service_id ? `line:${lineOf(it.service_id)}` : "other");
+  const groupOf = (it: Item) => (it.product_id ? "products" : it.service_id ? `line:${lineOf(it.service_id)}` : "other");
   const groupLabel = (key: string) => key === "products" ? "فروش محصولات" : key === "other" ? "سایر"
     : services.find((x) => `line:${x.line_id}` === key)?.line ?? "لاین";
   const groupAccounts = (key: string): number[] => {
@@ -152,7 +159,7 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
 
   useEffect(() => {
     const t = setTimeout(() => {
-      api("/api/invoices/preview", { body: { customer_id: cust.customer_id, items: items.filter((i) => i.service_id || i.description) } })
+      api("/api/invoices/preview", { body: { customer_id: cust.customer_id, items: items.filter((i) => (i.service_id || i.description) && !i.product_id) } })
         .then(setCheck).catch(() => {});
     }, 300);
     return () => clearTimeout(t);
@@ -176,7 +183,8 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
     setBusy(true);
     try {
       const inv = await api("/api/invoices", {
-        body: { ...cust, items: items.filter((i) => i.service_id || i.description), discount, apply_deposits: selected.length > 0, deposit_ids: selected.map((d) => d.id),
+        body: { ...cust, channel, items: items.filter((i) => i.service_id || i.product_id || i.description)
+          .map(({ product: _p, isProduct: _x, ...i }) => (i.product_id ? { product_id: i.product_id, quantity: i.quantity, unit_price: i.unit_price, description: i.description } : i)), discount, apply_deposits: selected.length > 0, deposit_ids: selected.map((d) => d.id),
           payments: pays.filter((p) => p.amount > 0).map((p) => ({ payment_account_id: p.payment_account_id, amount: p.amount })), appointment_id: appointmentId ?? null, appointment_ids: doneIds, issued_at: issuedAt },
       });
       toast(`فاکتور ${inv.number} ثبت شد${doneIds.length ? ` و ${faDigits(doneIds.length)} نوبت انجام‌شده ثبت شد` : ""}`);
@@ -194,6 +202,10 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="sm:col-span-2"><Field label="مشتری"><CustomerPicker value={cust} onChange={setCust} /></Field></div>
         <Field label="تاریخ فاکتور"><JalaliPicker pastOnly value={issuedAt} onChange={(v) => setIssuedAt(v || toLocalIso(new Date()))} /></Field>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="label mb-0">نوع فروش:</span>
+        <Tabs value={channel} onChange={switchChannel} items={[{ value: "in_person", label: "حضوری" }, { value: "online", label: "آنلاین (سایت)" }]} />
       </div>
 
       {appts.length > 0 && (
@@ -226,8 +238,23 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
       )}
 
       <div className="space-y-2">
-        <div className="label">خدمات</div>
-        {items.map((it, i) => (
+        <div className="label">خدمات و محصولات</div>
+        {items.map((it, i) => it.isProduct || it.product_id ? (
+          <div key={i} className="grid grid-cols-12 items-start gap-2 rounded-2xl p-2" style={{ background: "var(--surface)", border: "1px solid rgb(14 165 233 / .4)" }}>
+            <ProductPicker className="col-span-12 sm:col-span-5" value={it.product}
+              onChange={(p) => setItem(i, { product: p, product_id: p.id, description: p.name, unit_price: listed(p) })} />
+            <input type="number" min={1} className="input num col-span-3 sm:col-span-2" value={it.quantity} title="تعداد"
+              onChange={(e) => setItem(i, { quantity: Math.max(1, Number(e.target.value) || 1) })} />
+            <div className="col-span-8 sm:col-span-4"><MoneyInput value={it.unit_price} onChange={(v) => setItem(i, { unit_price: v })} /></div>
+            <button className="btn btn-ghost btn-sm col-span-1" onClick={() => setItems(items.filter((_, j) => j !== i))} aria-label="حذف"><Trash2 size={16} /></button>
+            {it.product && (
+              <div className={`col-span-12 text-xs ${it.product.stock_qty < it.quantity ? "font-semibold text-amber-600" : "muted"}`}>
+                موجودی: {faDigits(it.product.stock_qty)} {it.product.unit}{it.product.stock_qty < it.quantity ? " - کمتر از تعداد فروش؛ پس از ثبت خرید، بهای تمام‌شده خودکار اصلاح می‌شود" : ""}
+                {it.quantity > 1 && <> · جمع {money(it.unit_price * it.quantity)}</>}
+              </div>
+            )}
+          </div>
+        ) : (
           <div key={i} className="grid grid-cols-12 gap-2 rounded-2xl p-2" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
             <select className="input col-span-12 sm:col-span-5" value={it.service_id ?? ""} onChange={(e) => {
               const s = services.find((x) => x.id === Number(e.target.value));
@@ -244,7 +271,10 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
             <button className="btn btn-ghost btn-sm col-span-1" onClick={() => setItems(items.filter((_, j) => j !== i))} aria-label="حذف"><Trash2 size={16} /></button>
           </div>
         ))}
-        <button className="btn btn-sm" onClick={() => setItems([...items, { unit_price: 0, quantity: 1 }])}><Plus size={14} />افزودن خدمت</button>
+        <div className="flex flex-wrap gap-2">
+          <button className="btn btn-sm" onClick={() => setItems([...items, { unit_price: 0, quantity: 1 }])}><Plus size={14} />افزودن خدمت</button>
+          <button className="btn btn-sm" onClick={() => setItems([...items.filter((x) => x.service_id || x.product_id || x.description || x.isProduct), { unit_price: 0, quantity: 1, isProduct: true }])}><Package size={14} />افزودن محصول</button>
+        </div>
       </div>
 
       {check.warnings.length > 0 && (
@@ -319,7 +349,7 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
       </div>
 
       <div className="rounded-2xl p-4 text-sm" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
-        <div className="flex justify-between"><span className="muted">جمع خدمات</span><span className="num">{money(subtotal)}</span></div>
+        <div className="flex justify-between"><span className="muted">جمع خدمات و محصولات</span><span className="num">{money(subtotal)}</span></div>
         {discount > 0 && <div className="flex justify-between"><span className="muted">تخفیف</span><span className="num">− {money(discount)}</span></div>}
         {heldSum > 0 && <div className="flex justify-between"><span className="muted">بیعانه</span><span className="num">− {money(Math.min(heldSum, total))}</span></div>}
         <div className="mt-2 flex justify-between text-base font-extrabold"><span>قابل پرداخت</span><span className="num gradient-text">{money(due)}</span></div>

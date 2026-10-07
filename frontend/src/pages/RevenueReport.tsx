@@ -227,6 +227,7 @@ export default function RevenueReport() {
           <select className="input w-auto py-1.5 text-sm" value={lineId} onChange={(e) => setLineId(Number(e.target.value))} aria-label="لاین">
             <option value={0}>همهٔ لاین‌ها</option>
             {allLines.map((l) => <option key={l.id} value={l.id}>{l.code ? `${l.code} · ` : ""}{l.name}{l.is_active ? "" : " (بایگانی)"}</option>)}
+            <option value={-1}>فروش محصولات</option>
           </select>
           <select className="input w-auto py-1.5 text-sm" value={source} onChange={(e) => setSource(e.target.value)} aria-label="منبع">
             {SOURCES.map((s) => <option key={s.v} value={s.v}>منبع: {s.l}</option>)}
@@ -256,8 +257,12 @@ export default function RevenueReport() {
                 <thead><tr><th>لاین</th><th>درآمد</th><th>سهم</th><th>تعداد</th><th>میانگین</th></tr></thead>
                 <tbody>{data.lines.map((l: any) => (
                   <tr key={l.id} className="cursor-pointer" title="فقط همین لاین" onClick={() => setLineId(lineId === l.id ? 0 : l.id)}>
-                    <td className="font-semibold"><span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ background: l.color }} />{l.code && <span className="num muted ml-1 text-xs">{l.code}</span>}{l.name}</td>
-                    <td className="num font-bold">{money(l.revenue)}</td>
+                    <td className="font-semibold"><span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ background: l.color }} />{l.code && l.id !== -1 && <span className="num muted ml-1 text-xs">{l.code}</span>}{l.name}</td>
+                    <td className="num font-bold">{money(l.revenue)}
+                      {l.cogs !== undefined && <div className="text-[11px] font-normal" title="سود ناخالص = فروش − بهای تمام‌شدهٔ کالا">
+                        <span className="muted">بهای کالا {money(l.cogs, false)} · </span>سود {money(l.profit, false)}{l.margin != null && <span className="muted"> ({faDigits(l.margin)}٪)</span>}
+                      </div>}
+                    </td>
                     <td><ShareBar pct={l.share} color={l.color} /></td>
                     <td className="num">{num(l.count)}</td>
                     <td className="num text-xs">{money(l.avg)}</td>

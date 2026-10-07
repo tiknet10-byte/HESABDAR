@@ -9,6 +9,7 @@ import { AuthContext, type Toast, ToastContext, type User } from "./lib/hooks";
 import Appointments from "./pages/Appointments";
 import Assistant from "./pages/Assistant";
 import Customers from "./pages/Customers";
+import Products from "./pages/Products";
 import Dashboard from "./pages/Dashboard";
 import Deposits from "./pages/Deposits";
 import Expenses from "./pages/Expenses";
@@ -92,6 +93,7 @@ function App() {
                 <Route path="deposits" element={<Deposits />} />
                 <Route path="appointments" element={<Appointments />} />
                 <Route path="customers" element={<Customers />} />
+                <Route path="products" element={<Products />} />
                 <Route path="reconciliation" element={<Reconciliation />} />
                 <Route path="scan" element={<Scan />} />
                 <Route path="assistant" element={<Assistant />} />
