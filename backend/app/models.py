@@ -132,6 +132,7 @@ class Customer(TimestampMixin, Base):
     other_mobiles: Mapped[list | None] = mapped_column(JSON, nullable=True)
     other_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
     tp_code: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)  # account code in Tizpardaz (products software)
+    woo_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)  # customer (user) id on the website
 
 
 # ---------------------------------------------------------------- money accounts
@@ -430,6 +431,11 @@ class Product(TimestampMixin, Base):
     stock_value: Mapped[int] = mapped_column(BigInteger, default=0)
     unit_cost: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # current unit cost under the chosen method
     last_purchase_cost: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # the price it was last sold at (filled in on the next invoice); a new list price clears it
+    last_sale_price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_sale_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_online_price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # website orders
+    last_online_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class Supplier(TimestampMixin, Base):
@@ -518,3 +524,66 @@ class TradeHistory(Base):
     amount: Mapped[int] = mapped_column(BigInteger, default=0)  # Rial, >= 0
     cost: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # sales: cost of the goods (worked out on import)
     fp: Mapped[str] = mapped_column(String(160), default="", index=True)  # fingerprint: the same row is never imported twice
+
+
+# ---------------------------------------------------------------- website (WooCommerce)
+class WooProduct(Base):
+    """A product (or variation) of the website as last read from it, linked to a product here (by SKU)."""
+    __tablename__ = "woo_products"
+    id: Mapped[int] = mapped_column(primary_key=True)  # the website's product / variation id
+    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # variations: the variable product
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True, index=True)
+    sku: Mapped[str] = mapped_column(String(64), default="", index=True)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    status: Mapped[str] = mapped_column(String(16), default="publish")
+    price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # Rial, what the site sells it at now
+    regular_price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    manage_stock: Mapped[bool] = mapped_column(Boolean, default=False)
+    stock_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    seen_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+
+
+class WooOrder(Base):
+    """A website order and what was booked for it here."""
+    __tablename__ = "woo_orders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    number: Mapped[str] = mapped_column(String(32), default="")
+    status: Mapped[str] = mapped_column(String(24), default="")  # the site's status
+    state: Mapped[str] = mapped_column(String(16), default="")  # booked | cancelled | skipped | local_void | error
+    invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id"), nullable=True, index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)
+    total: Mapped[int] = mapped_column(BigInteger, default=0)  # Rial
+    refunded: Mapped[int] = mapped_column(BigInteger, default=0)
+    paid: Mapped[bool] = mapped_column(Boolean, default=False)
+    method: Mapped[str] = mapped_column(String(64), default="")  # payment method title on the site
+    created: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # placed on the site
+    modified: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    fp: Mapped[str] = mapped_column(String(64), default="")  # content booked (items, totals, refunds)
+    refund_ids: Mapped[list] = mapped_column(JSON, default=list)  # refunds of the site whose money-out is booked here
+    note: Mapped[str] = mapped_column(String(256), default="")
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+
+
+class WooOutbox(Base):
+    """Stock changes made here that the website must get (in the same transaction as the change itself)."""
+    __tablename__ = "woo_outbox"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(8))  # delta (add qty to the site's stock) | set (site = stock here)
+    qty: Mapped[int] = mapped_column(Integer, default=0)
+    reason: Mapped[str] = mapped_column(String(128), default="")
+    status: Mapped[str] = mapped_column(String(12), default="pending", index=True)  # pending | done | skipped | error
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(String(256), default="")
+    result: Mapped[str] = mapped_column(String(64), default="")  # e.g. "12 -> 22"
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class WooLog(Base):
+    __tablename__ = "woo_log"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    level: Mapped[str] = mapped_column(String(8), default="info")  # info | warn | error
+    message: Mapped[str] = mapped_column(String(400))

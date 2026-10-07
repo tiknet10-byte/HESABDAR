@@ -11,12 +11,13 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api import auth, catalog, customers, finance, legacy, products, system, tizpardaz
+from .api import woo as woo_api
 from .core import db as dbmod
 from .core.config import get_settings
 from .core.db import Base, SessionLocal
 from .plugins.manager import manager
 from .seed import seed_base
-from .services import backup, codes, settings_store  # codes: gives new lines/services their code on save
+from .services import backup, codes, settings_store, woo  # codes: gives new lines/services their code on save
 
 log = logging.getLogger("hesabdar")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -148,6 +149,7 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
         s = get_settings()
         tasks.append(asyncio.create_task(_periodic("backup", s.backup_interval_hours * 3600, _auto_backup)))
         tasks.append(asyncio.create_task(_periodic("db_tune", 24 * 3600, _tune_db)))
+        tasks.append(asyncio.create_task(_periodic("woo", 60, woo.job)))  # website shop: runs when its interval is due
         for name, interval, fn in manager.jobs():
             tasks.append(asyncio.create_task(_periodic(name, interval, fn)))
     yield
@@ -171,7 +173,8 @@ def create_app() -> FastAPI:
         response.headers.setdefault("Permissions-Policy", "camera=(self), microphone=()")
         return response
 
-    for r in (auth.router, catalog.router, customers.router, finance.router, legacy.router, products.router, system.router, tizpardaz.router):
+    for r in (auth.router, catalog.router, customers.router, finance.router, legacy.router, products.router, system.router, tizpardaz.router,
+              woo_api.router):
         app.include_router(r)
 
     manager.discover()

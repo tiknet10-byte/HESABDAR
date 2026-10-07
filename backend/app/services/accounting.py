@@ -305,8 +305,9 @@ def record_deposit(db: Session, *, customer: Customer, amount: int, payment_acco
     return dep
 
 
-def close_deposit(db: Session, dep: Deposit, action: str, refund_account: PaymentAccount | None = None, user=None) -> Deposit:
-    """action: refund (money returned) or forfeit (customer no-show, deposit becomes income)."""
+def close_deposit(db: Session, dep: Deposit, action: str, refund_account: PaymentAccount | None = None, user=None,
+                  at: datetime | None = None) -> Deposit:
+    """action: refund (money returned) or forfeit (customer no-show, deposit becomes income). at: when (default now)."""
     if dep.status != "held":
         raise AccountingError("این بیعانه قبلاً تسویه شده است")
     if action == "refund":
@@ -314,18 +315,18 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
         post(db, "استرداد بیعانه", [
             Leg(account(db, DEPOSITS), debit=dep.amount, customer_id=dep.customer_id),
             Leg(cash_account_for(db, pa), credit=dep.amount, customer_id=dep.customer_id),
-        ], "deposit", dep.id)
+        ], "deposit", dep.id, at=at)
         dep.status = "refunded"
         dep.refund_account_id = pa.id
     elif action == "forfeit":
         post(db, "سوخت بیعانه (عدم مراجعه)", [
             Leg(account(db, DEPOSITS), debit=dep.amount, customer_id=dep.customer_id),
             Leg(account(db, FORFEITED), credit=dep.amount, customer_id=dep.customer_id),
-        ], "deposit", dep.id)
+        ], "deposit", dep.id, at=at)
         dep.status = "forfeited"
     else:
         raise AccountingError("unknown action")
-    dep.closed_at = local_now()
+    dep.closed_at = at or local_now()
     audit(db, f"deposit.{action}", "deposit", dep.id, {"amount": dep.amount}, user=user)
     return dep
 
@@ -379,7 +380,7 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     """items: [{service_id? | product_id?, description?, quantity, unit_price, discount?, staff_id?}]
     payments: [{payment_account_id, amount, reference?}]. Products leave the stock and their cost (COGS) is posted."""
     from ..models import Product
-    from . import inventory, settings_store
+    from . import inventory, settings_store, woo_queue
 
     if not items:
         raise AccountingError("فاکتور بدون آیتم قابل ثبت نیست")
@@ -398,8 +399,7 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
         if qty <= 0:
             raise AccountingError("تعداد باید مثبت باشد")
         if prod:
-            listed = prod.online_price if channel == "online" and prod.online_price else prod.sale_price
-            price = int(it["unit_price"] if it.get("unit_price") is not None else listed)
+            price = int(it["unit_price"] if it.get("unit_price") is not None else inventory.suggested_price(prod, channel))
             # products carry no staff commission; their line in the books is "product sales"
             item = InvoiceItem(product_id=prod.id, line_id=None, staff_id=None, description=it.get("description") or prod.name,
                                quantity=qty, unit_price=price, discount=int(it.get("discount") or 0))
@@ -420,7 +420,8 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     for it in inv.items:
         if it.product_id:
             wanted[it.product_id] = wanted.get(it.product_id, 0) + it.quantity
-    if wanted and not settings_store.get(db, "products.allow_negative", True):
+    # (a website order is already sold: it is booked even when the stock here is short)
+    if wanted and source != "woocommerce" and not settings_store.get(db, "products.allow_negative", True):
         for pid, q in wanted.items():
             p = db.get(Product, pid)
             if p.stock_qty < q:
@@ -471,6 +472,11 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     sold = {inventory.sell(db, item, inv.issued_at).product_id for item in inv.items if item.product_id}
     for pid in sold:
         inventory.recost(db, pid)
+    for item in inv.items:
+        if item.product_id:
+            inventory.remember_price(db.get(Product, item.product_id), item.unit_price, inv.issued_at, channel)
+            if source != "woocommerce":  # a website order is already out of the website's stock
+                woo_queue.add(db, item.product_id, -item.quantity, f"فروش حضوری {inv.number}")
 
     # apply customer deposits
     deposit_q = select(Deposit).where(Deposit.customer_id == customer.id, Deposit.status == "held")
@@ -606,7 +612,8 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payment
     # products come back to stock at the cost they were sold at
     from . import inventory
 
-    inventory.return_invoice(db, inv.id, same_time=payments == "cancel")
+    # website orders are cancelled on the website, which puts the goods back in its own stock
+    inventory.return_invoice(db, inv.id, same_time=payments == "cancel", notify_site=inv.source != "woocommerce")
     # appointments it settled are open again
     from .scheduling import validate_slot
 

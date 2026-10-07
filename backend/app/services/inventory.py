@@ -41,7 +41,7 @@ from ..models import (
     SupplierPayment,
     local_now,
 )
-from . import settings_store
+from . import settings_store, woo_queue
 from .accounting import OPENING, AccountingError, Leg, account, cash_account_for, ensure_not_future, post
 from .audit import audit
 from .jalali import gregorian_to_jalali
@@ -295,6 +295,7 @@ def opening_stock(db: Session, product: Product, qty: int, unit_cost: int, at: d
     m = StockMove(product_id=product.id, at=at or local_now(), kind="opening", qty=qty, cost=qty * unit_cost, note="موجودی اول دوره")
     db.add(m)
     db.flush()
+    woo_queue.add(db, product.id, qty, f"موجودی اول دوره - {product.name}")
     if m.cost:
         post(db, f"موجودی اول دوره - {product.name}", [Leg(_acc(db, INVENTORY), debit=m.cost), Leg(account(db, OPENING), credit=m.cost)],
              "stock_opening", m.id, at=m.at)
@@ -317,9 +318,28 @@ def count_stock(db: Session, product: Product, counted: int, at: datetime | None
                   note=note or f"شمارش انبار: {counted}")
     db.add(m)
     db.flush()
+    woo_queue.set_to_stock(db, product.id, f"شمارش انبار - {product.name}")
     recost(db, product.id)
     audit(db, "product.count", "product", product.id, {"system": current, "counted": counted}, user=user)
     return m
+
+
+def suggested_price(p: Product, channel: str | None = None) -> int:
+    """Price to fill in on a new invoice: what it was last sold at (a newer list price clears that)."""
+    if channel == "online":
+        return p.last_online_price or p.online_price or p.last_sale_price or p.sale_price or 0
+    return p.last_sale_price or p.sale_price or 0
+
+
+def remember_price(p: Product, price: int, at: datetime, channel: str | None = None) -> None:
+    """Keep the latest selling price (an invoice entered later for an earlier date doesn't overwrite a newer one)."""
+    if price <= 0:
+        return
+    if channel == "online":
+        if p.last_online_at is None or at >= p.last_online_at:
+            p.last_online_price, p.last_online_at = price, at
+    elif p.last_sale_at is None or at >= p.last_sale_at:
+        p.last_sale_price, p.last_sale_at = price, at
 
 
 def sell(db: Session, item: InvoiceItem, at: datetime) -> StockMove:
@@ -329,7 +349,7 @@ def sell(db: Session, item: InvoiceItem, at: datetime) -> StockMove:
     return m
 
 
-def return_invoice(db: Session, invoice_id: int, *, same_time: bool) -> list[int]:
+def return_invoice(db: Session, invoice_id: int, *, same_time: bool, notify_site: bool = True) -> list[int]:
     """Goods of a voided invoice come back to stock at the cost they were sold at (at the sale's own time when
     the invoice was a mistake, now when the customer really returned them)."""
     item_ids = select(InvoiceItem.id).where(InvoiceItem.invoice_id == invoice_id)
@@ -338,6 +358,8 @@ def return_invoice(db: Session, invoice_id: int, *, same_time: bool) -> list[int
         db.add(StockMove(product_id=s.product_id, at=s.at if same_time else local_now(), kind="sale_return", qty=-s.qty,
                          invoice_item_id=s.invoice_item_id, ref_move_id=s.id, note="فاکتور باطل شد"))
         products.add(s.product_id)
+        if notify_site:
+            woo_queue.add(db, s.product_id, -s.qty, "ابطال فاکتور فروش")
     db.flush()
     for pid in products:
         recost(db, pid)
@@ -392,6 +414,7 @@ def record_purchase(db: Session, *, supplier: Supplier | None, items: list[dict]
     for it in pur.items:
         db.add(StockMove(product_id=it.product_id, at=pur.at, kind="purchase", qty=it.quantity, cost=it.cost,
                          purchase_item_id=it.id, note=pur.number))
+        woo_queue.add(db, it.product_id, it.quantity, f"خرید {pur.number}")
     name = supplier.name if supplier else "تأمین‌کننده"
     if pur.total:
         post(db, f"خرید {pur.number} از {name}", [Leg(_acc(db, INVENTORY), debit=pur.total), Leg(_acc(db, PAYABLE), credit=pur.total)],
@@ -453,6 +476,7 @@ def void_purchase(db: Session, pur: Purchase, reason: str = "", user=None) -> Pu
     for it in pur.items:
         for m in db.scalars(select(StockMove).where(StockMove.purchase_item_id == it.id)):
             products.add(m.product_id)
+            woo_queue.add(db, m.product_id, -m.qty, f"ابطال خرید {pur.number}")
             db.delete(m)
     db.flush()
     pur.paid = 0

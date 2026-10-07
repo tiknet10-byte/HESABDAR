@@ -187,7 +187,7 @@ SECRET_KEYS = {"ai.api_key"}
 
 
 def _public_settings(db: Session) -> dict:
-    out = settings_store.all_settings(db)
+    out = {k: v for k, v in settings_store.all_settings(db).items() if not k.startswith("woo.")}  # website keys: /api/woo only
     for k in SECRET_KEYS:
         out[k] = claude.MASK if out.get(k) else ""
     return out

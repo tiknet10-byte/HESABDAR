@@ -61,6 +61,11 @@ def _p(p: Product) -> dict:
             "sale_price": p.sale_price, "online_price": p.online_price, "reorder_level": p.reorder_level, "notes": p.notes,
             "is_active": p.is_active, "stock_qty": p.stock_qty, "stock_value": p.stock_value, "unit_cost": p.unit_cost,
             "last_purchase_cost": p.last_purchase_cost, "margin": margin,
+            # last selling prices: filled in on the next invoice (in person / website)
+            "last_sale_price": p.last_sale_price, "last_sale_at": p.last_sale_at.isoformat(timespec="minutes") if p.last_sale_at else None,
+            "last_online_price": p.last_online_price,
+            "last_online_at": p.last_online_at.isoformat(timespec="minutes") if p.last_online_at else None,
+            "price_in_person": inventory.suggested_price(p), "price_online": inventory.suggested_price(p, "online"),
             "margin_pct": round(margin / p.sale_price * 100, 1) if margin is not None and p.sale_price else None,
             "low": p.is_active and p.stock_qty <= p.reorder_level}
 
@@ -123,6 +128,10 @@ def create_product(body: ProductIn, db: Session = Depends(get_db), user=Depends(
 def update_product(pid: int, body: ProductIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
     p = db.get(Product, pid) or _404("محصول")
     code, sku = _check(db, body, pid)
+    if body.sale_price != p.sale_price:  # a new list price is the price from now on
+        p.last_sale_price = p.last_sale_at = None
+    if body.online_price != p.online_price:
+        p.last_online_price = p.last_online_at = None
     for k, v in body.model_dump(exclude={"code", "sku"}).items():
         setattr(p, k, v)
     p.name, p.code, p.sku = body.name.strip(), code, sku
