@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .textutil import toman
@@ -50,6 +50,15 @@ def product_cogs(db: Session, s: datetime, e: datetime) -> int:
     sold = db.scalar(select(func.coalesce(func.sum(StockMove.cost), 0)).where(StockMove.kind == "sale", StockMove.invoice_item_id.in_(items))) or 0
     back = db.scalar(select(func.coalesce(func.sum(StockMove.cost), 0)).where(StockMove.kind == "sale_return", StockMove.invoice_item_id.in_(items))) or 0
     return int(sold) - int(back)
+
+
+def history_cogs(db: Session, s: datetime, e: datetime) -> int:
+    """Cost of the product sales brought over from other software (worked out when they were imported)."""
+    from ..models import TradeHistory
+
+    signed = case((TradeHistory.kind == "sale_return", -TradeHistory.cost), else_=TradeHistory.cost)
+    return int(db.scalar(select(func.coalesce(func.sum(signed), 0)).where(TradeHistory.kind.in_(("sale", "sale_return")),
+                                                                          TradeHistory.at.between(s, e))) or 0)
 
 
 # money that went back to customers, and corrections of money wrongly recorded as received
@@ -478,6 +487,16 @@ def _revenue_rows(db: Session, s: datetime, e: datetime, source: str = "all") ->
         for day, line_id, staff_id, service_id, total, n in db.execute(q):
             rows.append({"day": str(day), "line_id": line_id, "staff_id": staff_id, "service_id": service_id, "name": None,
                          "amount": int(total or 0), "count": int(n or 0), "old": True})
+        # product sales brought over (Tizpardaz, and products sold in Chehreh): the products line
+        from ..models import TradeHistory
+        signed = case((TradeHistory.kind == "sale_return", -TradeHistory.amount), else_=TradeHistory.amount)
+        qty = case((TradeHistory.kind == "sale_return", -TradeHistory.qty), else_=TradeHistory.qty)
+        q = (select(func.date(TradeHistory.at), TradeHistory.product_id, TradeHistory.description, func.sum(signed), func.sum(qty))
+             .where(TradeHistory.kind.in_(("sale", "sale_return")), TradeHistory.at.between(s, e))
+             .group_by(func.date(TradeHistory.at), TradeHistory.product_id, TradeHistory.description))
+        for day, product_id, desc, total, n in db.execute(q):
+            rows.append({"day": str(day), "line_id": PRODUCTS_LINE, "staff_id": None, "service_id": None, "product_id": product_id,
+                         "name": desc, "amount": int(total or 0), "count": int(n or 0), "old": True})
     return rows
 
 
@@ -564,7 +583,7 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
     rev = total["revenue"] or 1
     if PRODUCTS_LINE in agg_line:  # products: what they cost and the gross profit
         pl = agg_line[PRODUCTS_LINE]
-        pl["cogs"] = product_cogs(db, s, e)
+        pl["cogs"] = product_cogs(db, s, e) + (history_cogs(db, s, e) if source in ("all", "old") else 0)
         pl["profit"] = pl["revenue"] - pl["cogs"]
         pl["margin"] = round(pl["profit"] / pl["revenue"] * 100, 1) if pl["revenue"] else None
 

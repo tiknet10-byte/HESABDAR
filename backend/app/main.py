@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api import auth, catalog, customers, finance, legacy, products, system
+from .api import auth, catalog, customers, finance, legacy, products, system, tizpardaz
 from .core import db as dbmod
 from .core.config import get_settings
 from .core.db import Base, SessionLocal
@@ -171,7 +171,7 @@ def create_app() -> FastAPI:
         response.headers.setdefault("Permissions-Policy", "camera=(self), microphone=()")
         return response
 
-    for r in (auth.router, catalog.router, customers.router, finance.router, legacy.router, products.router, system.router):
+    for r in (auth.router, catalog.router, customers.router, finance.router, legacy.router, products.router, system.router, tizpardaz.router):
         app.include_router(r)
 
     manager.discover()

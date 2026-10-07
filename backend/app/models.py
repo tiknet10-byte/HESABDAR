@@ -131,6 +131,7 @@ class Customer(TimestampMixin, Base):
     # when two records of the same person are merged, the other one's numbers and codes are kept here
     other_mobiles: Mapped[list | None] = mapped_column(JSON, nullable=True)
     other_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    tp_code: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)  # account code in Tizpardaz (products software)
 
 
 # ---------------------------------------------------------------- money accounts
@@ -494,3 +495,26 @@ class StockMove(Base):
     purchase_item_id: Mapped[int | None] = mapped_column(ForeignKey("purchase_items.id"), nullable=True, index=True)
     ref_move_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # a return points to the sale it reverses
     note: Mapped[str] = mapped_column(String(256), default="")
+
+
+class TradeHistory(Base):
+    """Sales, purchases and expenses brought over from other software (Tizpardaz, Chehreh) - history for the
+    reports and the customer files. They don't move money or stock in this system: the balances and stock
+    of that software are brought over as opening balances instead, so nothing is counted twice."""
+    __tablename__ = "trade_history"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="tizpardaz")  # tizpardaz | chehreh
+    kind: Mapped[str] = mapped_column(String(16))  # sale | sale_return | purchase | purchase_return | expense
+    at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    doc_no: Mapped[str] = mapped_column(String(32), default="")
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True, index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)
+    party: Mapped[str] = mapped_column(String(128), default="")  # customer / supplier as written in the file
+    account: Mapped[str] = mapped_column(String(128), default="")  # expense: the expense account title
+    description: Mapped[str] = mapped_column(String(256), default="")
+    qty: Mapped[int] = mapped_column(Integer, default=0)
+    unit_price: Mapped[int] = mapped_column(BigInteger, default=0)
+    amount: Mapped[int] = mapped_column(BigInteger, default=0)  # Rial, >= 0
+    cost: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # sales: cost of the goods (worked out on import)
+    fp: Mapped[str] = mapped_column(String(160), default="", index=True)  # fingerprint: the same row is never imported twice

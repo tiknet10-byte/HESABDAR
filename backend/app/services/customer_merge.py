@@ -23,13 +23,14 @@ from ..models import (
     JournalLine,
     KnowledgeItem,
     Payment,
+    TradeHistory,
     WaitlistEntry,
 )
 from .audit import audit
 from .service_catalog import name_key
 
 PLACEHOLDER = "مشتری "  # names the bot gives before a real name is known
-LINKED = (Appointment, WaitlistEntry, Deposit, Invoice, Payment, JournalLine, InboundReceipt, ConversationMessage)
+LINKED = (Appointment, WaitlistEntry, Deposit, Invoice, Payment, JournalLine, InboundReceipt, ConversationMessage, TradeHistory)
 
 
 def person_key(name: str | None) -> str:
@@ -143,8 +144,14 @@ def merge(db: Session, keep: Customer, drop: Customer, user=None) -> dict:  # no
     # numbers and codes: the kept record gets the other's as extra ones (or as its own when it has none)
     mobiles = [x for x in [drop.mobile, *(drop.other_mobiles or [])] if x]
     codes = [x for x in [drop.legacy_code, *(drop.other_codes or [])] if x]
+    if drop.tp_code:  # account code in Tizpardaz: the kept record takes it, or remembers it as tp:<code>
+        if keep.tp_code:
+            codes.append(f"tp:{drop.tp_code}")
+        else:
+            keep.tp_code = drop.tp_code
     drop.mobile = None
     drop.legacy_code = None
+    drop.tp_code = None
     db.flush()
     if not keep.mobile and mobiles:
         keep.mobile = mobiles.pop(0)

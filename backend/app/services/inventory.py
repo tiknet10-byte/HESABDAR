@@ -92,9 +92,13 @@ def method(db: Session) -> str:
     return m if m in METHODS else "average"
 
 
-def next_product_code(db: Session) -> str:
-    nums = [int(c) for c in db.scalars(select(Product.code)) if c and c.isdigit()]
-    return str(max([10000, *nums]) + 1)
+def next_product_code(db: Session, reserved: set[str] | None = None) -> str:
+    """Product codes continue the accounting software's numbering (Tizpardaz: 1, 2, 3 ...); `reserved` codes are skipped."""
+    nums = {int(c) for c in [*db.scalars(select(Product.code)), *(reserved or ())] if c and c.isdigit()}
+    n = max((x for x in nums if x < 10000), default=0) + 1
+    while n in nums:
+        n += 1
+    return str(n)
 
 
 # ------------------------------------------------------------------ the engine

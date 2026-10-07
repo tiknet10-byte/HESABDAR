@@ -1194,7 +1194,7 @@ def test_products_purchase_sale_profit_exact_under_every_costing_method(client, 
     inv0, cogs0, rev0, pay0 = _bal(client, "1300"), _bal(client, "5400"), _bal(client, "4200"), _bal(client, "2300")
     client.put("/api/products-settings", json={"method": "average"})
     a = client.post("/api/products", json={"name": "سرم ویتامین C", "sku": "VC-30", "sale_price": 300_000, "online_price": 320_000}).json()
-    assert a["code"] == "10001" or int(a["code"]) > 10000
+    assert a["code"].isdigit() and int(a["code"]) >= 1
     assert client.post("/api/products", json={"name": "تکراری", "sku": "vc-30"}).status_code == 409
     t0 = (datetime.now() - timedelta(hours=3)).replace(microsecond=0)
     client.post(f"/api/products/{a['id']}/opening", json={"qty": 5, "unit_cost": 100_000, "at": t0.isoformat()})
@@ -1267,3 +1267,86 @@ def test_products_purchase_sale_profit_exact_under_every_costing_method(client, 
     assert not any(x["name"] == "فروش محصولات" for x in rev_rep["staff"])
     month = client.get("/api/dashboard").json()["month"]
     assert month["cogs"] == 400_000 and month["net_profit"] == month["revenue"] - 400_000 - month["expenses"]
+
+
+def test_tizpardaz_customers_products_and_journal(client, accounts, services):
+    """Tizpardaz exports (as in the clinic's screenshots): customers matched by name only, products with the
+    Tizpardaz code + SKU and final stock, journal as history with the cost of each sale; nothing counted twice."""
+    def up(kind, rows, **form):
+        r = client.post("/api/import/tizpardaz/preview", files={"file": (f"{kind}.xlsx", _xlsx(rows), "application/octet-stream")},
+                        data={"kind": kind, "unit": "toman", **form})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    # customers already here from Chehreh: one «ساناز تاجیک», two «فاطمه بستانی»
+    sanaz = client.post("/api/customers", json={"full_name": "ساناز تاجیک", "mobile": "09125550101"}).json()
+    f1 = client.post("/api/customers", json={"full_name": "فاطمه بستانی", "mobile": "09125550102"}).json()
+    client.post("/api/customers", json={"full_name": "فاطمه  بستانی", "mobile": "09125550103"})
+    cust = up("customers", [["لیست حساب‌ها"], ["کد حساب", "عنوان حساب", "بدهکار", "بستانکار"],
+                            [1, "محمودي(سياوش)", None, None], [4, "تاجيک(ساناز)", 500_000, None], [9, "بستاني(فاطمه)", None, 200_000],
+                            [12, "مرادي(سحر)", None, None]])
+    rows = {r["code"]: r for r in cust["rows"]}
+    assert rows["1"]["name"] == "سیاوش محمودی" and rows["1"]["status"] == "new"
+    assert rows["4"]["status"] == "found" and rows["4"]["customer_id"] == sanaz["id"]
+    assert rows["9"]["status"] == "ambiguous" and len(rows["9"]["candidates"]) == 2
+    res = client.post(f"/api/import/tizpardaz/{cust['id']}/commit", json={"choices": {str(rows["9"]["row"]): f1["id"]}, "balances": True}).json()
+    assert res["result"]["new"] == 2 and res["result"]["linked"] == 2
+    prof = client.get(f"/api/customers/{sanaz['id']}").json()
+    assert prof["balance"]["receivable"] == 5_000_000  # 500,000 toman owed, brought over as an opening balance
+    assert client.get(f"/api/customers/{f1['id']}").json()["balance"]["deposits_held"] == 2_000_000
+
+    # products: one already here (exact name), one sold as a "service" in Chehreh
+    old = client.post("/api/products", json={"name": "دور چشم نامبوزین +9", "sale_price": 1}).json()
+    client.post(f"/api/products/{old['id']}/opening", json={"qty": 3, "unit_cost": 100})
+    line = client.post("/api/lines", json={"name": "لاین فروش قدیمی"}).json()
+    svc = client.post("/api/services", json={"line_id": line["id"], "name": "شوینده پوست خشک سراوی سبز", "base_price": 1}).json()
+    hist = [["کد مشتری", "نام مشتری", "تاریخ", "خدمت", "مبلغ"], ["990011", "ساناز تاجیک", "1404/12/01", "شوینده پوست خشک سراوی سبز", 2_000_000]]
+    pv = client.post("/api/import/legacy/preview", files={"file": ("h.xlsx", _xlsx(hist), "application/octet-stream")}, data={"kind": "history", "unit": "toman"}).json()
+    client.post(f"/api/import/legacy/{pv['id']}/commit", json={})
+    head = ["کد کالا", "کد فنی کالا", "گروه اصلی", "زیرگروه اصلی", "زیرگروه فرعی", "نام کالا", "تعداد بدهکار", "تعداد بستانکار", "تش",
+            "قیمت خرید", "قیمت فروش1", "قیمت فروش2", "قیمت فروش3", "فی آخرین فروش", "فی آخرین خرید", "تعداد واحد فرعی"]
+    prods = up("products", [["گزارش کالا"], [], head,
+                            [1, 0, "شوینده", "", "", "شوینده روغني سراوي بزرگ زرد", 7, None, None, 0, 0, 0, 0, 4_950_000, 2_436_000, 0],
+                            [2, 0, "شوینده", "", "", "شوینده پوست خشک سراوي سبز", 24, None, None, 0, 0, 0, 0, 3_490_000, 1_980_000, 0],
+                            [8, 0, "دور چشم", "", "", "دور چشم نامبوزین +9", 55, None, None, 0, 0, 0, 0, 3_190_000, 1_670_000, 0]])
+    pr = {r["code"]: r for r in prods["rows"]}
+    assert pr["1"]["sku"] == "LT-CL-CRV-002" and pr["1"]["qty"] == 7 and pr["1"]["buy"] == 24_360_000 and pr["1"]["default"] == "new"
+    assert pr["8"]["default"] == f"p:{old['id']}"
+    assert pr["2"]["default"] == f"s:{svc['id']}"  # same name as the Chehreh service (ي/ی don't matter)
+    client.post(f"/api/import/tizpardaz/{prods['id']}/commit", json={"choices": {}})
+    plist = {p["code"]: p for p in client.get("/api/products?all=1").json()}
+    assert plist["8"]["id"] == old["id"] and plist["8"]["stock_qty"] == 55 and plist["8"]["sku"] == "LT-EC-NMB-001"
+    assert plist["1"]["stock_qty"] == 7 and plist["1"]["stock_value"] == 7 * 24_360_000 and plist["1"]["sale_price"] == 49_500_000
+    assert plist["2"]["stock_qty"] == 24
+    # the Chehreh "service" sales became this product's history; the service is archived
+    assert not any(s["id"] == svc["id"] for s in client.get("/api/services").json())
+
+    # journal: sales, a purchase, an expense; the customer of a sale may be written as its Tizpardaz code
+    jhead = ["نوع سند", "شماره سند", "شماره سند داخلی", "تاریخ", "عنوان حساب", "شرح", "مقدار", "فی", "بدهکار", "بستانکار"]
+    jrows = [["دفتر روزنامه"], [], jhead,
+             ["فاکتور خرید", 5, 10, "1405/01/02", "کالا", "شوینده روغني سراوي بزرگ زرد  از  پخش البرز", 10, 2_400_000, 24_000_000, 0],
+             ["فاکتور فروش", 14, 42, "1405/01/09", "کالا", "شوینده روغني سراوي بزرگ زرد  به  تاجيک(ساناز)", 1, 4_950_000, 0, 4_950_000],
+             ["فاکتور فروش", 14, 42, "1405/01/09", "تاجيک(ساناز)", "فاکتور 14", None, None, 4_950_000, 0],
+             ["فاکتور فروش", 20, 50, "1405/01/20", "کالا", "دور چشم نامبوزین +9 به 4", 2, 3_190_000, 0, 6_380_000],
+             ["فاکتور فروش", 21, 51, "1405/01/21", "کالا", "کرم ناشناخته به متفرقه", 1, 1_000_000, 0, 1_000_000],
+             ["سند هزینه", 30, 60, "1405/01/25", "هزینه حمل", "ارسال پستی", None, None, 300_000, 0],
+             ["سند هزینه", 30, 60, "1405/01/25", "صندوق", "ارسال پستی", None, None, 0, 300_000]]
+    jr = up("journal", jrows)
+    assert jr["summary"]["counts"] == {"purchase": 1, "sale": 3, "expense": 1}
+    assert [u["name"] for u in jr["unknown_products"]] == ["کرم ناشناخته"]
+    sale14 = next(r for r in jr["rows"] if r["doc_no"] == "14")
+    assert sale14["customer_id"] == sanaz["id"] and sale14["amount"] == 49_500_000
+    assert next(r for r in jr["rows"] if r["doc_no"] == "20")["customer_id"] == sanaz["id"]  # «به 4» = Tizpardaz code 4
+    cash_before = client.get("/api/ledger/trial-balance").json()["total_debit"]
+    client.post(f"/api/import/tizpardaz/{jr['id']}/commit", json={})
+    # history only: the books don't move
+    assert client.get("/api/ledger/trial-balance").json()["total_debit"] == cash_before
+    rep = client.get("/api/reports/products").json()
+    p1 = next(r for r in rep["products"] if r["code"] == "1")
+    assert p1["revenue"] == 49_500_000 and p1["cogs"] == 24_000_000 and p1["profit"] == 25_500_000  # bought at 2.4m, sold at 4.95m
+    # importing the same journal again finds nothing new
+    again = up("journal", jrows)
+    assert again["summary"]["new"] == 0 and again["summary"]["duplicates"] == again["summary"]["total"]
+    # undo the journal: the history is gone
+    client.post(f"/api/import/tizpardaz/{jr['id']}/undo")
+    assert not any(r["code"] == "1" for r in client.get("/api/reports/products").json()["products"])

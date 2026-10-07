@@ -19,6 +19,7 @@ from ..models import (
     StockMove,
     Supplier,
     SupplierPayment,
+    TradeHistory,
 )
 from ..services import inventory, settings_store
 from ..services.accounting import AccountingError
@@ -165,7 +166,11 @@ def product_detail(pid: int, db: Session = Depends(get_db), _=Depends(require("r
                      "qty": m.qty, "cost": m.cost, "unit_cost": m.cost // abs(m.qty) if m.qty else 0, "estimated": m.estimated,
                      "balance_qty": qty, "balance_value": value, "note": m.note,
                      "invoice": ref[0] if ref else None, "invoice_id": ref[1] if ref else None})
-    return {**_p(p), "moves": card[::-1]}
+    hist = []
+    for h in db.scalars(select(TradeHistory).where(TradeHistory.product_id == pid).order_by(TradeHistory.at.desc(), TradeHistory.id.desc()).limit(300)):
+        hist.append({"at": h.at.isoformat(timespec="minutes"), "kind": h.kind, "source": h.source, "doc_no": h.doc_no, "party": h.party,
+                     "qty": h.qty, "unit_price": h.unit_price, "amount": h.amount, "cost": h.cost})
+    return {**_p(p), "moves": card[::-1], "history": hist}
 
 
 class OpeningIn(BaseModel):
@@ -412,6 +417,35 @@ def product_profit(db: Session, start: date | None = None, end: date | None = No
         if it.id in estimated:
             r["estimated"] = True
             tot["estimated"] += 1
+
+    # sales brought over from the product accounting software (Tizpardaz) or from Chehreh: history with its own cost
+    expenses = 0
+    if channel in ("", "history"):
+        hq = select(TradeHistory).where(TradeHistory.kind.in_(("sale", "sale_return", "expense")))
+        if s:
+            hq = hq.where(TradeHistory.at >= s)
+        if e:
+            hq = hq.where(TradeHistory.at <= e)
+        for h in db.scalars(hq):
+            if h.kind == "expense":
+                expenses += h.amount
+                continue
+            if h.product_id is None:
+                continue
+            sign = -1 if h.kind == "sale_return" else 1
+            p = products.get(h.product_id)
+            r = per.setdefault(h.product_id, {"id": h.product_id, "code": p.code if p else None, "sku": p.sku if p else None,
+                                              "name": p.name if p else h.description, "qty": 0, "revenue": 0, "cogs": 0, "profit": 0,
+                                              "online": 0, "estimated": False})
+            r["history"] = r.get("history", 0) + sign * h.qty
+            for bucket in (r, tot, months.setdefault(_jm(h.at), {"key": _jm(h.at), "qty": 0, "revenue": 0, "cogs": 0, "profit": 0}),
+                           chans.setdefault("history", {"channel": "history", "qty": 0, "revenue": 0, "cogs": 0, "profit": 0})):
+                bucket["qty"] += sign * h.qty
+                bucket["revenue"] += sign * h.amount
+                bucket["cogs"] += sign * (h.cost or 0)
+                bucket["profit"] += sign * (h.amount - (h.cost or 0))
+    tot["expenses"] = expenses
+    tot["net"] = tot["profit"] - expenses
 
     def margin(d: dict) -> dict:
         return {**d, "margin": round(d["profit"] / d["revenue"] * 100, 1) if d["revenue"] else None}
