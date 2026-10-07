@@ -24,7 +24,7 @@ from ..models import (
     ServiceLine,
     Staff,
 )
-from ..services import accounting, learning, service_catalog
+from ..services import accounting, learning, routing, service_catalog
 from ..services.audit import audit
 from .deps import require
 
@@ -458,6 +458,33 @@ def accounts(all: bool = False, db: Session = Depends(get_db), _=Depends(require
     if not all:
         q = q.where(PaymentAccount.is_active.is_(True))
     return [_account(a) for a in db.scalars(q)]
+
+
+@router.get("/accounts/routing")
+def account_routing(db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Receiving POS terminals / cards of every line, of deposits and of product sales (first = default)."""
+    r = routing.get_routing(db)
+    lines_ = [{**_line(l), **r["lines"].get(l.id, {"pos": [], "card": []})}
+              for l in db.scalars(select(ServiceLine).where(ServiceLine.is_active.is_(True)).order_by(func.cast(ServiceLine.code, Integer), ServiceLine.id))]
+    return {"lines": lines_, "deposits": r["deposits"], "products": r["products"], "problems": routing.problems(db, r)}
+
+
+class RoutingIn(BaseModel):
+    lines: dict[str, dict] = {}
+    deposits: dict = {}
+    products: dict = {}
+
+
+@router.put("/accounts/routing")
+def save_account_routing(body: RoutingIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    saved = routing.save_routing(db, body.model_dump())
+    missing = routing.problems(db, saved)
+    if missing:
+        db.rollback()
+        raise HTTPException(400, "هر لاین، بیعانه‌ها و فروش محصولات باید حداقل یک کارتخوان و یک کارت داشته باشند - " + "؛ ".join(missing))
+    audit(db, "accounts.routing", "settings", "payments.routing", body.model_dump(), user=user)
+    db.commit()
+    return account_routing(db)
 
 
 @router.delete("/accounts/{aid}")

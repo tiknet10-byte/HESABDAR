@@ -17,6 +17,10 @@ function DepositForm({ onDone }: { onDone: () => void }) {
   const services = useApi<any[]>("/api/services").data ?? [];
   const accounts = useApi<any[]>("/api/accounts").data ?? [];
   const settings = useApi<any>("/api/settings").data;
+  const routing = useApi<any>("/api/accounts/routing").data;
+  // the deposit accounts chosen in Settings (POS first, then cards); the first one is preselected
+  const depAccounts: number[] = [...(routing?.deposits?.pos ?? []), ...(routing?.deposits?.card ?? [])].filter((id: number) => accounts.some((a) => a.id === id));
+  const defaultAcc = depAccounts[0] ?? accounts[0]?.id;
   const [cust, setCust] = useState<CustomerChoice>({});
   const [f, setF] = useState({ amount: 0, payment_account_id: 0, service_id: 0, staff_id: 0, reference: "", notes: "", received_at: toLocalIso(new Date()) });
   const [book, setBook] = useState(false);
@@ -40,7 +44,7 @@ function DepositForm({ onDone }: { onDone: () => void }) {
     setBusy(true);
     try {
       const r = await api("/api/deposits", {
-        body: { ...cust, ...f, service_id: f.service_id || null, staff_id: f.staff_id || null, payment_account_id: f.payment_account_id || accounts[0]?.id, book_at: book && bookAt ? bookAt : null, book_duration: book && bookDur ? bookDur : null, book_outside_hours: book && bs.allowOutside },
+        body: { ...cust, ...f, service_id: f.service_id || null, staff_id: f.staff_id || null, payment_account_id: f.payment_account_id || defaultAcc, book_at: book && bookAt ? bookAt : null, book_duration: book && bookDur ? bookDur : null, book_outside_hours: book && bs.allowOutside },
       });
       toast(r.appointment_at ? `بیعانه ثبت و نوبت ${formatJ(r.appointment_at)} رزرو شد` : "بیعانه ثبت شد");
       if (r.warning) toast(r.warning, "info");
@@ -58,9 +62,19 @@ function DepositForm({ onDone }: { onDone: () => void }) {
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="مبلغ بیعانه"><MoneyInput value={f.amount} onChange={(v) => setF({ ...f, amount: v })} /></Field>
         <Field label="واریز به">
-          <select className="input" value={f.payment_account_id || accounts[0]?.id || 0} onChange={(e) => setF({ ...f, payment_account_id: Number(e.target.value) })}>
+          <select className="input" value={f.payment_account_id || defaultAcc || 0} onChange={(e) => setF({ ...f, payment_account_id: Number(e.target.value) })}>
             {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({ACCOUNT_KINDS[a.kind]})</option>)}
           </select>
+          {depAccounts.length > 1 && (
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {depAccounts.map((id) => {
+                const a = accounts.find((x) => x.id === id);
+                const on = (f.payment_account_id || defaultAcc) === id;
+                return a && <button type="button" key={id} onClick={() => setF({ ...f, payment_account_id: id })}
+                  className={`rounded-xl px-2.5 py-1 text-xs font-semibold ${on ? "bg-violet-600 text-white" : "border hover:bg-violet-500/10"}`} style={on ? {} : { borderColor: "var(--border)" }}>{a.name}</button>;
+              })}
+            </div>
+          )}
         </Field>
       </div>
       <div className="grid gap-3 sm:grid-cols-2">

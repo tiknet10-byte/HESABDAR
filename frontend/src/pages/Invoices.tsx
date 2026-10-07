@@ -9,19 +9,22 @@ import { ACCOUNT_KINDS, cmoney, jdatetime, money, num, svcLabel } from "../lib/f
 import JalaliPicker from "../components/JalaliPicker";
 import { faDigits, formatJ, toGregorian, toJalali, toLocalIso } from "../lib/jalali";
 import { announceFreed } from "../components/Waitlist";
+import { splitDue } from "../lib/paysplit";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
 
 type Item = { service_id?: number; description?: string; unit_price: number; quantity: number; staff_id?: number };
-type Pay = { payment_account_id: number; amount: number };
+type Pay = { payment_account_id: number; amount: number; keys?: string[]; labels?: string[] };
 
 export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => void; preset?: CustomerChoice; appointmentId?: number }) {
   const toast = useToast();
   const services = useApi<any[]>("/api/services").data ?? [];
   const accounts = (useApi<any[]>("/api/accounts").data ?? []).filter((a) => a.is_active);
+  const routing = useApi<any>("/api/accounts/routing").data;
   const [cust, setCust] = useState<CustomerChoice>(preset ?? {});
   const [items, setItems] = useState<Item[]>([{ unit_price: 0, quantity: 1 }]);
   const [discount, setDiscount] = useState(0);
-  const [pays, setPays] = useState<Pay[]>([]);
+  const [manualPays, setManualPays] = useState<Pay[] | null>(null); // null = split automatically per line
+  const [accChoice, setAccChoice] = useState<Record<string, number>>({}); // line -> account picked with one click
   const [depOverride, setDepOverride] = useState<Record<number, boolean>>({}); // deposits the user ticked/unticked by hand
   const [check, setCheck] = useState<{ warnings: string[]; held_deposits: any[] }>({ warnings: [], held_deposits: [] });
   const [issuedAt, setIssuedAt] = useState(toLocalIso(new Date()));
@@ -116,6 +119,35 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   const selected = check.held_deposits.filter(isPicked);
   const heldSum = selected.reduce((s, d) => s + d.amount, 0);
   const due = Math.max(0, total - Math.min(heldSum, total));
+  // what the customer pays, split per line onto that line's own POS / card (Settings -> each line's accounts)
+  const lineOf = (serviceId?: number) => services.find((x) => x.id === serviceId)?.line_id;
+  const groupOf = (it: Item) => (it.service_id ? `line:${lineOf(it.service_id)}` : "other");
+  const groupLabel = (key: string) => key === "products" ? "فروش محصولات" : key === "other" ? "سایر"
+    : services.find((x) => `line:${x.line_id}` === key)?.line ?? "لاین";
+  const groupAccounts = (key: string): number[] => {
+    const e = key.startsWith("line:") ? routing?.lines?.find((l: any) => `line:${l.id}` === key) : routing?.[key];
+    return e ? [...(e.pos ?? []), ...(e.card ?? [])].filter((id: number) => accounts.some((a) => a.id === id)) : [];
+  };
+  const autoPays = useMemo<Pay[]>(() => {
+    const gross: Record<string, number> = {};
+    items.filter((i) => i.service_id || i.description).forEach((i) => (gross[groupOf(i)] = (gross[groupOf(i)] ?? 0) + i.unit_price * i.quantity));
+    const groups = Object.entries(gross).map(([key, g]) => ({ key, gross: g }));
+    if (!groups.length || !accounts.length) return [];
+    const biggest = [...groups].sort((a, b) => b.gross - a.gross)[0].key;
+    const dues = splitDue(groups, discount, selected.map((d) => ({ amount: d.amount, group: d.service_id ? `line:${lineOf(d.service_id)}` : undefined })));
+    const rows: Pay[] = [];
+    for (const g of groups) {
+      if (dues[g.key] <= 0) continue;
+      const acc = accChoice[g.key] ?? groupAccounts(g.key)[0] ?? groupAccounts(biggest)[0] ?? accounts[0].id;
+      const same = rows.find((r) => r.payment_account_id === acc);
+      if (same) { same.amount += dues[g.key]; same.keys!.push(g.key); same.labels!.push(groupLabel(g.key)); }
+      else rows.push({ payment_account_id: acc, amount: dues[g.key], keys: [g.key], labels: [groupLabel(g.key)] });
+    }
+    return rows;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, discount, selected.map((d) => d.id).join(","), accounts.length, routing, accChoice, services.length]);
+  const pays = manualPays ?? autoPays;
+  const setPays = (next: Pay[]) => setManualPays(next.map(({ keys: _k, labels: _l, ...p }) => p));
   const paid = pays.reduce((s, p) => s + p.amount, 0);
 
   useEffect(() => {
@@ -126,11 +158,11 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
     return () => clearTimeout(t);
   }, [cust.customer_id, items]);
 
+  // a single manual row follows the amount due (as before); several manual rows are left as typed
   useEffect(() => {
-    if (accounts.length && pays.length === 0 && due > 0) setPays([{ payment_account_id: accounts[0].id, amount: due }]);
-    else if (pays.length === 1) setPays([{ ...pays[0], amount: due }]);
+    if (manualPays?.length === 1) setManualPays([{ ...manualPays[0], amount: due }]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [due, accounts.length]);
+  }, [due]);
 
   const setItem = (i: number, patch: Partial<Item>) => setItems(items.map((x, j) => (j === i ? { ...x, ...patch } : x)));
 
@@ -145,7 +177,7 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
     try {
       const inv = await api("/api/invoices", {
         body: { ...cust, items: items.filter((i) => i.service_id || i.description), discount, apply_deposits: selected.length > 0, deposit_ids: selected.map((d) => d.id),
-          payments: pays.filter((p) => p.amount > 0), appointment_id: appointmentId ?? null, appointment_ids: doneIds, issued_at: issuedAt },
+          payments: pays.filter((p) => p.amount > 0).map((p) => ({ payment_account_id: p.payment_account_id, amount: p.amount })), appointment_id: appointmentId ?? null, appointment_ids: doneIds, issued_at: issuedAt },
       });
       toast(`فاکتور ${inv.number} ثبت شد${doneIds.length ? ` و ${faDigits(doneIds.length)} نوبت انجام‌شده ثبت شد` : ""}`);
       onDone();
@@ -247,17 +279,43 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
       )}
 
       <div className="space-y-2">
-        <div className="label">دریافت (قابل تقسیم بین چند کارتخوان/کارت)</div>
-        {pays.map((p, i) => (
-          <div key={i} className="grid grid-cols-12 gap-2">
-            <select className="input col-span-6" value={p.payment_account_id} onChange={(e) => setPays(pays.map((x, j) => (j === i ? { ...x, payment_account_id: Number(e.target.value) } : x)))}>
-              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({ACCOUNT_KINDS[a.kind]})</option>)}
-            </select>
-            <div className="col-span-5"><MoneyInput value={p.amount} onChange={(v) => setPays(pays.map((x, j) => (j === i ? { ...x, amount: v } : x)))} /></div>
-            <button className="btn btn-ghost btn-sm col-span-1" onClick={() => setPays(pays.filter((_, j) => j !== i))}><Trash2 size={16} /></button>
-          </div>
-        ))}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="label mb-0">دریافت {manualPays ? "(دستی)" : "(خودکار: مبلغ هر لاین روی کارتخوان همان لاین)"}</div>
+          {manualPays && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setManualPays(null)}>بازگشت به تقسیم خودکار</button>}
+        </div>
+        {pays.map((p, i) => {
+          const quick = [...new Set((p.keys ?? []).flatMap(groupAccounts))];
+          return (
+            <div key={i} className="space-y-1.5 rounded-2xl p-2" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
+              {p.labels && <div className="text-xs font-bold text-violet-600 dark:text-violet-300">{p.labels.join(" + ")}</div>}
+              {!manualPays && quick.length > 1 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {quick.map((id) => {
+                    const a = accounts.find((x) => x.id === id);
+                    const on = p.payment_account_id === id;
+                    return a && (
+                      <button type="button" key={id} onClick={() => setAccChoice({ ...accChoice, ...Object.fromEntries((p.keys ?? []).map((k) => [k, id])) })}
+                        className={`rounded-xl px-2.5 py-1 text-xs font-semibold ${on ? "bg-violet-600 text-white" : "border hover:bg-violet-500/10"}`} style={on ? {} : { borderColor: "var(--border)" }}>
+                        {a.name} <span className="opacity-70">({ACCOUNT_KINDS[a.kind]})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="grid grid-cols-12 gap-2">
+                <select className="input col-span-6" value={p.payment_account_id}
+                  onChange={(e) => manualPays || !p.keys ? setPays(pays.map((x, j) => (j === i ? { ...x, payment_account_id: Number(e.target.value) } : x)))
+                    : setAccChoice({ ...accChoice, ...Object.fromEntries(p.keys.map((k) => [k, Number(e.target.value)])) })}>
+                  {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({ACCOUNT_KINDS[a.kind]})</option>)}
+                </select>
+                <div className="col-span-5"><MoneyInput value={p.amount} onChange={(v) => setPays(pays.map((x, j) => (j === i ? { ...x, amount: v } : x)))} /></div>
+                <button className="btn btn-ghost btn-sm col-span-1" onClick={() => setPays(pays.filter((_, j) => j !== i))}><Trash2 size={16} /></button>
+              </div>
+            </div>
+          );
+        })}
         <button className="btn btn-sm" onClick={() => setPays([...pays, { payment_account_id: accounts[0]?.id, amount: Math.max(0, due - paid) }])}><Plus size={14} />روش پرداخت دیگر</button>
+        {routing?.problems?.length > 0 && <div className="muted text-[11px]">برای انتخاب خودکار کارتخوان هر لاین: تنظیمات ← کارتخوان و کارت‌ها ← «کارتخوان و کارت هر لاین»</div>}
       </div>
 
       <div className="rounded-2xl p-4 text-sm" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>

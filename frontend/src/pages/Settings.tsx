@@ -3,6 +3,7 @@ import {
   Settings as Cog, ShieldCheck, Stethoscope, Calculator, FileSpreadsheet, Save, Trash2, UserCog, Users, Wrench,
 } from "lucide-react";
 import LegacyImport from "../components/LegacyImport";
+import AccountRouting from "../components/AccountRouting";
 import { MergeDialog, ServiceHealth } from "../components/ServiceTools";
 import JalaliPicker from "../components/JalaliPicker";
 import { toLocalIso } from "../lib/jalali";
@@ -591,6 +592,7 @@ function Accounts() {
         )}
       </Modal>
     </Card>
+    <AccountRouting refresh={refresh} canEdit={can(user, "settings")} />
     {can(user, "finance") && <OpeningBalances refresh={refresh} />}
     </div>
   );

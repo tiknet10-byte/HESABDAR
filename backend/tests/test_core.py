@@ -1151,3 +1151,30 @@ def test_same_name_customers_ask_and_merge_everything(client, accounts, services
     # the books still balance
     tb = client.get("/api/ledger/trial-balance").json()
     assert tb["total_debit"] == tb["total_credit"] and tb["total_debit"] > 0
+
+
+def test_each_line_deposits_and_products_have_their_pos_and_card(client):
+    accs = client.get("/api/accounts").json()
+    pos = [a["id"] for a in accs if a["kind"] == "pos"]
+    card = [a["id"] for a in accs if a["kind"] in ("card", "bank", "cash")]
+    assert pos and card
+    r = client.get("/api/accounts/routing").json()
+    assert r["problems"]  # nothing set yet
+    lines = {str(l["id"]): {"pos": [pos[0]], "card": [card[0]]} for l in r["lines"]}
+    # a line without a card is refused
+    bad = {**lines, next(iter(lines)): {"pos": [pos[0]], "card": []}}
+    res = client.put("/api/accounts/routing", json={"lines": bad, "deposits": {"pos": [pos[0]], "card": [card[0]]}, "products": {"pos": [pos[0]], "card": [card[0]]}})
+    assert res.status_code == 400 and "کارت" in res.json()["detail"]
+    # a POS id in the card list (wrong kind) is dropped, so it doesn't count as a card
+    wrong = {"pos": [pos[0]], "card": [pos[0]]}
+    assert client.put("/api/accounts/routing", json={"lines": lines, "deposits": wrong, "products": wrong}).status_code == 400
+    many = {"pos": pos[::-1], "card": card}
+    ok = client.put("/api/accounts/routing", json={"lines": lines, "deposits": many, "products": {"pos": [pos[0]], "card": [card[-1]]}}).json()
+    assert ok.get("problems") == [], ok
+    assert ok["deposits"]["pos"][0] == pos[-1] and ok["products"]["card"] == [card[-1]]
+    from app.core.db import SessionLocal
+    from app.services import routing
+    with SessionLocal() as db:
+        assert routing.default_account(db, "deposits") == pos[-1]
+        assert routing.default_account(db, "products", prefer="card") == card[-1]
+        assert routing.default_account(db, int(next(iter(lines)))) == pos[0]
