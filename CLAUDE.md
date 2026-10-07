@@ -80,7 +80,7 @@ and how to use it. Commit messages end with the attribution lines the session as
   (in-memory WooCommerce); **not yet tried on the real site**.
 
 ## Status (1.18.0)
-* GitHub: the repository on GitHub is EMPTY - pushes were refused (403, the Claude GitHub App lacks write access).
-  The history exists in the session container, the zips and the git bundle the owner received. Fix access first.
+* GitHub: `tiknet10-byte/HESABDAR`, branch `claude/beauty-salon-accounting-system-9zzoep` holds the full history
+  (pushed after the Claude GitHub App was installed). Work on that branch and push to it.
 * Next possible work: connect the real website and fix what differs (currency IRT/IRR, security plugins blocking
   `wp-json`, proxy/VPN); proxy setting if needed; anything the owner reports from daily use.
