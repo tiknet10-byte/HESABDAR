@@ -198,6 +198,9 @@ class Deposit(TimestampMixin, Base):
     service_guess: Mapped[dict] = mapped_column(JSON, default=dict)  # AI/learning suggestion
     staff_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"), nullable=True)  # who will perform the service
     notes: Mapped[str] = mapped_column(Text, default="")
+    # when it was refunded / forfeited, and the account the refund was paid from (money going out that day)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    refund_account_id: Mapped[int | None] = mapped_column(ForeignKey("payment_accounts.id"), nullable=True)
 
 
 class Invoice(TimestampMixin, Base):

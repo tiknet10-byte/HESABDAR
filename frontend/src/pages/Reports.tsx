@@ -91,7 +91,7 @@ function Overview() {
 
           <div className="grid gap-4 lg:grid-cols-2">
             <Card title="فروش به تفکیک لاین"><HBar data={d.by_line} color={lineColor} /></Card>
-            <Card title="دریافتی به تفکیک کارتخوان/کارت"><HBar data={d.by_account} color={() => brand()} /></Card>
+            <Card title="دریافتی خالص هر حساب (پس از کسر برگشت‌ها)"><HBar data={d.by_account} color={() => brand()} /></Card>
             <Card title="عملکرد پرسنل"><HBar data={d.by_staff} color={() => series(2)} /></Card>
             <Card title="هزینه‌ها به تفکیک دسته"><HBar data={d.expense_by_category} color={() => series(1)} /></Card>
           </div>

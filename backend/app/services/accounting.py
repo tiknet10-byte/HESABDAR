@@ -311,6 +311,7 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
             Leg(cash_account_for(db, pa), credit=dep.amount, customer_id=dep.customer_id),
         ], "deposit", dep.id)
         dep.status = "refunded"
+        dep.refund_account_id = pa.id
     elif action == "forfeit":
         post(db, "سوخت بیعانه (عدم مراجعه)", [
             Leg(account(db, DEPOSITS), debit=dep.amount, customer_id=dep.customer_id),
@@ -319,8 +320,27 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
         dep.status = "forfeited"
     else:
         raise AccountingError("unknown action")
+    dep.closed_at = local_now()
     audit(db, f"deposit.{action}", "deposit", dep.id, {"amount": dep.amount}, user=user)
     return dep
+
+
+def backfill_deposit_closures(db: Session) -> int:
+    """Deposits refunded / forfeited before `closed_at` existed: take the date and refund account from their journal
+    entry, so the dashboard counts that money as going out on the right day and from the right account."""
+    by_ledger = {pa.ledger_account_id: pa.id for pa in db.scalars(select(PaymentAccount)) if pa.ledger_account_id}
+    n = 0
+    for dep in db.scalars(select(Deposit).where(Deposit.status.in_(("refunded", "forfeited")), Deposit.closed_at.is_(None))):
+        word = "استرداد" if dep.status == "refunded" else "سوخت"
+        entry = db.scalar(select(JournalEntry).where(JournalEntry.ref_type == "deposit", JournalEntry.ref_id == dep.id,
+                                                     JournalEntry.description.like(f"{word}%")).order_by(JournalEntry.id.desc()))
+        dep.closed_at = entry.at if entry else dep.updated_at or dep.received_at
+        if dep.status == "refunded" and dep.refund_account_id is None:
+            credit = next((ln for ln in (entry.lines if entry else []) if ln.credit and ln.account_id in by_ledger), None)
+            dep.refund_account_id = by_ledger[credit.account_id] if credit else dep.payment_account_id
+        n += 1
+    db.flush()
+    return n
 
 
 def follow_appointment(db: Session, dep: Deposit, action: str, mode: str = "auto", user=None) -> Appointment | None:

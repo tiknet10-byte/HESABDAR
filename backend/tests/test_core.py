@@ -1069,3 +1069,40 @@ def test_refunded_deposit_cancels_its_appointment_and_easy_appointment_changes(c
     hist = client.post("/api/appointments", json={"customer_id": d["customer_id"], "service_id": svc["id"], "start_at": slots[4]["start_at"]}).json()
     client.patch(f"/api/appointments/{hist['id']}?status=done")
     assert client.delete(f"/api/appointments/{hist['id']}").status_code == 400
+
+
+def test_refunded_deposit_is_money_out_on_the_dashboard(client, accounts, services):
+    """A deposit received and then refunded is not money kept: per account the dashboard shows it in, back out,
+    and a net of zero; the manager's list says who got it back, from which account and which user did it."""
+    acc_name = "کارت پاسارگاد"
+
+    def snap():
+        d = client.get("/api/dashboard").json()
+        t = d["today"]
+        row = next((a for a in t["by_account"] if a["name"] == acc_name), {"in": 0, "out": 0, "value": 0})
+        return t, row, d["money_returned"]
+
+    t0, a0, r0 = snap()
+    d = client.post("/api/deposits", json={"customer_name": "بیعانه برگشتی", "customer_mobile": "09125557788", "amount": 5_000_000,
+                                           "payment_account_id": accounts[acc_name], "service_id": services["پدیکور"]["id"]}).json()
+    client.post(f"/api/deposits/{d['id']}/close", json={"action": "refund"})
+    t1, a1, r1 = snap()
+    assert a1["in"] - a0["in"] == 5_000_000 and a1["out"] - a0["out"] == 5_000_000 and a1["value"] == a0["value"]
+    assert t1["cash_in"] == t0["cash_in"] and t1["cash_paid_back"] - t0["cash_paid_back"] == 5_000_000
+    item = next(x for x in r1["items"] if x["deposit_id"] == d["id"])
+    assert item["kind"] == "deposit_refund" and item["amount"] == 5_000_000 and item["account"] == acc_name and item["by"]
+    assert r1["paid_back"] - r0["paid_back"] == 5_000_000
+    day = client.get("/api/dashboard/day").json()
+    assert any(m["kind"] == "deposit_refund" and m["amount"] == -5_000_000 for m in day["money"])
+    # deposits refunded before the refund date was recorded get it back from their journal entry
+    from app.core.db import SessionLocal
+    from app.models import Deposit
+    from app.services.accounting import backfill_deposit_closures
+    with SessionLocal() as db:
+        dep = db.get(Deposit, d["id"])
+        dep.closed_at, dep.refund_account_id = None, None
+        db.commit()
+        assert backfill_deposit_closures(db) >= 1
+        db.commit()
+        dep = db.get(Deposit, d["id"])
+        assert dep.closed_at is not None and dep.refund_account_id == accounts[acc_name]

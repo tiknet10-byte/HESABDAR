@@ -94,8 +94,15 @@ def dashboard(db: Session = Depends(get_db), user=Depends(current_user)):
         prev = reports.summary(db, prev_end - timedelta(days=29), prev_end)
         out["previous"] = {"revenue": prev["revenue"], "invoice_count": prev["invoice_count"], "customers_served": prev["customers_served"]}
         out["series"] = reports.daily_series(db)
+        out["money_returned"] = reports.money_returned(db)
         out["insights"] = reports.insights(db)
     return out
+
+
+@router.get("/reports/money-returned")
+def money_returned(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), _=Depends(require("reports"))):
+    """Money paid back to customers (deposit and invoice refunds) and cancelled mistaken receipts, with who and why."""
+    return reports.money_returned(db, start, end)
 
 
 @router.get("/dashboard/day")

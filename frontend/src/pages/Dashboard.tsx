@@ -1,12 +1,12 @@
-import { AlertTriangle, Banknote, CalendarClock, CalendarX, ClipboardList, Clock, HandCoins, Lightbulb, Receipt, ScanLine, TrendingDown, TrendingUp, Users } from "lucide-react";
+import { AlertTriangle, Banknote, CalendarClock, CalendarX, ClipboardList, Clock, HandCoins, Lightbulb, Receipt, ScanLine, TrendingDown, TrendingUp, Undo2, Users } from "lucide-react";
 import { Link } from "react-router-dom";
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Badge, Card, Loading, Modal, PageHeader, Stat, Tabs } from "../components/ui";
 import { useState } from "react";
 import { axis, brand, colorMap, grid, tooltipStyle } from "../lib/chart";
 import { cmoney, compactMoney, jshort, money, num } from "../lib/format";
 import { useApi, useAuth } from "../lib/hooks";
-import { faDigits, formatJShort } from "../lib/jalali";
+import { faDigits, formatJ, formatJShort } from "../lib/jalali";
 
 function growth(now: number, before: number) {
   if (!before) return null;
@@ -17,9 +17,81 @@ function growth(now: number, before: number) {
 const MONEY_KIND: Record<string, { label: string; cls: string }> = {
   payment: { label: "دریافت فاکتور", cls: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" },
   deposit: { label: "بیعانه", cls: "bg-violet-500/10 text-violet-700 dark:text-violet-300" },
-  refund: { label: "استرداد", cls: "bg-rose-500/10 text-rose-700 dark:text-rose-300" },
-  void_cancel: { label: "لغو (فاکتور باطل)", cls: "bg-zinc-500/10 text-zinc-500" },
+  deposit_refund: { label: "استرداد بیعانه", cls: "bg-rose-500/10 text-rose-700 dark:text-rose-300" },
+  refund: { label: "برگشت پول فاکتور", cls: "bg-rose-500/10 text-rose-700 dark:text-rose-300" },
+  void_cancel: { label: "لغو دریافتِ فاکتور اشتباه", cls: "bg-zinc-500/10 text-zinc-500" },
 };
+
+/** Per payment account: money in, money paid back to customers, and what is left (net) - one bar per row for the net. */
+function MoneyByAccount({ rows, title, compact }: { rows: any[]; title?: string; compact?: boolean }) {
+  const max = Math.max(1, ...rows.map((r) => Math.abs(r.value)));
+  const tot = rows.reduce((t, r) => ({ in: t.in + r.in, out: t.out + r.out, value: t.value + r.value }), { in: 0, out: 0, value: 0 });
+  if (!rows.length) return <div className="muted text-sm">در این بازه پولی دریافت یا پرداخت نشده است.</div>;
+  return (
+    <div className="space-y-2 text-sm">
+      {title && <div className="font-bold">{title}</div>}
+      <div className="overflow-x-auto">
+        <table className="table [&_td]:px-2 [&_th]:px-2">
+          <thead><tr><th>حساب</th><th>دریافت</th><th>برگشت به مشتری</th><th>خالص مانده</th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.name}>
+                <td className="font-semibold">{r.name}</td>
+                <td className="num whitespace-nowrap">{money(r.in, !compact)}</td>
+                <td className="num whitespace-nowrap">{r.out ? <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-sm bg-rose-500" />−{money(r.out, !compact)}</span> : <span className="muted">—</span>}</td>
+                <td className="min-w-[8rem]">
+                  <div className="num font-bold">{money(r.value, !compact)}</div>
+                  <div className="mt-1 h-1.5 rounded-full" style={{ background: "var(--border)" }}>
+                    <div className="h-1.5 rounded-full" style={{ width: `${Math.max(0, (r.value / max) * 100)}%`, background: brand() }} />
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {rows.length > 1 && (
+              <tr className="font-bold">
+                <td>جمع</td><td className="num">{money(tot.in, !compact)}</td><td className="num">{tot.out ? `−${money(tot.out, !compact)}` : "—"}</td><td className="num">{money(tot.value, !compact)}</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/** For the manager: money paid back to customers (and mistaken receipts cancelled), with who, why and from where. */
+function MoneyReturned({ data }: { data: any }) {
+  const [all, setAll] = useState(false);
+  const items: any[] = data?.items ?? [];
+  const shown = all ? items : items.slice(0, 6);
+  return (
+    <Card title={<span className="flex items-center gap-2"><Undo2 size={18} className="text-rose-500" />پول‌های برگشت‌داده‌شده به مشتری</span>}
+      actions={<span className="muted text-xs">۳۰ روز اخیر</span>}>
+      {!items.length ? <div className="muted text-sm">در ۳۰ روز اخیر پولی به مشتری برگردانده نشده است ✓</div> : (
+        <div className="space-y-2 text-sm">
+          <div className="flex flex-wrap gap-2">
+            <span className="rounded-xl bg-rose-500/10 px-3 py-1.5">برگشت داده شده: <b className="num">{money(data.paid_back)}</b> <span className="muted text-xs">({faDigits(data.paid_back_count)} مورد)</span></span>
+            {data.cancelled > 0 && <span className="rounded-xl px-3 py-1.5" style={{ background: "var(--surface)" }} title="فاکتور اشتباه بوده و پولی جابه‌جا نشده؛ فقط ثبت اشتباه اصلاح شده">دریافت اشتباهِ لغوشده: <b className="num">{money(data.cancelled)}</b></span>}
+          </div>
+          {shown.map((r, i) => (
+            <Link key={i} to={r.deposit_id ? `/deposits?open=${r.deposit_id}&status=` : `/invoices?open=${r.invoice_id}`}
+              className={`block rounded-xl px-3 py-2 hover:bg-violet-500/5 ${r.kind === "void_cancel" ? "opacity-70" : ""}`} style={{ background: "var(--surface)" }}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="flex items-center gap-2"><span className={`badge ${MONEY_KIND[r.kind]?.cls}`}>{r.label}</span><b>{r.customer}</b>{r.customer_code && <span className="num muted text-xs">کد {r.customer_code}</span>}</span>
+                <b className="num">{money(r.amount)}</b>
+              </div>
+              <div className="muted mt-0.5 text-xs">
+                {formatJ(r.at)}{r.account ? ` · از ${r.account}` : ""}{r.invoice ? ` · فاکتور ${r.invoice}` : ""}{r.deposit_received_at ? ` · بیعانهٔ ${formatJ(r.deposit_received_at, false)}` : ""}
+                {r.by ? ` · توسط ${r.by}` : ""}{r.reason ? ` · دلیل: ${r.reason}` : ""}{r.kind === "void_cancel" ? " · پولی جابه‌جا نشد" : ""}
+              </div>
+            </Link>
+          ))}
+          {items.length > 6 && <button className="btn btn-ghost btn-sm w-full" onClick={() => setAll(!all)}>{all ? "نمایش کمتر" : `نمایش همه (${faDigits(items.length)})`}</button>}
+        </div>
+      )}
+    </Card>
+  );
+}
 
 /** What is behind the 'today' cards: invoices, money movements and customers of the day. */
 function DayDetails({ initial }: { initial: "sales" | "money" | "customers" }) {
@@ -46,12 +118,12 @@ function DayDetails({ initial }: { initial: "sales" | "money" | "customers" }) {
       ))}
       {tab === "money" && (data.money.length === 0 ? <div className="muted">امروز پولی دریافت یا پرداخت نشده است.</div> : (
         <>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {data.by_account.map((a: any) => (
-              <div key={a.name} className="flex justify-between rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}><span>{a.name}</span><b className={`num ${a.value < 0 ? "text-rose-600" : ""}`}>{money(a.value)}</b></div>
-            ))}
+          <MoneyByAccount rows={data.by_account} />
+          <div className="rounded-xl bg-emerald-500/10 px-3 py-2">
+            دریافت امروز <b className="num">{money(data.money_in)}</b>
+            {data.money_out > 0 && <> − برگشت به مشتری <b className="num">{money(data.money_out)}</b></>}
+            {" "}= خالص <b className="num">{money(data.money_total)}</b>
           </div>
-          <div className="rounded-xl bg-emerald-500/10 px-3 py-2 font-bold">جمع خالص امروز: <span className="num">{money(data.money_total)}</span></div>
           <div className="space-y-1.5">{data.money.map((r: any, k: number) => (
             <div key={k} className="flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}>
               <span className="flex items-center gap-2"><span className={`badge ${MONEY_KIND[r.kind]?.cls}`}>{MONEY_KIND[r.kind]?.label}</span><b>{r.customer}</b>{r.ref && <span className="num muted text-xs">{r.ref}</span>}</span>
@@ -150,7 +222,9 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <button className="text-right" onClick={() => setDetail("sales")}><Stat label="فروش امروز" value={cmoney(t.revenue)} hint={`${num(t.invoice_count)} فاکتور · برای جزئیات کلیک کنید`} icon={<Receipt size={20} />} tone="pink" /></button>
-        <button className="text-right" onClick={() => setDetail("money")}><Stat label="دریافتی امروز" value={cmoney(t.cash_in)} hint={`از فاکتورها ${compactMoney(t.cash_in - t.deposits_received)} · بیعانه ${compactMoney(t.deposits_received)}`} icon={<Banknote size={20} />} tone="emerald" /></button>
+        <button className="text-right" onClick={() => setDetail("money")}><Stat label="دریافتی امروز (خالص)" value={cmoney(t.cash_in)}
+          hint={t.cash_paid_back ? `دریافت ${compactMoney(t.cash_received)} · برگشت به مشتری ${compactMoney(t.cash_paid_back)}` : `از فاکتورها ${compactMoney(t.cash_in - t.deposits_received)} · بیعانه ${compactMoney(t.deposits_received)}`}
+          icon={<Banknote size={20} />} tone="emerald" /></button>
         <Link to="/deposits"><Stat label="بیعانه‌های باز" value={cmoney(t.deposits_held)} hint={`${num(t.deposits_held_count)} مورد`} icon={<HandCoins size={20} />} tone="amber" /></Link>
         <button className="text-right" onClick={() => setDetail("customers")}><Stat label="مشتریان امروز" value={num(t.customers_served)} hint={`${num(t.new_customers)} مشتری جدید · ${num(data.agenda?.today?.length ?? 0)} نوبت امروز`} icon={<Users size={20} />} tone="sky" /></button>
       </div>
@@ -223,19 +297,13 @@ export default function Dashboard() {
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">
-            <Card title="دریافتی به تفکیک کارتخوان و کارت">
-              <div style={{ height: Math.max(160, m.by_account.length * 44) }} dir="ltr">
-                <ResponsiveContainer>
-                  <BarChart data={m.by_account} layout="vertical" margin={{ left: 8, right: 8 }}>
-                    <CartesianGrid stroke={grid()} horizontal={false} />
-                    <XAxis type="number" tickFormatter={compactMoney} tick={{ fill: axis(), fontSize: 11 }} axisLine={false} tickLine={false} reversed />
-                    <YAxis type="category" dataKey="name" orientation="right" width={130} tick={{ fill: axis(), fontSize: 12 }} axisLine={false} tickLine={false} />
-                    <Tooltip {...tooltipStyle()} cursor={{ fill: "rgba(168,85,247,.06)" }} formatter={(v) => [money(Number(v)), "دریافتی"]} />
-                    <Bar dataKey="value" fill={brand()} radius={[4, 0, 0, 4]} barSize={18} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+            <Card title="گردش پول هر حساب" actions={<span className="muted text-xs">۳۰ روز اخیر · دریافت منهای برگشت</span>}>
+              <MoneyByAccount rows={m.by_account} compact />
             </Card>
+            <MoneyReturned data={data.money_returned} />
+          </div>
+
+          <div className="grid gap-4">
             <Card title={<span className="flex items-center gap-2"><Lightbulb size={18} className="text-amber-500" />بینش‌های هوشمند</span>}
               actions={<Link to="/assistant" className="btn btn-sm">تحلیل عمیق‌تر با AI</Link>}>
               <div className="space-y-2">

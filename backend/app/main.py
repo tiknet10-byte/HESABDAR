@@ -47,15 +47,17 @@ def init_db() -> None:
     _ensure_indexes()
     with SessionLocal() as db:
         seed_base(db)
-        from .services.accounting import assign_missing_codes
+        from .services.accounting import assign_missing_codes, backfill_deposit_closures
 
         assign_missing_codes(db)  # every customer has a customer code
         codes.assign_missing(db)  # every service line and service has a code
+        backfill_deposit_closures(db)  # refund date/account of deposits refunded before it was recorded
         db.commit()
 
 
 # indexes for the queries that grow with the data (lists, reports, dashboards); created if missing on start-up
 INDEXES = {
+    "ix_deposits_closed_at": "deposits(closed_at)",
     "ix_appt_status_start": "appointments(status, start_at)",
     "ix_appt_customer_status": "appointments(customer_id, status)",
     "ix_appt_invoice": "appointments(invoice_id)",

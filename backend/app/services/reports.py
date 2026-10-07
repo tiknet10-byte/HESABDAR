@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 from .textutil import toman
 from ..models import (
     Appointment,
+    AuditLog,
     Customer,
     Deposit,
     Expense,
@@ -20,6 +21,7 @@ from ..models import (
     Service,
     ServiceLine,
     Staff,
+    User,
 )
 
 
@@ -33,6 +35,43 @@ def _range(start: date | None, end: date | None) -> tuple[datetime, datetime]:
 # balances (received in the old system), so they never count as cash received here
 REAL_DEPOSIT = Deposit.source.not_in(("import", "void_credit"))  # void_credit: already counted as the invoice payment
 
+# money that went back to customers, and corrections of money wrongly recorded as received
+OUT_KINDS = {"deposit_refund": "استرداد بیعانه", "refund": "برگشت پول فاکتور", "void_cancel": "لغو دریافتِ فاکتور اشتباه"}
+
+
+def money_movements(db: Session, s: datetime, e: datetime) -> list[dict]:
+    """Every real money movement of customers in a period, signed (+ in, - out), with its account:
+    invoice payments, deposits received, deposits refunded, invoice money paid back and cancelled mistaken receipts."""
+    accounts = {a.id: a.name for a in db.scalars(select(PaymentAccount))}
+    rows: list[dict] = []
+    for p in db.scalars(select(Payment).where(Payment.paid_at.between(s, e))):
+        kind = p.source if p.source in ("refund", "void_cancel") else "payment"
+        rows.append({"at": p.paid_at, "kind": kind, "amount": int(p.amount), "account_id": p.payment_account_id,
+                     "customer_id": p.customer_id, "invoice_id": p.invoice_id, "deposit_id": None})
+    for d in db.scalars(select(Deposit).where(Deposit.received_at.between(s, e), REAL_DEPOSIT)):
+        rows.append({"at": d.received_at, "kind": "deposit", "amount": int(d.amount), "account_id": d.payment_account_id,
+                     "customer_id": d.customer_id, "invoice_id": None, "deposit_id": d.id})
+    # a refunded deposit is money paid out on the day of the refund (also one brought over from the old software)
+    for d in db.scalars(select(Deposit).where(Deposit.status == "refunded", Deposit.closed_at.between(s, e))):
+        rows.append({"at": d.closed_at, "kind": "deposit_refund", "amount": -int(d.amount), "account_id": d.refund_account_id or d.payment_account_id,
+                     "customer_id": d.customer_id, "invoice_id": None, "deposit_id": d.id})
+    for r in rows:
+        r["account"] = accounts.get(r["account_id"])
+    rows.sort(key=lambda x: x["at"])
+    return rows
+
+
+def _per_account(rows: list[dict]) -> list[dict]:
+    """Per account: money in (mistaken receipts already taken off), money paid back, and the net."""
+    acc: dict[str, dict] = {}
+    for r in rows:
+        a = acc.setdefault(r["account"] or "?", {"name": r["account"] or "?", "in": 0, "out": 0})
+        if r["kind"] in ("deposit_refund", "refund"):
+            a["out"] += -r["amount"]
+        else:
+            a["in"] += r["amount"]
+    return sorted(({**a, "value": a["in"] - a["out"]} for a in acc.values()), key=lambda x: -x["in"])
+
 
 def summary(db: Session, start: date | None = None, end: date | None = None) -> dict:
     s, e = _range(start, end)
@@ -42,8 +81,9 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
     revenue = sum(i.total for i in invoices)
     discounts = sum(i.discount for i in invoices) + sum(it.discount for i in invoices for it in i.items)
     expenses = int(db.scalar(select(func.coalesce(func.sum(Expense.amount), 0)).where(Expense.spent_at.between(s, e))) or 0)
-    received_payments = int(db.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.paid_at.between(s, e))) or 0)
-    received_deposits = int(db.scalar(select(func.coalesce(func.sum(Deposit.amount), 0)).where(Deposit.received_at.between(s, e), REAL_DEPOSIT)) or 0)
+    moves = money_movements(db, s, e)
+    received_deposits = sum(r["amount"] for r in moves if r["kind"] == "deposit")
+    paid_back = -sum(r["amount"] for r in moves if r["kind"] in ("deposit_refund", "refund"))
     held = int(db.scalar(select(func.coalesce(func.sum(Deposit.amount), 0)).where(Deposit.status == "held")) or 0)
     held_count = db.scalar(select(func.count(Deposit.id)).where(Deposit.status == "held")) or 0
     receivable = int(db.scalar(select(func.coalesce(func.sum(Invoice.total - Invoice.paid), 0))
@@ -78,12 +118,7 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
             if it.staff_id:
                 by_staff[staff.get(it.staff_id, "?")] += amt
 
-    accounts = {a.id: a for a in db.scalars(select(PaymentAccount))}
-    by_account: dict[str, int] = defaultdict(int)
-    for pid, amt in db.execute(select(Payment.payment_account_id, Payment.amount).where(Payment.paid_at.between(s, e))):
-        by_account[accounts[pid].name if pid in accounts else "?"] += int(amt)
-    for pid, amt in db.execute(select(Deposit.payment_account_id, Deposit.amount).where(Deposit.received_at.between(s, e), REAL_DEPOSIT)):
-        by_account[accounts[pid].name if pid in accounts else "?"] += int(amt)
+    by_account = _per_account(moves)
 
     expense_by_cat: dict[str, int] = defaultdict(int)
     for cat, amt in db.execute(select(Expense.category, Expense.amount).where(Expense.spent_at.between(s, e))):
@@ -98,7 +133,10 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
         "revenue": revenue,
         "expenses": expenses,
         "net_profit": revenue - expenses,
-        "cash_in": received_payments + received_deposits,
+        # net money of customers: received minus paid back (a refunded deposit is not money kept)
+        "cash_in": sum(r["amount"] for r in moves),
+        "cash_received": sum(r["amount"] for r in moves if r["kind"] not in ("deposit_refund", "refund")),
+        "cash_paid_back": paid_back,
         "deposits_received": received_deposits,
         "deposits_held": held,
         "deposits_held_count": held_count,
@@ -110,7 +148,7 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
         "new_customers": new_customers,
         "returning_customers": returning,
         "by_line": sorted(({"name": k, "value": v} for k, v in by_line.items()), key=lambda x: -x["value"]),
-        "by_account": sorted(({"name": k, "value": v} for k, v in by_account.items()), key=lambda x: -x["value"]),
+        "by_account": by_account,
         "by_staff": sorted(({"name": k, "value": v} for k, v in by_staff.items()), key=lambda x: -x["value"]),
         "top_services": sorted(by_service.values(), key=lambda x: -x["revenue"])[:10],
         "expense_by_category": sorted(({"name": k, "value": v} for k, v in expense_by_cat.items()), key=lambda x: -x["value"]),
@@ -548,7 +586,6 @@ def day_details(db: Session, day: date | None = None) -> dict:
     """Behind the dashboard's 'today' cards: the day's invoices, every money movement and the customers served."""
     day = day or date.today()
     s, e = datetime.combine(day, datetime.min.time()), datetime.combine(day, datetime.max.time())
-    accounts = {a.id: a.name for a in db.scalars(select(PaymentAccount))}
     ids = select(Invoice.customer_id).where(Invoice.issued_at.between(s, e)).union(
         select(Payment.customer_id).where(Payment.paid_at.between(s, e)),
         select(Deposit.customer_id).where(Deposit.received_at.between(s, e)),
@@ -559,20 +596,14 @@ def day_details(db: Session, day: date | None = None) -> dict:
                       .order_by(Invoice.issued_at)).all()
     invoices = [{"id": i.id, "number": i.number, "at": i.issued_at.isoformat(timespec="minutes"), "customer": names.get(i.customer_id, ("",))[0],
                  "items": [it.description for it in i.items], "total": i.total, "paid": i.paid, "status": i.status} for i in invs]
-    money_rows = []
-    for p in db.scalars(select(Payment).where(Payment.paid_at.between(s, e)).order_by(Payment.paid_at)):
-        kind = {"refund": "refund", "void_cancel": "void_cancel"}.get(p.source, "payment")
-        inv = db.get(Invoice, p.invoice_id) if p.invoice_id else None
-        money_rows.append({"at": p.paid_at.isoformat(timespec="minutes"), "kind": kind, "amount": p.amount,
-                           "account": accounts.get(p.payment_account_id), "customer": names.get(p.customer_id, ("",))[0],
-                           "ref": inv.number if inv else None})
-    for d in db.scalars(select(Deposit).where(Deposit.received_at.between(s, e), REAL_DEPOSIT).order_by(Deposit.received_at)):
-        money_rows.append({"at": d.received_at.isoformat(timespec="minutes"), "kind": "deposit", "amount": d.amount,
-                           "account": accounts.get(d.payment_account_id), "customer": names.get(d.customer_id, ("",))[0], "ref": None})
-    money_rows.sort(key=lambda x: x["at"])
-    by_account: dict[str, int] = defaultdict(int)
-    for r in money_rows:
-        by_account[r["account"] or "?"] += r["amount"]
+    inv_numbers = {i.id: i.number for i in db.scalars(select(Invoice).where(Invoice.id.in_(
+        select(Payment.invoice_id).where(Payment.paid_at.between(s, e)))))}
+    moves = money_movements(db, s, e)
+    extra = {r["customer_id"] for r in moves} - names.keys()
+    if extra:
+        names.update({c.id: (c.full_name, c.legacy_code, c.mobile) for c in db.scalars(select(Customer).where(Customer.id.in_(extra)))})
+    money_rows = [{"at": r["at"].isoformat(timespec="minutes"), "kind": r["kind"], "amount": r["amount"], "account": r["account"],
+                   "customer": names.get(r["customer_id"], ("",))[0], "ref": inv_numbers.get(r["invoice_id"])} for r in moves]
     # customers: invoiced today, or with an appointment today, or registered today
     served: dict[int, dict] = {}
     for i in invs:
@@ -593,5 +624,40 @@ def day_details(db: Session, day: date | None = None) -> dict:
     valid = [i for i in invs if i.status != "void"]
     return {"date": day.isoformat(), "invoices": invoices, "sales": sum(i.total for i in valid), "invoice_count": len(valid),
             "money": money_rows, "money_total": sum(r["amount"] for r in money_rows),
-            "by_account": sorted(({"name": k, "value": v} for k, v in by_account.items()), key=lambda x: -x["value"]),
+            "money_in": sum(r["amount"] for r in money_rows if r["kind"] not in ("deposit_refund", "refund")),
+            "money_out": -sum(r["amount"] for r in money_rows if r["kind"] in ("deposit_refund", "refund")),
+            "by_account": _per_account(moves),
             "customers": customers}
+
+
+def money_returned(db: Session, start: date | None = None, end: date | None = None) -> dict:
+    """For the manager: every time money went back to a customer (deposit refunds, invoice refunds) and every
+    mistaken receipt that was cancelled - who, how much, from which account, why, and which user did it."""
+    s, e = _range(start, end)
+    rows = [r for r in money_movements(db, s, e) if r["kind"] in OUT_KINDS]
+    names = {c.id: (c.full_name, c.legacy_code) for c in db.scalars(select(Customer).where(Customer.id.in_({r["customer_id"] for r in rows})))}
+    invs = {i.id: i for i in db.scalars(select(Invoice).where(Invoice.id.in_({r["invoice_id"] for r in rows if r["invoice_id"]})))}
+    deps = {d.id: d for d in db.scalars(select(Deposit).where(Deposit.id.in_({r["deposit_id"] for r in rows if r["deposit_id"]})))}
+    users = {u.id: u.full_name or u.username for u in db.scalars(select(User))}
+    # who did it and why: the audit trail of the refund / the invoice void
+    logs: dict[tuple[str, str], AuditLog] = {}
+    keys = [("deposit.refund", str(r["deposit_id"])) for r in rows if r["deposit_id"]] + \
+           [("invoice.void", str(r["invoice_id"])) for r in rows if r["invoice_id"]]
+    if keys:
+        for log in db.scalars(select(AuditLog).where(AuditLog.action.in_(("deposit.refund", "invoice.void")),
+                                                      AuditLog.entity_id.in_({k[1] for k in keys})).order_by(AuditLog.id)):
+            logs[(log.action, log.entity_id)] = log
+    out = []
+    for r in reversed(rows):
+        log = logs.get(("deposit.refund", str(r["deposit_id"]))) if r["deposit_id"] else logs.get(("invoice.void", str(r["invoice_id"])))
+        inv, dep = invs.get(r["invoice_id"]), deps.get(r["deposit_id"])
+        out.append({"at": r["at"].isoformat(timespec="minutes"), "kind": r["kind"], "label": OUT_KINDS[r["kind"]], "amount": -r["amount"],
+                    "account": r["account"], "customer": names.get(r["customer_id"], ("",))[0], "customer_code": names.get(r["customer_id"], ("", None))[1],
+                    "invoice_id": r["invoice_id"], "invoice": inv.number if inv else None, "deposit_id": r["deposit_id"],
+                    "deposit_received_at": dep.received_at.isoformat(timespec="minutes") if dep else None,
+                    "reason": (log.data or {}).get("reason") if log else None,
+                    "by": (users.get(log.user_id) if log.user_id else log.actor) if log else None})
+    paid_back = [x for x in out if x["kind"] != "void_cancel"]
+    return {"period": {"start": s.date().isoformat(), "end": e.date().isoformat()}, "items": out,
+            "paid_back": sum(x["amount"] for x in paid_back), "paid_back_count": len(paid_back),
+            "cancelled": sum(x["amount"] for x in out if x["kind"] == "void_cancel")}

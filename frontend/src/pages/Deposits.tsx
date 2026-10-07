@@ -343,7 +343,7 @@ export default function Deposits() {
   const [q, setQ] = useState("");
   const dq = useDebounced(q);
   const [page, setPage] = useState(0);
-  const [view, setView] = useState<number | null>(null);
+  const [view, setView] = useState<number | null>(params.get("open") ? Number(params.get("open")) : null); // ?open=<id> from other pages
   useEffect(() => setPage(0), [status, filter, sort, lineId, dq]);
   const qs = new URLSearchParams({ q: dq, status, filter, sort, limit: String(PAGE), offset: String(page * PAGE), ...(lineId ? { line_id: String(lineId) } : {}) });
   const { data, reload } = useApi<any>(`/api/deposits/search?${qs}`, [qs.toString()]);
