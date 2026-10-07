@@ -20,7 +20,7 @@ from collections import defaultdict
 from datetime import datetime, time
 from types import SimpleNamespace
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -34,11 +34,13 @@ from ..models import (
     Product,
     Service,
     StockMove,
+    Supplier,
+    TradeDoc,
     TradeHistory,
     local_now,
 )
 from . import accounting, inventory, settings_store
-from .customer_merge import person_key
+from .customer_merge import has_records, person_key
 from .legacy_import import ImportProblem, _amount, _key, _text, parse_date, read_table
 from .service_catalog import keys_alike, name_key
 from .textutil import normalize_mobile, to_en_digits
@@ -57,7 +59,7 @@ SYN = {
                  "qty_dr": ["تعداد بدهکار", "موجودی"], "qty_cr": ["تعداد بستانکار"], "buy": ["قیمت خرید"],
                  "sell": ["قیمت فروش1", "قیمت فروش"], "last_sell": ["فی آخرین فروش"], "last_buy": ["فی آخرین خرید"], "sku": ["sku"]},
     "journal": {"doc_type": ["نوع سند"], "doc_no": ["شماره سند"], "inner_no": ["شماره سند داخلی"], "date": ["تاریخ"],
-                "account": ["عنوان حساب"], "account_code": ["کد حساب"], "desc": ["شرح"], "qty": ["مقدار", "تعداد"], "price": ["فی"],
+                "account": ["عنوان حساب", "شرح حساب"], "account_code": ["کد حساب", "کد تفصیلی"], "desc": ["شرح"], "qty": ["مقدار", "تعداد"], "price": ["فی"],
                 "debit": ["بدهکار"], "credit": ["بستانکار"]},
 }
 # accounts that are not a person (walk-in sales, cash, bank): not made into customers unless the user says so
@@ -208,8 +210,12 @@ def preview_customers(db: Session, rows: list[list[object]], mapping: dict[str, 
         parsed.append(row)
     ids = list({c.id for p in parsed for c in p["candidates"]})
     spent = _spent(db, ids)
+    sellers = _sellers(db)
     for p in parsed:
         p["candidates"] = [_cbrief(c, spent) for c in p["candidates"]]
+        # a credit balance is what we owe: to a seller that is a debt of ours, to a customer it is prepaid credit
+        p["seller"] = bool(p.get("customer_id") and p["customer_id"] in sellers)
+        p["credit_as"] = "payable" if p["seller"] else "deposit"
     count = defaultdict(int)
     for p in parsed:
         count[p["status"]] += 1
@@ -217,10 +223,17 @@ def preview_customers(db: Session, rows: list[list[object]], mapping: dict[str, 
                                         "credit": sum(p["credit"] for p in parsed)}}
 
 
+def _sellers(db: Session) -> set[int]:
+    """People we buy from: linked to a supplier, or the seller of a purchase invoice brought over."""
+    return {x for x in db.scalars(select(Supplier.customer_id).where(Supplier.customer_id.is_not(None)))} | \
+        {x for x in db.scalars(select(TradeDoc.customer_id).where(TradeDoc.customer_id.is_not(None), TradeDoc.kind.in_(("purchase", "purchase_return"))))}
+
+
 def commit_customers(db: Session, batch: ImportBatch, choices: dict[str, int | str], *, balances: bool, at: datetime | None,
-                     account_id: int | None, user=None) -> dict:  # noqa: ANN001
+                     account_id: int | None, user=None, credit_as: dict[str, str] | None = None) -> dict:  # noqa: ANN001
     at = at or local_now()
-    created = {"customers": [], "entries": [], "deposits": [], "linked": []}
+    created = {"customers": [], "entries": [], "deposits": [], "linked": [], "purchases": [], "suppliers": []}
+    credit_as = credit_as or {}
     counts = defaultdict(int)
     account = db.get(PaymentAccount, account_id) if account_id else db.scalar(select(PaymentAccount).order_by(PaymentAccount.id))
     for row in batch.rows:
@@ -256,8 +269,11 @@ def commit_customers(db: Session, batch: ImportBatch, choices: dict[str, int | s
             counts["linked"] += 1
         if not balances:
             continue
+        from ..models import Purchase
         already = db.scalar(select(func.count(JournalEntry.id)).where(JournalEntry.ref_type == "tp_opening", JournalEntry.ref_id == c.id)) or \
-            db.scalar(select(func.count(Deposit.id)).where(Deposit.customer_id == c.id, Deposit.source == "import", Deposit.notes.like("%تیزپرداز%")))
+            db.scalar(select(func.count(Deposit.id)).where(Deposit.customer_id == c.id, Deposit.source == "import", Deposit.notes.like("%تیزپرداز%"))) or \
+            db.scalar(select(func.count(Purchase.id)).where(Purchase.supplier_id.in_(select(Supplier.id).where(Supplier.customer_id == c.id)),
+                                                            Purchase.notes.like("%تیزپرداز%")))
         if already and (row["debit"] or row["credit"]):
             counts["balance_already"] += 1
             continue
@@ -269,7 +285,14 @@ def commit_customers(db: Session, batch: ImportBatch, choices: dict[str, int | s
             created["entries"].append(e.id)
             counts["debts"] += 1
             counts["debt_amount"] += row["debit"]
-        if row["credit"] > 0 and account is not None:  # customer's credit: kept as an open deposit to use on a next invoice
+        if row["credit"] > 0 and credit_as.get(key, row.get("credit_as", "deposit")) == "payable":  # we owe this seller
+            sup = inventory.supplier_for(db, c.full_name, c.id, created)
+            pur = inventory.opening_payable(db, sup, row["credit"], at=at, notes=f"ماندهٔ بستانکار تیزپرداز (کد {row['code']}) - طلب فروشنده",
+                                            user=user)
+            created["purchases"].append(pur.id)
+            counts["payables"] += 1
+            counts["payable_amount"] += row["credit"]
+        elif row["credit"] > 0 and account is not None:  # customer's credit: kept as an open deposit to use on a next invoice
             dep = Deposit(customer_id=c.id, amount=row["credit"], payment_account_id=account.id, received_at=at, source="import",
                           notes=f"ماندهٔ بستانکار تیزپرداز (کد {row['code']})")
             db.add(dep)
@@ -430,6 +453,7 @@ def _service_to_product(db: Session, service: Service, product: Product, batch_i
     if not db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.service_id == service.id)):
         service.is_active = False  # now a product; kept (archived) only for its code / old records
         created["services"].append(service.id)
+    backfill_docs(db)  # each moved receipt is an invoice in the customer's file
     recost_history(db, [product.id])
     return n
 
@@ -483,12 +507,78 @@ def _party_customer(db: Session, party: str, idx: dict[str, list[Customer]], by_
     return None, matches
 
 
+DOC_KINDS = ("sale", "sale_return", "purchase", "purchase_return")
+KIND_FA = {"sale": "فاکتور فروش", "sale_return": "برگشت از فروش", "purchase": "فاکتور خرید", "purchase_return": "برگشت از خرید"}
+# on the person's row of an invoice: (the side holding the invoice amount, the side holding what was settled on it)
+PARTY_SIDES = {"sale": ("debit", "credit"), "sale_return": ("credit", "debit"),
+               "purchase": ("credit", "debit"), "purchase_return": ("debit", "credit")}
+
+
+# words of accounting rows that are never the person of an invoice
+ACCOUNT_WORDS = ("کالا", "صندوق", "بانک", "تخفیف", "مالیات", "ارزش افزوده", "عوارض", "حمل", "فروش", "خرید", "موجودی", "تنخواه",
+                 "چک", "کارتخوان", "درآمد", "هزینه", "برگشت", "گرد")
+
+
+def doc_key(source: str, kind: str, doc_no: str, day: str, fallback: str = "") -> str:
+    return f"{source}|{kind}|{doc_no or fallback}|{day}"[:200]
+
+
+def _same_party(account: str, code: str, party: str) -> bool:
+    if not party:
+        return False
+    p = to_en_digits(party).strip()
+    if p.isdigit():
+        return p == (code or "") or p == to_en_digits(account).strip()
+    return bool(account) and (account == party or person_key(tp_name(account)) == person_key(tp_name(party)) != "")
+
+
+def party_name(party: str, customer: Customer | None = None) -> str:
+    """How the person of an invoice is shown: the customer's name, else «نام نام‌خانوادگی» from the Tizpardaz form."""
+    return customer.full_name if customer else (tp_name(party) if party else "")
+
+
+def _supplier_for(db: Session, name: str, customer_id: int | None, created: dict | None = None) -> Supplier | None:
+    return inventory.supplier_for(db, name, customer_id, created)
+
+
+def _build_docs(parsed: list[dict], others: dict[str, list[dict]]) -> dict[str, dict]:
+    """Group the item rows into invoices and read each invoice's person row: its amount is the invoice total (after
+    the invoice's discount / charges), the other side is what was settled on it right away."""
+    docs: dict[str, dict] = {}
+    for row in parsed:
+        if row["kind"] not in DOC_KINDS:
+            continue
+        d = docs.setdefault(row["doc_key"], {"key": row["doc_key"], "kind": row["kind"], "doc_no": row["doc_no"], "date": row["date"],
+                                             "parties": defaultdict(int), "items_total": 0, "lines": 0})
+        d["items_total"] += row["amount"]
+        d["lines"] += 1
+        if row.get("party"):
+            d["parties"][row["party"]] += 1
+    for k, d in docs.items():
+        rows_o = others.get(k, [])
+        party = max(d["parties"], key=d["parties"].get) if d["parties"] else ""
+        side, settle = PARTY_SIDES[d["kind"]]
+        mine = [o for o in rows_o if _same_party(o["account"], o["code"], party)]
+        if not mine and not party:  # the person is only on its own row («تاجیک(ساناز)», or a company name)
+            names = {o["account"] for o in rows_o if "(" in o["account"] and o[side] > 0}
+            if not names:  # not an accounting row (cash, bank, discount, tax...): the person
+                names = {o["account"] for o in rows_o if o[side] > 0 and o["account"] and not any(w in o["account"] for w in ACCOUNT_WORDS)}
+            if len(names) == 1:
+                party = names.pop()
+                mine = [o for o in rows_o if o["account"] == party]
+        d.pop("parties")
+        d.update(party=party, found=bool(mine), total=sum(o[side] for o in mine) or d["items_total"], paid=sum(o[settle] for o in mine),
+                 extras=[{"account": o["account"], "amount": o["debit"] - o["credit"], "description": o["desc"]} for o in rows_o if o not in mine])
+    return docs
+
+
 def preview_journal(db: Session, rows: list[list[object]], mapping: dict[str, int], unit: str) -> dict:
     p_exact, p_all = _product_index(db)
     idx = _customer_index(db)
     by_tp = {c.tp_code: c for c in db.scalars(select(Customer).where(Customer.tp_code.is_not(None)))}
     done = set(db.scalars(select(TradeHistory.fp).where(TradeHistory.source == SOURCE)))
     parsed, ignored = [], defaultdict(int)
+    others: dict[str, list[dict]] = defaultdict(list)  # the person / discount / cash rows of each invoice
     unknown_p: dict[str, dict] = {}
     unknown_c: dict[str, dict] = {}
     seen: dict[str, int] = defaultdict(int)
@@ -503,6 +593,7 @@ def preview_journal(db: Session, rows: list[list[object]], mapping: dict[str, in
         debit, credit = _money(_get(r, mapping, "debit"), unit), _money(_get(r, mapping, "credit"), unit)
         desc = _fa(_get(r, mapping, "desc"))
         account = _fa(_get(r, mapping, "account"))
+        doc_no = _text(_get(r, mapping, "doc_no"))
         if kind is None or d is None:
             ignored[doc_type or "بدون نوع"] += 1
             continue
@@ -511,16 +602,18 @@ def preview_journal(db: Session, rows: list[list[object]], mapping: dict[str, in
             if amount <= 0:
                 ignored[f"{doc_type} (طرف پرداخت)"] += 1  # the cash side of the expense document
                 continue
-            row = {"row": n, "kind": kind, "date": d.isoformat(), "doc_no": _text(_get(r, mapping, "doc_no")), "account": account,
+            row = {"row": n, "kind": kind, "date": d.isoformat(), "doc_no": doc_no, "account": account,
                    "description": desc, "amount": amount, "qty": 0, "unit_price": 0}
         else:
-            if qty <= 0:
-                ignored[f"{doc_type} (ردیف بدون کالا)"] += 1  # customer / cash / discount side of the document
+            key = doc_key(SOURCE, kind, doc_no, d.isoformat(), fallback=f"r{n}")
+            if qty <= 0:  # the person's row, a discount, cash...: part of the invoice's header
+                others[key].append({"account": account, "code": to_en_digits(_text(_get(r, mapping, "account_code"))).strip(),
+                                    "debit": debit, "credit": credit, "desc": desc, "row": n, "type": doc_type})
                 continue
             amount = (credit if kind in ("sale", "purchase_return") else debit) or qty * price
             product, party = _split_desc(desc, kind)
             pid = p_exact.get(name_key(product))
-            row = {"row": n, "kind": kind, "date": d.isoformat(), "doc_no": _text(_get(r, mapping, "doc_no")), "account": account,
+            row = {"row": n, "kind": kind, "date": d.isoformat(), "doc_no": doc_no, "doc_key": key, "account": account,
                    "description": desc, "product_name": product, "product_id": pid, "party": party, "qty": qty,
                    "unit_price": price or (amount // qty if qty else 0), "amount": amount, "customer_id": None}
             if pid is None:
@@ -529,78 +622,257 @@ def preview_journal(db: Session, rows: list[list[object]], mapping: dict[str, in
                 if not u["similar"]:
                     k = name_key(product)
                     u["similar"] = [{"id": i, "name": nm} for kk, i, nm in p_all if keys_alike(kk, k) or (len(kk) > 4 and (kk in k or k in kk))][:3]
-            if kind in ("sale", "sale_return") and party:
-                cid, cands = _party_customer(db, party, idx, by_tp)
-                row["customer_id"] = cid
-                if cid is None:
-                    u = unknown_c.setdefault(party, {"party": party, "name": tp_name(party), "count": 0, "generic": is_generic(tp_name(party)),
-                                                     "candidates": [{"id": c.id, "full_name": c.full_name, "code": c.legacy_code, "mobile": c.mobile} for c in cands]})
-                    u["count"] += 1
         base = "|".join(str(x) for x in (row["kind"], row["doc_no"], row["date"], row["description"], row["qty"], row["amount"]))
         seen[base] += 1
         row["fp"] = f"{base}|{seen[base]}"[:160]
         row["duplicate"] = row["fp"] in done
         parsed.append(row)
+    docs = _build_docs(parsed, others)
+    for k, rows_o in others.items():
+        if k not in docs:
+            for o in rows_o:
+                ignored[f"{o['type']} (ردیف بدون کالا)"] += 1
+    # the person of each invoice (buyer of a sale, seller of a purchase): a customer here, by Tizpardaz code or name
+    existing = {k for chunk in _chunks(list(docs), 500) for k in db.scalars(select(TradeDoc.key).where(TradeDoc.key.in_(chunk)))}
+    for d in docs.values():
+        cid, cands = _party_customer(db, d["party"], idx, by_tp) if d["party"] else (None, [])
+        d["customer_id"], d["exists"] = cid, d["key"] in existing
+        if d["party"] and cid is None:
+            u = unknown_c.setdefault(d["party"], {"party": d["party"], "name": tp_name(d["party"]), "count": 0, "seller": False,
+                                                  "generic": is_generic(tp_name(d["party"])),
+                                                  "candidates": [{"id": c.id, "full_name": c.full_name, "code": c.legacy_code, "mobile": c.mobile} for c in cands]})
+            u["count"] += 1
+            u["seller"] = u["seller"] or d["kind"].startswith("purchase")
+    for row in parsed:
+        if row.get("doc_key") in docs:
+            d = docs[row["doc_key"]]
+            row["party"] = row.get("party") or d["party"]
+            row["customer_id"] = d["customer_id"]
     fresh = [p for p in parsed if not p["duplicate"]]
     tot = defaultdict(int)
     cnt = defaultdict(int)
     for p in fresh:
         tot[p["kind"]] += p["amount"]
         cnt[p["kind"]] += 1
+    doc_counts = defaultdict(int)
+    for d in docs.values():
+        doc_counts[d["kind"]] += 1
     dates = sorted(p["date"] for p in fresh)
     return {"rows": parsed, "summary": {"total": len(parsed), "new": len(fresh), "duplicates": len(parsed) - len(fresh), "counts": dict(cnt),
                                         "amounts": dict(tot), "first_date": dates[0] if dates else None, "last_date": dates[-1] if dates else None,
-                                        "ignored": dict(ignored)},
+                                        "ignored": dict(ignored), "doc_counts": dict(doc_counts),
+                                        "docs_existing": sum(1 for d in docs.values() if d["exists"])},
+            "docs": list(docs.values()),
             "unknown_products": sorted(unknown_p.values(), key=lambda x: -x["count"]),
             "unknown_customers": sorted(unknown_c.values(), key=lambda x: -x["count"])}
 
 
+def _chunks(items: list, n: int):  # noqa: ANN202
+    for i in range(0, len(items), n):
+        yield items[i:i + n]
+
+
+def _new_party_customer(db: Session, party: str, created: dict) -> Customer:
+    code = to_en_digits(party).strip()
+    c = Customer(full_name=tp_name(party) if not code.isdigit() else f"مشتری تیزپرداز {code}", source=SOURCE,
+                 legacy_code=accounting.next_customer_code(db), mobile_issue="missing", tp_code=code if code.isdigit() else None)
+    db.add(c)
+    db.flush()
+    created["customers"].append(c.id)
+    return c
+
+
 def commit_journal(db: Session, batch: ImportBatch, product_map: dict[str, int | str], customer_map: dict[str, int | str], user=None) -> dict:  # noqa: ANN001
-    created = {"history": [], "customers": []}
+    created = {"history": [], "customers": [], "docs": [], "suppliers": []}
     counts = defaultdict(int)
     new_customers: dict[str, int] = {}
     done = set(db.scalars(select(TradeHistory.fp).where(TradeHistory.source == SOURCE)))
+    metas = {d["key"]: d for d in (batch.summary or {}).get("docs", [])}
+    docs: dict[str, TradeDoc] = {}
+
+    def person(party: str, preset: int | None) -> int | None:
+        if preset or not party:
+            return preset
+        # a written-out person («نام‌خانوادگی(نام)» or a code) becomes a customer; a word like «متفرقه» stays a name
+        is_person = ("(" in party or to_en_digits(party).strip().isdigit()) and not is_generic(tp_name(party))
+        choice = customer_map.get(party, "new" if is_person else "skip")
+        if isinstance(choice, int) or str(choice).isdigit():
+            return int(choice)
+        if choice == "new":
+            if party not in new_customers:
+                new_customers[party] = _new_party_customer(db, party, created).id
+            return new_customers[party]
+        return None
+
+    def doc_for(row: dict) -> TradeDoc | None:
+        key = row.get("doc_key")
+        if not key or row["kind"] not in DOC_KINDS:
+            return None
+        if key in docs:
+            return docs[key]
+        meta = metas.get(key) or {"party": row.get("party") or "", "customer_id": row.get("customer_id"), "found": False}
+        doc = db.scalar(select(TradeDoc).where(TradeDoc.key == key))
+        if doc is None:
+            doc = TradeDoc(key=key, batch_id=batch.id, source=SOURCE, kind=row["kind"], doc_no=row["doc_no"][:32],
+                           at=datetime.combine(datetime.fromisoformat(row["date"]).date(), time(12, 0)), extras=[])
+            db.add(doc)
+            db.flush()
+            created["docs"].append(doc.id)
+            counts["docs"] += 1
+        doc.party = (meta.get("party") or doc.party or "")[:128]
+        doc.customer_id = doc.customer_id or person(doc.party, meta.get("customer_id"))
+        if meta.get("found"):  # the invoice's own amount (after its discount / charges) and what was settled on it
+            doc.total, doc.paid, doc.extras = meta["total"], meta["paid"], meta["extras"]
+        if doc.kind.startswith("purchase") and not doc.supplier_id:
+            cust = db.get(Customer, doc.customer_id) if doc.customer_id else None
+            sup = _supplier_for(db, party_name(doc.party, cust), doc.customer_id, created)
+            doc.supplier_id = sup.id if sup else None
+        docs[key] = doc
+        return doc
+
     for row in batch.rows:
+        doc = doc_for(row)
         if row["fp"] in done:
             counts["duplicates"] += 1
+            if doc is not None:  # brought over before invoices were kept: attach it to its invoice now
+                for h in db.scalars(select(TradeHistory).where(TradeHistory.fp == row["fp"], TradeHistory.source == SOURCE)):
+                    h.doc_id = h.doc_id or doc.id
+                    h.customer_id = h.customer_id or doc.customer_id
             continue
         pid = row.get("product_id")
         if row["kind"] != "expense" and pid is None:
             choice = product_map.get(row.get("product_name", ""), "skip")
             pid = int(choice) if isinstance(choice, int) or str(choice).isdigit() else None
-        cid = row.get("customer_id")
-        if row["kind"] in ("sale", "sale_return") and cid is None and row.get("party"):
-            # a written-out person («نام‌خانوادگی(نام)» or a code) becomes a customer; a word like «متفرقه» stays a name
-            person = ("(" in row["party"] or to_en_digits(row["party"]).strip().isdigit()) and not is_generic(tp_name(row["party"]))
-            choice = customer_map.get(row["party"], "new" if person else "skip")
-            if isinstance(choice, int) or str(choice).isdigit():
-                cid = int(choice)
-            elif choice == "new":
-                if row["party"] not in new_customers:
-                    party = row["party"]
-                    code = to_en_digits(party).strip()
-                    c = Customer(full_name=tp_name(party) if not code.isdigit() else f"مشتری تیزپرداز {code}", source=SOURCE,
-                                 legacy_code=accounting.next_customer_code(db), mobile_issue="missing", tp_code=code if code.isdigit() else None)
-                    db.add(c)
-                    db.flush()
-                    new_customers[party] = c.id
-                    created["customers"].append(c.id)
-                cid = new_customers[row["party"]]
+        cid = doc.customer_id if doc is not None else row.get("customer_id")
         d = datetime.combine(datetime.fromisoformat(row["date"]).date(), time(12, 0))
         h = TradeHistory(batch_id=batch.id, source=SOURCE, kind=row["kind"], at=d, doc_no=row["doc_no"][:32], product_id=pid, customer_id=cid,
                          party=(row.get("party") or "")[:128], account=(row.get("account") or "")[:128], description=row["description"][:256],
-                         qty=row["qty"], unit_price=row["unit_price"], amount=row["amount"], fp=row["fp"])
+                         qty=row["qty"], unit_price=row["unit_price"], amount=row["amount"], fp=row["fp"], doc_id=doc.id if doc else None)
         db.add(h)
         done.add(row["fp"])
         counts[row["kind"]] += 1
         if pid is None and row["kind"] != "expense":
             counts["without_product"] += 1
     db.flush()
+    for doc in docs.values():
+        _refresh_doc(db, doc)
     created["history"] = list(db.scalars(select(TradeHistory.id).where(TradeHistory.batch_id == batch.id)))
     products = set(db.scalars(select(TradeHistory.product_id).where(TradeHistory.batch_id == batch.id, TradeHistory.product_id.is_not(None))))
     recost_history(db, products)
     batch.summary = {**batch.summary, "created": created, "result": dict(counts)}
     return dict(counts)
+
+
+def _refresh_doc(db: Session, doc: TradeDoc) -> None:
+    """Sum of the invoice's items; without its own amount from the file, the invoice total is that sum."""
+    items = int(db.scalar(select(func.coalesce(func.sum(TradeHistory.amount), 0)).where(TradeHistory.doc_id == doc.id)) or 0)
+    if not doc.total or doc.total == doc.items_total:
+        doc.total = items
+    doc.items_total = items
+
+
+def seller_credits(db: Session) -> list[dict]:
+    """Credit balances brought over as a customer's open deposit although the person is a seller (we owe them)."""
+    sellers = _sellers(db)
+    out = []
+    for d in db.scalars(select(Deposit).where(Deposit.status == "held", Deposit.source == "import", Deposit.notes.like("%تیزپرداز%"),
+                                              Deposit.customer_id.in_(sellers or {-1})).order_by(Deposit.id)):
+        c = db.get(Customer, d.customer_id)
+        n = db.scalar(select(func.count(TradeDoc.id)).where(TradeDoc.customer_id == c.id, TradeDoc.kind.in_(("purchase", "purchase_return"))))
+        out.append({"deposit_id": d.id, "customer_id": c.id, "name": c.full_name, "code": c.legacy_code, "amount": d.amount,
+                    "received_at": d.received_at.isoformat(timespec="minutes"), "purchases": int(n or 0), "notes": d.notes})
+    return out
+
+
+def credit_to_payable(db: Session, deposit_ids: list[int], user=None) -> dict:  # noqa: ANN001
+    """Turn those deposits into what we owe the seller (an opening payable). Only deposits that were never used and
+    whose only entry is the opening one (no money moved) are changed."""
+    out = defaultdict(int)
+    for did in deposit_ids:
+        d = db.get(Deposit, did)
+        if d is None or d.status != "held" or d.source != "import" or "تیزپرداز" not in (d.notes or ""):
+            out["skipped"] += 1
+            continue
+        entries = list(db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "deposit", JournalEntry.ref_id == d.id)))
+        opening = accounting.account(db, accounting.OPENING).id
+        if not entries or any(all(ln.account_id != opening for ln in e.lines) for e in entries):
+            out["skipped"] += 1  # money really moved on it: leave it to the user
+            continue
+        c = db.get(Customer, d.customer_id)
+        for e in entries:
+            db.delete(e)
+        sup = inventory.supplier_for(db, c.full_name, c.id)
+        pur = inventory.opening_payable(db, sup, d.amount, at=d.received_at, notes=f"{d.notes} - طلب فروشنده", user=user)
+        db.delete(d)
+        db.flush()
+        from .audit import audit
+        audit(db, "tizpardaz.credit_to_payable", "purchase", pur.id, {"deposit": did, "customer": c.id, "amount": pur.total}, user=user)
+        out["converted"] += 1
+        out["amount"] += pur.total
+    return dict(out)
+
+
+def doc_out(db: Session, doc: TradeDoc, full: bool = False, people: dict | None = None) -> dict:
+    """An invoice brought over, as shown in the person's file and the purchases list (with its items when full)."""
+    cust = (people or {}).get(doc.customer_id) if people is not None else (db.get(Customer, doc.customer_id) if doc.customer_id else None)
+    sup = db.get(Supplier, doc.supplier_id) if doc.supplier_id else None
+    out = {"id": doc.id, "kind": doc.kind, "kind_label": KIND_FA.get(doc.kind, doc.kind), "doc_no": doc.doc_no, "source": doc.source,
+           "at": doc.at.isoformat(timespec="minutes"), "party": doc.party, "person": party_name(doc.party, cust) or (sup.name if sup else ""),
+           "customer_id": doc.customer_id, "customer_code": cust.legacy_code if cust else None, "supplier_id": doc.supplier_id,
+           "supplier": sup.name if sup else None, "items_total": doc.items_total, "total": doc.total, "paid": doc.paid,
+           # what the invoice took off (discount) or added (shipping, tax...) compared with its items
+           "discount": max(0, doc.items_total - doc.total), "additions": max(0, doc.total - doc.items_total)}
+    if full:
+        lines = list(db.scalars(select(TradeHistory).where(TradeHistory.doc_id == doc.id).order_by(TradeHistory.id)))
+        products = {p.id: p for p in db.scalars(select(Product).where(Product.id.in_({h.product_id for h in lines if h.product_id} or {-1})))}
+        sale = doc.kind in ("sale", "sale_return")
+        out["items"] = [{"id": h.id, "product_id": h.product_id, "code": products[h.product_id].code if h.product_id in products else None,
+                         "name": products[h.product_id].name if h.product_id in products else (h.description or "—"),
+                         "description": h.description, "qty": h.qty, "unit_price": h.unit_price, "amount": h.amount,
+                         "cost": h.cost if sale else None, "profit": h.amount - (h.cost or 0) if sale and h.cost is not None else None}
+                        for h in lines]
+        out["extras"] = doc.extras or []
+        out["lines"] = len(lines)
+    return out
+
+
+def backfill_docs(db: Session) -> int:
+    """Rows brought over before invoices were kept: group them into their invoices (number + date), and link the
+    seller of each purchase to the person (customer) and supplier. Runs at start; does nothing once done."""
+    rows = list(db.scalars(select(TradeHistory).where(TradeHistory.doc_id.is_(None), TradeHistory.kind.in_(DOC_KINDS))
+                           .order_by(TradeHistory.id)))
+    if not rows:
+        return 0
+    idx = _customer_index(db)
+    by_tp = {c.tp_code: c for c in db.scalars(select(Customer).where(Customer.tp_code.is_not(None)))}
+    groups: dict[str, list[TradeHistory]] = defaultdict(list)
+    for h in rows:
+        groups[doc_key(h.source, h.kind, h.doc_no, h.at.date().isoformat(), fallback=f"h{h.id}")].append(h)
+    n = 0
+    for key, lines in groups.items():
+        first = lines[0]
+        doc = db.scalar(select(TradeDoc).where(TradeDoc.key == key))
+        if doc is None:
+            doc = TradeDoc(key=key, batch_id=first.batch_id, source=first.source, kind=first.kind, doc_no=first.doc_no, at=first.at,
+                           party=first.party, total=0, items_total=0, paid=0, extras=[])
+            db.add(doc)
+            db.flush()
+            n += 1
+        cid = next((h.customer_id for h in lines if h.customer_id), None)
+        if cid is None and first.party:
+            cid, _ = _party_customer(db, first.party, idx, by_tp)
+        doc.customer_id = doc.customer_id or cid
+        for h in lines:
+            h.doc_id = doc.id
+            h.customer_id = h.customer_id or doc.customer_id
+        if doc.kind.startswith("purchase") and not doc.supplier_id and (doc.party or doc.customer_id):
+            cust = db.get(Customer, doc.customer_id) if doc.customer_id else None
+            sup = _supplier_for(db, party_name(doc.party, cust), doc.customer_id)
+            doc.supplier_id = sup.id if sup else None
+        db.flush()
+        _refresh_doc(db, doc)
+    db.flush()
+    return n
 
 
 def recost_history(db: Session, product_ids) -> None:  # noqa: ANN001
@@ -665,6 +937,26 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         if h:
             db.delete(h)
             out["history"] += 1
+    db.flush()
+    for doc in db.scalars(select(TradeDoc).where(or_(TradeDoc.id.in_(c.get("docs") or [-1]), TradeDoc.batch_id == batch.id))):
+        if not db.scalar(select(TradeHistory.id).where(TradeHistory.doc_id == doc.id).limit(1)):  # no item left
+            db.delete(doc)
+            out["docs"] += 1
+    db.flush()
+    from ..models import Purchase
+    for pid in c.get("purchases", []):  # sellers' balances, unless something was already paid on them
+        pur = db.get(Purchase, pid)
+        if pur and pur.paid == 0 and not pur.items:
+            for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(("purchase", "purchase_void")), JournalEntry.ref_id == pid)):
+                db.delete(e)
+            db.delete(pur)
+            out["payables"] += 1
+    db.flush()
+    for sid in c.get("suppliers", []):
+        sup = db.get(Supplier, sid)
+        if sup and not db.scalar(select(TradeDoc.id).where(TradeDoc.supplier_id == sid).limit(1)) \
+                and not db.scalar(select(Purchase.id).where(Purchase.supplier_id == sid).limit(1)):
+            db.delete(sup)
     for a in c.get("appointments", []):  # Chehreh history that had moved to a product goes back to its service
         db.add(Appointment(customer_id=a["customer_id"], service_id=a["service_id"], staff_id=a["staff_id"],
                            start_at=datetime.fromisoformat(a["start_at"]), quoted_price=a["quoted_price"], notes=a["notes"],
@@ -717,8 +1009,7 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         cust = db.get(Customer, cid)
         if cust is None:
             continue
-        from ..models import Invoice, Payment
-        if any(db.scalar(select(func.count(m.id)).where(m.customer_id == cid)) for m in (Appointment, Deposit, Invoice, Payment, TradeHistory)):
+        if has_records(db, cid):
             continue
         unused.append(cust)
     out["customers"] = accounting.delete_customers(db, unused)

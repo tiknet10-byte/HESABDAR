@@ -5,7 +5,7 @@ Users (logins) are always kept.
 """
 from __future__ import annotations
 
-from sqlalchemy import delete, text
+from sqlalchemy import delete, text, update
 from sqlalchemy.orm import Session
 
 from ..core import db as dbmod
@@ -30,15 +30,29 @@ from ..models import (
     Payment,
     PaymentAccount,
     PluginState,
+    Product,
+    Purchase,
+    PurchaseItem,
     Service,
     ServiceLine,
     Setting,
     Staff,
+    StockMove,
+    Supplier,
+    SupplierPayment,
+    TradeDoc,
+    TradeHistory,
     WaitlistEntry,
+    WooLog,
+    WooOrder,
+    WooOutbox,
+    WooProduct,
 )
 
-# order matters (foreign keys): children first
-TRANSACTIONS = [WaitlistEntry, InboundReceipt, BankTransaction, Payment, Deposit, InvoiceItem, Invoice, Appointment, Expense,
+# order matters (foreign keys): children first. Stock moves, website orders and purchases point at invoices and
+# products; history rows point at their invoice headers; appointments point at the invoice that settled them.
+TRANSACTIONS = [WooOutbox, WooOrder, WooLog, StockMove, SupplierPayment, PurchaseItem, Purchase, TradeHistory, TradeDoc,
+                WaitlistEntry, InboundReceipt, BankTransaction, Payment, Deposit, Appointment, InvoiceItem, Invoice, Expense,
                 JournalLine, JournalEntry, Alert, ConversationMessage, ConversationState, ImportBatch]
 SCOPES = {
     "transactions": "همه تراکنش‌ها (فاکتور، بیعانه، دریافت، هزینه، نوبت، رسید، اسناد) - مشتریان، خدمات و تنظیمات می‌مانند",
@@ -59,10 +73,15 @@ def reset(db: Session, scope: str) -> dict:
     for m in TRANSACTIONS:
         wipe(m)
     wipe(KnowledgeItem, KnowledgeItem.kind == "loyalty")
+    # products stay (catalog), with no stock and no price remembered from sales that no longer exist
+    db.execute(update(Product).values(stock_qty=0, stock_value=0, unit_cost=None, last_purchase_cost=None, last_sale_price=None,
+                                      last_sale_at=None, last_online_price=None, last_online_at=None))
     if scope in ("customers", "factory"):
+        db.execute(update(Supplier).values(customer_id=None))
         wipe(Customer)
     if scope == "factory":
-        for m in (Service, Staff, PaymentAccount, ServiceLine, KnowledgeItem, LedgerAccount, Setting, PluginState, AuditLog):
+        for m in (WooProduct, Product, Supplier, Service, Staff, PaymentAccount, ServiceLine, KnowledgeItem, LedgerAccount, Setting,
+                  PluginState, AuditLog):
             wipe(m)
     db.flush()
     if scope == "factory":

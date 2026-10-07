@@ -29,7 +29,7 @@ def _batch(db: Session, bid: int) -> ImportBatch:
 def _out(b: ImportBatch, rows: bool = True) -> dict:
     s = b.summary or {}
     out = {"id": b.id, "file_name": b.file_name, "status": b.status, "created_at": b.created_at.isoformat(timespec="minutes"),
-           **{k: v for k, v in s.items() if k not in ("created", "mapping")}}
+           **{k: v for k, v in s.items() if k not in ("created", "mapping", "docs")}}
     if rows:
         out["rows"] = b.rows[:3000]
     return out
@@ -77,6 +77,27 @@ async def preview(file: UploadFile = File(...), kind: str = Form(...), unit: str
     return _out(b)
 
 
+@router.get("/seller-credits")
+def seller_credits(db: Session = Depends(get_db), _=Depends(require("settings"))):
+    """Sellers whose Tizpardaz credit balance was brought over as a customer deposit (it is what we owe them)."""
+    return tp.seller_credits(db)
+
+
+class IdsIn(BaseModel):
+    deposit_ids: list[int]
+
+
+@router.post("/seller-credits")
+def fix_seller_credits(body: IdsIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    try:
+        out = tp.credit_to_payable(db, body.deposit_ids, user=user)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return out
+
+
 @router.get("/{bid}")
 def get_batch(bid: int, db: Session = Depends(get_db), _=Depends(require("settings"))):
     return _out(_batch(db, bid))
@@ -89,6 +110,7 @@ class CommitIn(BaseModel):
     account_id: int | None = None  # customers' credit balances are kept as open deposits on this account
     product_map: dict[str, int | str] = {}  # journal: unknown product name -> product id | "skip"
     customer_map: dict[str, int | str] = {}  # journal: unknown customer -> customer id | "new" | "skip"
+    credit_as: dict[str, str] = {}  # customers: row -> "deposit" (customer's prepaid credit) | "payable" (we owe this seller)
 
 
 @router.post("/{bid}/commit")
@@ -100,7 +122,8 @@ def commit(bid: int, body: CommitIn, db: Session = Depends(get_db), user=Depends
     try:
         if kind == "customers":
             result = tp.commit_customers(db, b, {str(k): v for k, v in body.choices.items()}, balances=body.balances, at=body.at,
-                                         account_id=body.account_id or routing.default_account(db, "deposits"), user=user)
+                                         account_id=body.account_id or routing.default_account(db, "deposits"), user=user,
+                                         credit_as={str(k): v for k, v in body.credit_as.items()})
         elif kind == "products":
             result = tp.commit_products(db, b, {str(k): str(v) for k, v in body.choices.items()}, at=body.at, user=user)
         else:

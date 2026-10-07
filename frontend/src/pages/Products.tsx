@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import JalaliPicker from "../components/JalaliPicker";
 import ProductPicker from "../components/ProductPicker";
+import { SupplierView, TradeDocView } from "../components/TradeDocs";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Stat, Tabs } from "../components/ui";
 import { api } from "../lib/api";
 import { ACCOUNT_KINDS, cmoney, money, num } from "../lib/format";
@@ -160,6 +161,7 @@ const H_SOURCE: Record<string, string> = { tizpardaz: "تیزپرداز", chehre
 
 /** Sales and purchases of this product brought over from Tizpardaz / Chehreh (history only: stock came over as a count). */
 function TradeHistoryList({ rows }: { rows: any[] }) {
+  const [doc, setDoc] = useState<number | null>(null);
   const sales = rows.filter((h) => h.kind === "sale" || h.kind === "sale_return");
   const sign = (h: any) => (h.kind === "sale_return" ? -1 : 1);
   const qty = sales.reduce((t, h) => t + sign(h) * h.qty, 0);
@@ -173,7 +175,8 @@ function TradeHistoryList({ rows }: { rows: any[] }) {
         <table className="table text-xs [&_td]:px-2 [&_th]:px-2">
           <thead><tr><th>تاریخ</th><th>نوع</th><th>طرف حساب</th><th>تعداد</th><th>مبلغ</th><th>سود</th></tr></thead>
           <tbody>{rows.map((h: any, k: number) => (
-            <tr key={k}>
+            <tr key={k} className={h.doc_id ? "cursor-pointer hover:bg-violet-500/10" : ""} title={h.doc_id ? "دیدن فاکتور" : undefined}
+              onClick={() => h.doc_id && setDoc(h.doc_id)}>
               <td className="num whitespace-nowrap">{formatJ(h.at, false)}</td>
               <td>{H_KINDS[h.kind] ?? h.kind}<span className="muted"> · {H_SOURCE[h.source] ?? h.source}{h.doc_no ? ` · سند ${h.doc_no}` : ""}</span></td>
               <td>{h.customer ?? h.party ?? ""}</td>
@@ -184,6 +187,7 @@ function TradeHistoryList({ rows }: { rows: any[] }) {
           ))}</tbody>
         </table>
       </div>
+      <Modal open={doc !== null} onClose={() => setDoc(null)} title="جزئیات فاکتور" wide>{doc !== null && <TradeDocView id={doc} />}</Modal>
     </details>
   );
 }
@@ -333,7 +337,7 @@ function PurchaseForm({ onDone }: { onDone: () => void }) {
   );
 }
 
-function PurchaseView({ id, onChange }: { id: number; onChange: () => void }) {
+export function PurchaseView({ id, onChange }: { id: number; onChange: () => void }) {
   const toast = useToast();
   const { user } = useAuth();
   const { data: p, reload } = useApi<any>(`/api/purchases/${id}`);
@@ -348,12 +352,15 @@ function PurchaseView({ id, onChange }: { id: number; onChange: () => void }) {
         <div><b className="num">{p.number}</b> · {p.supplier ?? "—"}{p.supplier_ref && <span className="muted"> · فاکتور فروشنده {p.supplier_ref}</span>}<div className="muted text-xs">{formatJ(p.at)}</div></div>
         <Badge status={p.status === "open" ? "issued" : p.status} />
       </div>
-      <table className="table text-xs [&_td]:px-2 [&_th]:px-2">
+      {!p.items.length && <div className="rounded-xl bg-sky-500/10 p-3 text-xs">ماندهٔ اول دوره: مبلغی که از قبل (مثلاً در تیزپرداز) به این فروشنده بدهکار بودیم. کالایی ندارد و مثل بقیهٔ خریدها پرداخت می‌شود.{p.notes && <div className="muted mt-1">{p.notes}</div>}</div>}
+      {p.items.length > 0 && <table className="table text-xs [&_td]:px-2 [&_th]:px-2">
         <thead><tr><th>کالا</th><th>تعداد</th><th>قیمت خرید</th><th>بهای تمام‌شدهٔ واحد</th><th>جمع</th></tr></thead>
-        <tbody>{p.items.map((i: any) => (
-          <tr key={i.product_id}><td><span className="num muted">{i.code}</span> {i.product}</td><td className="num">{num(i.quantity)}</td><td className="num">{money(i.unit_price, false)}</td><td className="num">{money(i.unit_cost, false)}</td><td className="num">{money(i.cost, false)}</td></tr>
+        <tbody>{p.items.map((i: any, k: number) => (
+          <tr key={k}><td><span className="num muted">{i.code}</span> {i.product}</td><td className="num">{num(i.quantity)}</td><td className="num">{money(i.unit_price, false)}</td><td className="num">{money(i.unit_cost, false)}</td><td className="num">{money(i.cost, false)}</td></tr>
         ))}</tbody>
-      </table>
+      </table>}
+      {(p.discount > 0 || p.shipping > 0) && <div className="muted flex flex-wrap gap-4 text-xs"><span>جمع اقلام: <span className="num">{money(p.subtotal)}</span></span>
+        {p.discount > 0 && <span>تخفیف: <span className="num">{money(p.discount)}</span></span>}{p.shipping > 0 && <span>حمل: <span className="num">{money(p.shipping)}</span></span>}</div>}
       <div className="rounded-xl p-3" style={{ background: "var(--surface)" }}>
         <div className="flex justify-between"><span className="muted">جمع خرید</span><b className="num">{money(p.total)}</b></div>
         <div className="flex justify-between"><span className="muted">پرداخت‌شده</span><span className="num">{money(p.paid)}</span></div>
@@ -384,20 +391,59 @@ function PurchaseView({ id, onChange }: { id: number; onChange: () => void }) {
 function Purchases({ onChanged }: { onChanged: () => void }) {
   const { user } = useAuth();
   const [status, setStatus] = useState("");
-  const { data, reload } = useApi<any[]>(`/api/purchases?status=${status}`, [status]);
+  const [q, setQ] = useState("");
+  const list = !["history", "suppliers"].includes(status);
+  const { data, reload } = useApi<any[]>(list ? `/api/purchases?status=${status}` : "", [status]);
+  const hist = useApi<any[]>(status === "history" ? `/api/trade-docs?kind=purchase&q=${encodeURIComponent(q)}` : "", [status, q]).data;
+  const sups = useApi<any[]>(status === "suppliers" ? "/api/suppliers" : "", [status]);
   const [create, setCreate] = useState(false);
   const [view, setView] = useState<number | null>(null);
+  const [doc, setDoc] = useState<number | null>(null);
+  const [sup, setSup] = useState<number | null>(null);
   const refresh = () => { reload(); onChanged(); };
+  const shownSups = (sups.data ?? []).filter((x) => !q || x.name.includes(q) || (x.customer ?? "").includes(q));
   return (
     <Card pad={false} title="خرید از تأمین‌کننده" actions={can(user, "finance") && <button className="btn btn-sm btn-primary" onClick={() => setCreate(true)}><Truck size={14} />خرید جدید</button>}>
-      <div className="px-5 pt-3"><Tabs value={status} onChange={setStatus} items={[{ value: "", label: "همه" }, { value: "unpaid", label: "پرداخت‌نشده" }, { value: "paid", label: "تسویه" }, { value: "void", label: "باطل" }]} /></div>
-      {!data ? <Loading /> : !data.length ? <Empty icon={<Truck size={28} />} text="خریدی ثبت نشده" /> : (
+      <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
+        <Tabs value={status} onChange={(v) => { setStatus(v); setQ(""); }} items={[{ value: "", label: "همه" }, { value: "unpaid", label: "پرداخت‌نشده" }, { value: "paid", label: "تسویه" },
+          { value: "void", label: "باطل" }, { value: "suppliers", label: "تأمین‌کنندگان" }, { value: "history", label: "سوابق تیزپرداز" }]} />
+        {!list && <input className="input max-w-xs py-1.5 text-sm" placeholder={status === "history" ? "نام فروشنده یا شمارهٔ فاکتور…" : "نام تأمین‌کننده…"} value={q} onChange={(e) => setQ(e.target.value)} />}
+      </div>
+      {status === "suppliers" ? (!sups.data ? <Loading /> : !shownSups.length ? <Empty icon={<Truck size={28} />} text="تأمین‌کننده‌ای نیست" /> : (
+        <div className="mt-3 overflow-x-auto">
+          <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
+            <thead><tr><th>تأمین‌کننده</th><th>پروندهٔ شخص</th><th>خرید در این سیستم</th><th>خرید در تیزپرداز</th><th>بدهی ما به او</th></tr></thead>
+            <tbody>{shownSups.map((x) => (
+              <tr key={x.id} className="cursor-pointer" onClick={() => setSup(x.id)}>
+                <td className="font-semibold">{x.name}{x.mobile && <div className="num muted text-xs" dir="ltr">{x.mobile}</div>}</td>
+                <td className="text-xs">{x.customer ? <>{x.customer}{x.customer_code && <span className="num muted"> · کد {x.customer_code}</span>}</> : <span className="muted">وصل نیست</span>}</td>
+                <td className="num">{x.bought ? money(x.bought, false) : "—"}</td>
+                <td className="num">{x.history_count ? <>{money(x.history_total, false)}<div className="muted text-[10px]">{num(x.history_count)} فاکتور</div></> : "—"}</td>
+                <td className={`num ${x.owed > 0 ? "font-bold text-amber-600" : ""}`}>{x.owed > 0 ? money(x.owed, false) : "—"}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )) : status === "history" ? (!hist ? <Loading /> : !hist.length ? <Empty icon={<Truck size={28} />} text="فاکتور خریدی از تیزپرداز منتقل نشده" /> : (
+        <div className="mt-3 overflow-x-auto">
+          <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
+            <thead><tr><th>فاکتور</th><th>تاریخ</th><th>فروشنده</th><th>جمع کالاها</th><th>تخفیف</th><th>مبلغ فاکتور</th></tr></thead>
+            <tbody>{hist.map((d) => (
+              <tr key={d.id} className="cursor-pointer" onClick={() => setDoc(d.id)}>
+                <td className="font-bold">{d.kind_label} <span className="num">{d.doc_no}</span></td><td className="num">{formatJ(d.at, false)}</td>
+                <td>{d.person || d.party || "—"}</td><td className="num">{money(d.items_total, false)}</td>
+                <td className="num">{d.discount ? money(d.discount, false) : "—"}</td><td className="num font-semibold">{money(d.total, false)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )) : !data ? <Loading /> : !data.length ? <Empty icon={<Truck size={28} />} text="خریدی ثبت نشده" /> : (
         <div className="mt-3 overflow-x-auto">
           <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
             <thead><tr><th>شماره</th><th>تاریخ</th><th>تأمین‌کننده</th><th>اقلام</th><th>جمع</th><th>پرداخت‌شده</th><th>مانده</th><th></th></tr></thead>
             <tbody>{data.map((p) => (
               <tr key={p.id} className={`cursor-pointer ${p.status === "void" ? "opacity-50" : ""}`} onClick={() => setView(p.id)}>
-                <td className="num font-bold">{p.number}</td><td className="num">{formatJ(p.at, false)}</td><td>{p.supplier ?? "—"}</td>
+                <td className="num font-bold">{p.items_count ? p.number : <span className="text-xs">مانده اول دوره</span>}</td><td className="num">{formatJ(p.at, false)}</td><td>{p.supplier ?? "—"}</td>
                 <td className="num">{num(p.items_count)}</td><td className="num">{money(p.total, false)}</td><td className="num">{money(p.paid, false)}</td>
                 <td className={`num ${p.due > 0 ? "font-bold text-amber-600" : ""}`}>{p.due > 0 ? money(p.due, false) : "—"}</td>
                 <td><Badge status={p.status === "open" ? "issued" : p.status} /></td>
@@ -408,6 +454,9 @@ function Purchases({ onChanged }: { onChanged: () => void }) {
       )}
       <Modal open={create} onClose={() => setCreate(false)} title="خرید جدید" wide>{create && <PurchaseForm onDone={() => { setCreate(false); refresh(); }} />}</Modal>
       <Modal open={view !== null} onClose={() => setView(null)} title="جزئیات خرید" wide>{view !== null && <PurchaseView id={view} onChange={refresh} />}</Modal>
+      <Modal open={doc !== null} onClose={() => setDoc(null)} title="جزئیات فاکتور خرید (تیزپرداز)" wide>{doc !== null && <TradeDocView id={doc} />}</Modal>
+      <Modal open={sup !== null} onClose={() => { setSup(null); sups.reload(); }} title="حساب تأمین‌کننده" wide>
+        {sup !== null && <SupplierView id={sup} onOpenPurchase={(pid) => setView(pid)} onChange={() => sups.reload()} />}</Modal>
     </Card>
   );
 }

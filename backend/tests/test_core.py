@@ -1341,7 +1341,9 @@ def test_tizpardaz_customers_products_and_journal(client, accounts, services):
     jr = up("journal", jrows)
     assert jr["summary"]["counts"] == {"purchase": 1, "sale": 3, "expense": 1}
     assert [u["name"] for u in jr["unknown_products"]] == ["کرم ناشناخته"]
-    assert [(u["party"], u["generic"]) for u in jr["unknown_customers"]] == [("متفرقه", True)]
+    # the people of the invoices: buyers of sales and sellers of purchases (a company name stays a name unless chosen)
+    assert sorted((u["party"], u["generic"], u["seller"]) for u in jr["unknown_customers"]) == [("متفرقه", True, False), ("پخش البرز", False, True)]
+    assert jr["summary"]["doc_counts"] == {"purchase": 1, "sale": 3}
     sale14 = next(r for r in jr["rows"] if r["doc_no"] == "14")
     assert sale14["customer_id"] == sanaz["id"] and sale14["amount"] == 49_500_000
     assert next(r for r in jr["rows"] if r["doc_no"] == "20")["customer_id"] == sanaz["id"]  # «به 4» = Tizpardaz code 4
@@ -1372,3 +1374,134 @@ def test_receiving_a_customers_debt_settles_unpaid_invoices_first(client, accoun
     assert client.get(f"/api/invoices/{a['id']}").json()["status"] == "paid"
     assert client.get(f"/api/invoices/{b['id']}").json()["paid"] == 1_000_000
     balanced(client)
+
+
+def test_tizpardaz_purchase_invoices_are_in_the_sellers_file(client):
+    """A purchase invoice from «محمودي(سياوش)» (a person of the Tizpardaz list) is in his file as an invoice with its
+    items, its discount and what was paid on it; rows brought over before invoices were kept are grouped too."""
+    def up(kind, rows):
+        r = client.post("/api/import/tizpardaz/preview", files={"file": (f"{kind}.xlsx", _xlsx(rows), "application/octet-stream")},
+                        data={"kind": kind, "unit": "toman"})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    cust = up("customers", [["کد حساب", "عنوان حساب", "بدهکار", "بستانکار"], [301, "محمودي(سياوش)", None, None], [302, "کریمی(نگین)", None, None]])
+    client.post(f"/api/import/tizpardaz/{cust['id']}/commit", json={"choices": {}, "balances": False})
+    siavash = next(c for c in client.get("/api/customers?q=سیاوش محمودی").json()["items"])
+    a = client.post("/api/products", json={"name": "کرم مرطوب کننده سیاوش", "sale_price": 1}).json()
+    b = client.post("/api/products", json={"name": "ژل شستشوی سیاوش", "sale_price": 1}).json()
+    head = ["نوع سند", "شماره سند", "تاریخ", "عنوان حساب", "شرح", "مقدار", "فی", "بدهکار", "بستانکار"]
+    rows = [head,
+            ["فاکتور خرید", 77, "1405/02/01", "کالا", "کرم مرطوب کننده سیاوش از محمودي(سياوش)", 10, 200_000, 2_000_000, 0],
+            ["فاکتور خرید", 77, "1405/02/01", "کالا", "ژل شستشوی سیاوش از محمودي(سياوش)", 5, 300_000, 1_500_000, 0],
+            ["فاکتور خرید", 77, "1405/02/01", "تخفیف خرید", "تخفیف فاکتور 77", None, None, 0, 150_000],
+            ["فاکتور خرید", 77, "1405/02/01", "محمودي(سياوش)", "فاکتور خرید 77", None, None, 0, 3_350_000],
+            ["فاکتور خرید", 77, "1405/02/01", "محمودي(سياوش)", "پرداخت نقدی", None, None, 1_000_000, 0],
+            ["فاکتور خرید", 77, "1405/02/01", "صندوق", "پرداخت نقدی", None, None, 0, 1_000_000],
+            ["فاکتور فروش", 78, "1405/02/03", "کالا", "کرم مرطوب کننده سیاوش به کریمی(نگین)", 2, 450_000, 0, 900_000],
+            ["فاکتور فروش", 78, "1405/02/03", "کریمی(نگین)", "فاکتور 78", None, None, 900_000, 0]]
+    jr = up("journal", rows)
+    assert jr["summary"]["doc_counts"] == {"purchase": 1, "sale": 1} and jr["unknown_customers"] == []
+    assert "ignored" not in jr["summary"] or not jr["summary"]["ignored"]  # the person / discount / cash rows belong to the invoices
+    client.post(f"/api/import/tizpardaz/{jr['id']}/commit", json={})
+
+    f = client.get(f"/api/customers/{siavash['id']}").json()
+    doc = next(d for d in f["docs"] if d["kind"] == "purchase")
+    # 2,000,000 + 1,500,000 toman of goods, 150,000 off: 3,350,000 toman; 1,000,000 paid right away
+    assert (doc["doc_no"], doc["items_total"], doc["total"], doc["discount"], doc["paid"]) == ("77", 35_000_000, 33_500_000, 1_500_000, 10_000_000)
+    assert doc["person"] == "سیاوش محمودی" and f["suppliers"] and f["suppliers"][0]["name"] == "سیاوش محمودی"
+    full = client.get(f"/api/trade-docs/{doc['id']}").json()
+    assert [(i["name"], i["qty"], i["unit_price"], i["amount"]) for i in full["items"]] == [
+        ("کرم مرطوب کننده سیاوش", 10, 2_000_000, 20_000_000), ("ژل شستشوی سیاوش", 5, 3_000_000, 15_000_000)]
+    assert {x["account"] for x in full["extras"]} == {"تخفیف خرید", "صندوق"}
+    # the seller in the suppliers list, linked to the person; his invoices in the purchases history
+    sup = next(s for s in client.get("/api/suppliers").json() if s["customer_id"] == siavash["id"])
+    assert sup["history_total"] == 33_500_000 and sup["history_count"] == 1
+    assert [d["id"] for d in client.get(f"/api/suppliers/{sup['id']}").json()["docs"]] == [doc["id"]]
+    assert doc["id"] in [d["id"] for d in client.get("/api/trade-docs?kind=purchase&q=سیاوش").json()]
+    # the buyer: the sale is an invoice in her file too
+    negin = next(c for c in client.get("/api/customers?q=نگین کریمی").json()["items"])
+    sale = client.get(f"/api/customers/{negin['id']}").json()["docs"][0]
+    assert (sale["kind"], sale["total"]) == ("sale", 9_000_000)
+    # the customers list knows him as a seller (filter «فروشندگان»)
+    sellers = client.get("/api/customers?filter=seller&limit=500").json()["items"]
+    assert siavash["id"] in [c["id"] for c in sellers] and all(c["seller"] for c in sellers)
+    assert negin["id"] not in [c["id"] for c in sellers]
+    # a seller with only purchases is not "without history" and can't be deleted by the clean-up
+    assert siavash["id"] not in [c["id"] for c in client.get("/api/customers?filter=no_history&limit=500").json()["items"]]
+    client.post("/api/customers/bulk-delete", json={"ids": [siavash["id"]]})
+    assert client.get(f"/api/customers/{siavash['id']}").status_code == 200
+
+    # rows brought over before invoices were kept: grouped into their invoice, seller linked, when the program starts
+    from datetime import datetime
+
+    from app.core.db import SessionLocal
+    from app.models import TradeHistory
+    from app.services import tizpardaz
+    with SessionLocal() as db:
+        for desc, qty, amount in (("کرم مرطوب کننده سیاوش از محمودي(سياوش)", 3, 600_000), ("ژل شستشوی سیاوش از محمودي(سياوش)", 1, 300_000)):
+            db.add(TradeHistory(source="tizpardaz", kind="purchase", at=datetime(2026, 3, 1, 12), doc_no="55", product_id=a["id"],
+                                party="محمودي(سياوش)", description=desc, qty=qty, unit_price=amount // qty, amount=amount, fp=f"old|{desc}"))
+        db.commit()
+        assert tizpardaz.backfill_docs(db) >= 1 and tizpardaz.backfill_docs(db) == 0
+        db.commit()
+    old = next(d for d in client.get(f"/api/customers/{siavash['id']}").json()["docs"] if d["doc_no"] == "55")
+    assert old["total"] == 900_000 and client.get(f"/api/trade-docs/{old['id']}").json()["lines"] == 2
+
+    # merging a duplicate of the seller moves his invoices and his supplier record
+    dup = client.post("/api/customers", json={"full_name": "سیاوش محمودی", "mobile": "09158880111"}).json()
+    r = client.post("/api/customers/merge", json={"keep_id": dup["id"], "drop_ids": [siavash["id"]]})
+    assert r.status_code == 200, r.text
+    moved = client.get(f"/api/customers/{dup['id']}").json()
+    assert len(moved["docs"]) == 2 and moved["suppliers"][0]["id"] == sup["id"]
+
+
+def test_a_sellers_credit_balance_is_what_we_owe_not_a_deposit(client, accounts):
+    def up(kind, rows):
+        r = client.post("/api/import/tizpardaz/preview", files={"file": (f"{kind}.xlsx", _xlsx(rows), "application/octet-stream")},
+                        data={"kind": kind, "unit": "toman"})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def ledger():
+        tb = client.get("/api/ledger/trial-balance").json()
+        assert tb["total_debit"] == tb["total_credit"]
+        return {r["code"]: r["balance"] for r in tb["rows"]}
+
+    # imported before the journal: nobody knew he was a seller, his 2,000,000 toman credit became a deposit
+    cust = up("customers", [["کد حساب", "عنوان حساب", "بدهکار", "بستانکار"], [401, "رستمی(کامران)", None, 2_000_000]])
+    assert cust["rows"][0]["credit_as"] == "deposit"
+    client.post(f"/api/import/tizpardaz/{cust['id']}/commit", json={"choices": {}, "balances": True})
+    kamran = client.get("/api/customers?q=کامران رستمی").json()["items"][0]
+    assert client.get(f"/api/customers/{kamran['id']}").json()["balance"]["deposits_held"] == 20_000_000
+    p = client.post("/api/products", json={"name": "کالای کامران", "sale_price": 1}).json()
+    jr = up("journal", [["نوع سند", "شماره سند", "تاریخ", "عنوان حساب", "شرح", "مقدار", "فی", "بدهکار", "بستانکار"],
+                        ["فاکتور خرید", 90, "1405/02/10", "کالا", "کالای کامران از رستمی(کامران)", 4, 500_000, 2_000_000, 0],
+                        ["فاکتور خرید", 90, "1405/02/10", "رستمی(کامران)", "فاکتور 90", None, None, 0, 2_000_000]])
+    client.post(f"/api/import/tizpardaz/{jr['id']}/commit", json={})
+    assert p["id"]
+    # the journal shows he is a seller: his "deposit" is offered for correction
+    found = [x for x in client.get("/api/import/tizpardaz/seller-credits").json() if x["customer_id"] == kamran["id"]]
+    assert found and found[0]["amount"] == 20_000_000 and found[0]["purchases"] == 1
+    before = ledger()
+    r = client.post("/api/import/tizpardaz/seller-credits", json={"deposit_ids": [found[0]["deposit_id"]]}).json()
+    assert r == {"converted": 1, "amount": 20_000_000}
+    after = ledger()
+    # the same 20,000,000 moves from customer deposits (2100) to what we owe sellers (2300); nothing else changes
+    assert abs(after.get("2300", 0) - before.get("2300", 0)) == 20_000_000
+    assert after.get("2100", 0) + after.get("2300", 0) == before.get("2100", 0) + before.get("2300", 0)
+    assert after.get("3200", 0) == before.get("3200", 0)
+    f = client.get(f"/api/customers/{kamran['id']}").json()
+    assert f["balance"]["deposits_held"] == 0 and f["we_owe"] == 20_000_000
+    opening = next(x for x in f["purchases"] if x["opening"])
+    # paid like any purchase
+    card = next(iter(accounts.values()))
+    client.post(f"/api/purchases/{opening['id']}/pay", json={"payment_account_id": card, "amount": 5_000_000})
+    assert client.get(f"/api/customers/{kamran['id']}").json()["we_owe"] == 15_000_000
+    assert not [x for x in client.get("/api/import/tizpardaz/seller-credits").json() if x["customer_id"] == kamran["id"]]
+    ledger()
+    # importing the list again: he is known as a seller now, and his balance is not brought over twice
+    again = up("customers", [["کد حساب", "عنوان حساب", "بدهکار", "بستانکار"], [401, "رستمی(کامران)", None, 2_000_000]])
+    assert again["rows"][0]["seller"] and again["rows"][0]["credit_as"] == "payable"
+    res = client.post(f"/api/import/tizpardaz/{again['id']}/commit", json={"choices": {}, "balances": True}).json()
+    assert res["result"].get("balance_already") == 1 and client.get(f"/api/customers/{kamran['id']}").json()["we_owe"] == 15_000_000

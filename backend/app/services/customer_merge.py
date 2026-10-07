@@ -23,14 +23,30 @@ from ..models import (
     JournalLine,
     KnowledgeItem,
     Payment,
+    Supplier,
+    TradeDoc,
     TradeHistory,
     WaitlistEntry,
+    WooOrder,
 )
 from .audit import audit
 from .service_catalog import name_key
 
 PLACEHOLDER = "مشتری "  # names the bot gives before a real name is known
-LINKED = (Appointment, WaitlistEntry, Deposit, Invoice, Payment, JournalLine, InboundReceipt, ConversationMessage, TradeHistory)
+# everything that belongs to a customer: merging moves all of it
+LINKED = (Appointment, WaitlistEntry, Deposit, Invoice, Payment, JournalLine, InboundReceipt, ConversationMessage, TradeHistory,
+          TradeDoc, WooOrder, Supplier)
+# records that keep a customer alive (messages and receipts are only loosely attached and are detached on delete)
+RECORDS = (Appointment, WaitlistEntry, Deposit, Invoice, Payment, JournalLine, TradeHistory, TradeDoc, WooOrder, Supplier)
+
+
+def with_records():  # noqa: ANN201
+    """Subquery-able conditions: the customer has at least one record (invoice, balance, history, site order...)."""
+    return [Customer.id.in_(select(m.customer_id).where(m.customer_id.is_not(None))) for m in RECORDS]
+
+
+def has_records(db: Session, cid: int) -> bool:
+    return any(db.scalar(select(m.customer_id).where(m.customer_id == cid).limit(1)) is not None for m in RECORDS)
 
 
 def person_key(name: str | None) -> str:
@@ -149,9 +165,12 @@ def merge(db: Session, keep: Customer, drop: Customer, user=None) -> dict:  # no
             codes.append(f"tp:{drop.tp_code}")
         else:
             keep.tp_code = drop.tp_code
+    if drop.woo_id and not keep.woo_id:  # the website account of the person
+        keep.woo_id = drop.woo_id
     drop.mobile = None
     drop.legacy_code = None
     drop.tp_code = None
+    drop.woo_id = None
     db.flush()
     if not keep.mobile and mobiles:
         keep.mobile = mobiles.pop(0)

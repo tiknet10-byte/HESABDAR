@@ -137,6 +137,7 @@ export default function TizpardazImport() {
         </div>
       </Card>
 
+      <SellerCredits key={history.data?.length ?? 0} />
       {pv?.kind === "customers" && <CustomersPreview pv={pv} accounts={accounts} busy={busy} onCommit={commit} onCancel={cancel} />}
       {pv?.kind === "products" && <ProductsPreview pv={pv} busy={busy} onCommit={commit} onCancel={cancel} />}
       {pv?.kind === "journal" && <JournalPreview pv={pv} busy={busy} onCommit={commit} onCancel={cancel} />}
@@ -250,6 +251,8 @@ function CustomersPreview({ pv, accounts, busy, onCommit, onCancel }: PreviewPro
   const [choices, setChoices] = useState<Record<string, string>>({});
   const [picked, setPicked] = useState<Record<string, any>>({});
   const [balances, setBalances] = useState(true);
+  const [creditAs, setCreditAs] = useState<Record<string, string>>({});
+  const creditOf = (r: any) => creditAs[r.row] ?? r.credit_as ?? "deposit";
   const [at, setAt] = useState(toLocalIso(new Date()));
   const [accountId, setAccountId] = useState(0);
   const [filter, setFilter] = useState(s.ambiguous ? "ambiguous" : "");
@@ -264,7 +267,10 @@ function CustomersPreview({ pv, accounts, busy, onCommit, onCancel }: PreviewPro
     const parts = [`${faDigits(rows.length - unresolved)} مشتری از تیزپرداز ثبت شود؟`];
     if (balances) parts.push(`بدهی‌ها (${money(s.debit)}) و بستانکاری‌ها (${money(s.credit)}) هم به‌عنوان ماندهٔ اول دوره منتقل می‌شود.`);
     if (unresolved) parts.push(`⚠ ${faDigits(unresolved)} مشتری هم‌نام انتخاب نشده و فعلاً ثبت نمی‌شود.`);
-    onCommit({ choices: ch, balances, at: at || null, account_id: accountId || null }, parts.join("\n"));
+    const payables = rows.filter((r) => r.credit > 0 && creditOf(r) === "payable");
+    if (balances && payables.length) parts.push(`بستانکاری ${faDigits(payables.length)} نفر «طلب فروشنده» (بدهی ما به او) ثبت می‌شود، نه بیعانه.`);
+    onCommit({ choices: ch, balances, at: at || null, account_id: accountId || null,
+      credit_as: Object.fromEntries(rows.filter((r) => r.credit > 0).map((r) => [r.row, creditOf(r)])) }, parts.join("\n"));
   }
 
   return (
@@ -297,7 +303,12 @@ function CustomersPreview({ pv, accounts, busy, onCommit, onCancel }: PreviewPro
                     <td className="num">{r.code}</td>
                     <td><div className="font-semibold">{r.name}</div>{r.raw !== r.name && <div className="muted text-[10px]">{r.raw}</div>}{r.mobile && <div className="num muted" dir="ltr">{r.mobile}</div>}</td>
                     <td className="num">{r.debit ? money(r.debit) : ""}</td>
-                    <td className="num">{r.credit ? money(r.credit) : ""}</td>
+                    <td className="num">{r.credit ? <>{money(r.credit)}
+                      <select className="input mt-1 py-0.5 text-[11px]" value={creditOf(r)} onChange={(e) => setCreditAs({ ...creditAs, [r.row]: e.target.value })}
+                        title="بستانکاری یعنی ما به این شخص بدهکاریم">
+                        <option value="deposit">بیعانهٔ مشتری (پیش‌پرداخت او)</option>
+                        <option value="payable">طلب فروشنده (بدهی ما به او)</option>
+                      </select>{r.seller && <div className="text-[10px] text-sky-600">فروشندهٔ ماست</div>}</> : ""}</td>
                     <td><span className={`badge ${C_STATUS[r.status]?.cls}`}>{C_STATUS[r.status]?.l}</span></td>
                     <td>
                       <select className="input py-1 text-xs" value={v} onChange={(e) => setChoices({ ...choices, [r.row]: e.target.value })}>
@@ -465,6 +476,8 @@ function JournalPreview({ pv, busy, onCommit, onCancel }: PreviewProps) {
         <div className="grid gap-2 text-sm sm:grid-cols-4">
           {Object.entries(s.counts ?? {}).map(([k, n]: any) => <Stat key={k} label={`${J_KINDS[k]} (${faDigits(n)} ردیف)`} value={money(s.amounts?.[k] ?? 0)} tone={k === "sale" ? "emerald" : k === "expense" ? "rose" : "sky"} />)}
           <Stat label="بازهٔ تاریخ" value={s.first_date ? `${formatJ(s.first_date, false)} تا ${formatJ(s.last_date, false)}` : "—"} tone="violet" />
+          {Object.keys(s.doc_counts ?? {}).length > 0 && <Stat label="تعداد فاکتورها" tone="sky"
+            value={Object.entries(s.doc_counts).map(([k, n]: any) => `${faDigits(n)} ${J_KINDS[k]}`).join(" · ")} />}
           {s.duplicates > 0 && <Stat label="تکراری (قبلاً وارد شده)" value={s.duplicates} tone="zinc" />}
         </div>
         {Object.keys(s.ignored ?? {}).length > 0 && (
@@ -490,15 +503,15 @@ function JournalPreview({ pv, busy, onCommit, onCancel }: PreviewProps) {
         )}
         {pv.unknown_customers.length > 0 && (
           <div className="space-y-2 rounded-2xl bg-sky-500/10 p-3 text-sm">
-            <div className="font-bold">این خریداران به مشتری مشخصی وصل نشدند</div>
-            <div className="muted text-xs">نام‌هایی مثل «تاجیک(ساناز)» یا کد حساب، اگر انتخاب نکنید مشتری جدید می‌شوند؛ کلمه‌هایی مثل «متفرقه» فقط به‌صورت نام می‌مانند.</div>
+            <div className="font-bold">این اشخاص (خریدار یا فروشنده) به پروندهٔ مشخصی وصل نشدند</div>
+            <div className="muted text-xs">نام‌هایی مثل «تاجیک(ساناز)» یا کد حساب، اگر انتخاب نکنید پروندهٔ جدید می‌گیرند؛ کلمه‌هایی مثل «متفرقه» فقط به‌صورت نام می‌مانند. فروشنده‌ها در هر حال در فهرست «تأمین‌کنندگان» ثبت می‌شوند.</div>
             <div className="grid gap-2 sm:grid-cols-2">
               {pv.unknown_customers.map((u: any) => {
                 const extra = picked[u.party];
                 return (
                   <div key={u.party}>
                     <div className="flex items-center gap-2">
-                      <span className="w-1/2 truncate font-semibold" title={u.party}>{u.name} <span className="muted text-xs">({faDigits(u.count)})</span></span>
+                      <span className="w-1/2 truncate font-semibold" title={u.party}>{u.name} <span className="muted text-xs">({faDigits(u.count)} فاکتور)</span>{u.seller && <span className="badge mr-1 bg-sky-500/10 text-[10px] text-sky-700">فروشنده</span>}</span>
                       <select className="input w-1/2 py-1 text-xs" value={cOf(u)} onChange={(e) => setCmap({ ...cmap, [u.party]: e.target.value })}>
                         {u.candidates.map((c: any) => <option key={c.id} value={c.id}>{c.full_name}{c.code ? ` · کد ${c.code}` : ""}{c.mobile ? ` · ${c.mobile}` : ""}</option>)}
                         {extra && !u.candidates.some((c: any) => c.id === extra.id) && <option value={extra.id}>{extra.full_name}{extra.code ? ` · کد ${extra.code}` : ""}</option>}
@@ -540,6 +553,42 @@ function JournalPreview({ pv, busy, onCommit, onCancel }: PreviewProps) {
           <button className="btn btn-primary flex-1 py-3" disabled={busy || !s.new} onClick={submit}>ثبت {faDigits(s.new)} ردیف سابقه</button>
           <button className="btn" onClick={onCancel}>انصراف</button>
         </div>
+      </div>
+    </Card>
+  );
+}
+
+/** Sellers whose Tizpardaz credit balance was brought over as a customer deposit: it is what we owe them. */
+function SellerCredits() {
+  const toast = useToast();
+  const { data, reload } = useApi<any[]>("/api/import/tizpardaz/seller-credits");
+  const [picked, setPicked] = useState<Record<number, boolean>>({});
+  if (!data?.length) return null;
+  const chosen = data.filter((x) => picked[x.deposit_id] ?? true);
+  async function fix() {
+    if (!window.confirm(`بستانکاری ${faDigits(chosen.length)} فروشنده از «بیعانه» به «بدهی ما به فروشنده» منتقل شود؟`)) return;
+    try {
+      const r = await api("/api/import/tizpardaz/seller-credits", { body: { deposit_ids: chosen.map((x) => x.deposit_id) } });
+      toast(`${faDigits(r.converted ?? 0)} مورد اصلاح شد (${money(r.amount ?? 0)})${r.skipped ? ` · ${faDigits(r.skipped)} مورد دست نخورد` : ""}`);
+      reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  }
+  return (
+    <Card title={<span className="flex items-center gap-2 text-rose-700 dark:text-rose-300">⚠ بستانکاری فروشندگان به‌اشتباه «بیعانه» ثبت شده</span>}>
+      <div className="space-y-3 text-sm">
+        <p className="leading-7">این اشخاص در دفتر روزنامهٔ تیزپرداز <b>فروشندهٔ ما</b> هستند (از آن‌ها خرید کرده‌ایم). ماندهٔ بستانکار آن‌ها یعنی <b>ما به آن‌ها بدهکاریم</b>، ولی هنگام ورود مشتریان به‌عنوان «بیعانهٔ مشتری» ثبت شده است. با اصلاح، این مبلغ «بدهی ما به فروشنده» می‌شود و از بخش خرید (یا پروندهٔ همان شخص) قابل پرداخت است.</p>
+        <div className="space-y-1.5">
+          {data.map((x) => (
+            <label key={x.deposit_id} className="flex items-center justify-between gap-2 rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}>
+              <span className="flex items-center gap-2"><input type="checkbox" checked={picked[x.deposit_id] ?? true} onChange={(e) => setPicked({ ...picked, [x.deposit_id]: e.target.checked })} />
+                <b>{x.name}</b>{x.code && <span className="num muted text-xs">کد {x.code}</span>}<span className="muted text-xs">{faDigits(x.purchases)} فاکتور خرید</span></span>
+              <span className="num font-semibold">{money(x.amount)}</span>
+            </label>
+          ))}
+        </div>
+        <button className="btn btn-primary w-full" disabled={!chosen.length} onClick={fix}>اصلاح {faDigits(chosen.length)} مورد: «بدهی ما به فروشنده»</button>
       </div>
     </Card>
   );

@@ -8,9 +8,9 @@ from sqlalchemy import Integer, String, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
-from ..models import (Appointment, Customer, Deposit, Invoice, JournalLine, Payment, PaymentAccount, Product, Service, Staff, TradeHistory,
-                      WaitlistEntry)
-from ..services import accounting, customer_merge, routing
+from ..models import (Appointment, Customer, Deposit, Invoice, JournalLine, Payment, PaymentAccount, Product, Purchase, Service, Staff,
+                      Supplier, TradeDoc, TradeHistory)
+from ..services import accounting, customer_merge, routing, tizpardaz
 from ..services.audit import audit
 from ..services.search import fa_like
 from ..services.textutil import normalize_mobile, to_en_digits
@@ -53,7 +53,7 @@ def _activity():  # noqa: ANN202
     signed = case((TradeHistory.kind == "sale_return", -TradeHistory.amount), else_=TradeHistory.amount)
     trade = (select(TradeHistory.customer_id.label("cid"), func.sum(signed).label("amt"),
                     func.count(func.distinct(func.date(TradeHistory.at))).label("n"), func.max(TradeHistory.at).label("last"))
-             .where(TradeHistory.kind.in_(("sale", "sale_return")), TradeHistory.customer_id.is_not(None), TradeHistory.source == "tizpardaz")
+             .where(TradeHistory.kind.in_(("sale", "sale_return")), TradeHistory.customer_id.is_not(None))
              .group_by(TradeHistory.customer_id).subquery())
     hist = (select(hist.c.cid, hist.c.amt, hist.c.n, hist.c.last).union_all(select(trade.c.cid, trade.c.amt, trade.c.n, trade.c.last))
             .subquery())
@@ -80,8 +80,13 @@ def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "
                    db: Session = Depends(get_db), _=Depends(require("read"))):
     inv, hist, held, spent, visits, last = _activity()
     debt = _debt(db)
+    # people we buy from: linked to a supplier, or the seller of a purchase invoice brought over
+    seller = or_(Customer.id.in_(select(Supplier.customer_id).where(Supplier.customer_id.is_not(None))),
+                 Customer.id.in_(select(TradeDoc.customer_id).where(TradeDoc.customer_id.is_not(None),
+                                                                    TradeDoc.kind.in_(("purchase", "purchase_return")))))
     stmt = (select(Customer, spent.label("spent"), func.coalesce(hist.c.amt, 0).label("spent_old"),
-                   func.coalesce(held.c.amt, 0).label("held"), visits.label("visits"), last.label("last"), func.coalesce(debt.c.amt, 0))
+                   func.coalesce(held.c.amt, 0).label("held"), visits.label("visits"), last.label("last"), func.coalesce(debt.c.amt, 0),
+                   seller.label("seller"))
             .outerjoin(inv, inv.c.cid == Customer.id).outerjoin(hist, hist.c.cid == Customer.id).outerjoin(held, held.c.cid == Customer.id)
             .outerjoin(debt, debt.c.cid == Customer.id))
     if q:
@@ -97,12 +102,14 @@ def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "
         stmt = stmt.where(held.c.amt > 0)
     elif filter == "debt":
         stmt = stmt.where(debt.c.amt > 0)
+    elif filter == "seller":
+        stmt = stmt.where(seller)
     elif filter == "no_mobile":
         stmt = stmt.where(Customer.mobile.is_(None))
     elif filter == "mobile_issue":
         stmt = stmt.where(Customer.mobile_issue.in_(("invalid", "duplicate")))
     elif filter == "no_history":
-        stmt = stmt.where(visits == 0, held.c.amt.is_(None))
+        stmt = stmt.where(*(~cond for cond in customer_merge.with_records()))
     order = {"recent": [Customer.id.desc()], "name": [Customer.full_name],
              "code": [func.cast(Customer.legacy_code, Integer).desc(), Customer.id.desc()],
              "spent": [spent.desc(), Customer.id.desc()], "visits": [visits.desc(), Customer.id.desc()],
@@ -111,8 +118,9 @@ def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = db.execute(stmt.order_by(*order).limit(min(limit, 500)).offset(max(offset, 0))).all()
     return {"total": total, "items": [_c(c, {"total_spent": int(sp or 0), "spent_old": int(old or 0), "deposits_held": int(h or 0),
-                                             "visits": int(v or 0), "last_visit": str(lv)[:16] if lv else None, "debt": max(int(d or 0), 0)})
-                                      for c, sp, old, h, v, lv, d in rows]}
+                                             "visits": int(v or 0), "last_visit": str(lv)[:16] if lv else None, "debt": max(int(d or 0), 0),
+                                             "seller": bool(sel)})
+                                      for c, sp, old, h, v, lv, d, sel in rows]}
 
 
 @router.post("")
@@ -133,10 +141,11 @@ def create_customer(body: CustomerIn, db: Session = Depends(get_db), user=Depend
 
 
 def _unused(cids: list[int] | None = None):  # noqa: ANN202
-    """Customers with no history at all: no appointment, deposit, invoice, payment or waiting-list entry."""
+    """Customers with no record at all: no appointment, deposit, invoice, payment, waiting-list entry, balance,
+    history from the previous software, purchase from them or website order."""
     q = select(Customer)
-    for m in (Appointment, Deposit, Invoice, Payment, WaitlistEntry):
-        q = q.where(~Customer.id.in_(select(m.customer_id)))
+    for cond in customer_merge.with_records():
+        q = q.where(~cond)
     if cids is not None:
         q = q.where(Customer.id.in_(cids or [-1]))
     return q
@@ -244,8 +253,20 @@ def get_customer(cid: int, db: Session = Depends(get_db), _=Depends(require("rea
     deposits = db.scalars(select(Deposit).where(Deposit.customer_id == cid).order_by(Deposit.received_at.desc())).all()
     payments = db.scalars(select(Payment).where(Payment.customer_id == cid).order_by(Payment.paid_at.desc())).all()
     appts = db.scalars(select(Appointment).where(Appointment.customer_id == cid).order_by(Appointment.start_at.desc())).all()
+    # as a seller: the supplier record(s) of this person, what was bought from them, what we still owe them
+    sups = list(db.scalars(select(Supplier).where(Supplier.customer_id == cid)))
+    purchases = list(db.scalars(select(Purchase).where(Purchase.supplier_id.in_([x.id for x in sups] or [-1]))
+                                .order_by(Purchase.at.desc(), Purchase.id.desc())))
+    docs = list(db.scalars(select(TradeDoc).where(or_(TradeDoc.customer_id == cid, TradeDoc.supplier_id.in_([x.id for x in sups] or [-1])))
+                           .order_by(TradeDoc.at.desc(), TradeDoc.id.desc())))
     return _c(c, {
         "balance": accounting.customer_balance(db, cid),
+        "we_owe": sum(p.total - p.paid for p in purchases if p.status in ("open", "partial")),  # to this person as a seller
+        "suppliers": [{"id": x.id, "name": x.name} for x in sups],
+        "purchases": [{"id": p.id, "number": p.number, "at": p.at.isoformat(timespec="minutes"), "total": p.total, "paid": p.paid,
+                       "due": p.total - p.paid, "status": p.status, "items_count": len(p.items), "opening": p.subtotal == 0 and not p.items,
+                       "supplier_ref": p.supplier_ref, "notes": p.notes} for p in purchases],
+        "docs": [tizpardaz.doc_out(db, d, people={c.id: c}) for d in docs],
         "invoices": [{"id": i.id, "number": i.number, "issued_at": i.issued_at.isoformat(), "total": i.total, "paid": i.paid,
                       "status": i.status, "items": [it.description for it in i.items]} for i in invoices],
         "deposits": [{"id": d.id, "amount": d.amount, "status": d.status, "received_at": d.received_at.isoformat(),
@@ -303,7 +324,7 @@ def _trade_history(db: Session, cid: int) -> list[dict]:
         name = names.get(h.product_id) or h.description
         out.append({"date": h.at.isoformat(timespec="minutes"), "service": f"{'برگشت: ' if h.kind == 'sale_return' else ''}{name}"
                     + (f" × {h.qty}" if h.qty and h.qty != 1 else ""), "staff": None,
-                    "amount": -h.amount if h.kind == "sale_return" else h.amount, "source": h.source, "product": True,
+                    "amount": -h.amount if h.kind == "sale_return" else h.amount, "source": h.source, "product": True, "doc_id": h.doc_id,
                     "notes": f"سند {h.doc_no}" if h.doc_no else None})
     return out
 

@@ -25,15 +25,12 @@ from ..models import (
     Customer,
     Deposit,
     ImportBatch,
-    Invoice,
     InvoiceItem,
     JournalEntry,
-    Payment,
     PaymentAccount,
     Service,
     ServiceLine,
     Staff,
-    WaitlistEntry,
     local_now,
 )
 from . import accounting, scheduling, service_catalog
@@ -860,8 +857,8 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         c = db.get(Customer, cid)
         if c is None:
             continue
-        used = any(db.scalar(select(func.count(m.id)).where(m.customer_id == cid)) for m in (Appointment, Deposit, Invoice, Payment, WaitlistEntry))
-        if used:
+        from .customer_merge import has_records  # anything at all: invoices, balances, Tizpardaz history, website orders...
+        if has_records(db, cid):
             kept["customers"] += 1
             continue
         unused.append(c)

@@ -1,6 +1,9 @@
-import { AtSign, Eraser, HandCoins, Phone, Plus, Users } from "lucide-react";
+import { AtSign, Eraser, HandCoins, Phone, Plus, Truck, Users } from "lucide-react";
 import CustomerCleanup, { MOBILE_ISSUE } from "../components/CustomerCleanup";
 import { DuplicateCustomers, SameNameHint } from "../components/SameName";
+import { DocRow, SOURCE_FA, SupplierView, TradeDocView } from "../components/TradeDocs";
+import { InvoiceView } from "./Invoices";
+import { PurchaseView } from "./Products";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader } from "../components/ui";
@@ -78,13 +81,44 @@ function ReceiveDebt({ customer, owed, onDone }: { customer: any; owed: number; 
   );
 }
 
+type Opened = { type: "invoice" | "doc" | "purchase" | "supplier"; id: number } | null;
+const OPEN_TITLE = { invoice: "جزئیات فاکتور فروش", doc: "جزئیات فاکتور", purchase: "جزئیات فاکتور خرید", supplier: "حساب فروشنده" };
+
 function CustomerView({ id }: { id: number }) {
   const { data, reload } = useApi<any>(`/api/customers/${id}`);
   const [edit, setEdit] = useState(false);
   const [receive, setReceive] = useState(false);
+  const [opened, setOpened] = useState<Opened>(null);
   if (!data) return <Loading />;
   if (edit) return <CustomerForm initial={data} onDone={() => { setEdit(false); reload(); }} />;
   const b = data.balance;
+  const docs: any[] = data.docs ?? [];
+  const saleDocs = docs.filter((d) => d.kind.startsWith("sale"));
+  const buyDocs = docs.filter((d) => d.kind.startsWith("purchase"));
+  const purchases: any[] = data.purchases ?? [];
+  const boughtFromThem = buyDocs.reduce((t, d) => t + (d.kind === "purchase_return" ? -d.total : d.total), 0)
+    + purchases.filter((p) => p.status !== "void" && !p.opening).reduce((t, p) => t + p.total, 0);
+  const isSeller = buyDocs.length > 0 || purchases.length > 0 || (data.suppliers ?? []).length > 0;
+  const sales = [
+    ...data.invoices.map((i: any) => ({ key: `i${i.id}`, date: i.issued_at, el: (
+      <DocRow key={`i${i.id}`} date={i.issued_at} title={i.number} sub={i.items?.join("، ")} amount={i.total} muted={i.status === "void"}
+        badge={<Badge status={i.status} />} onClick={() => setOpened({ type: "invoice", id: i.id })} />) })),
+    ...saleDocs.map((d) => ({ key: `d${d.id}`, date: d.at, el: (
+      <DocRow key={`d${d.id}`} date={d.at} title={`${d.kind_label} ${d.doc_no}`} amount={d.kind === "sale_return" ? -d.total : d.total}
+        badge={<span className="badge bg-amber-500/10 text-amber-700 dark:text-amber-300">{SOURCE_FA[d.source] ?? d.source}</span>}
+        onClick={() => setOpened({ type: "doc", id: d.id })} />) })),
+  ].sort((a, b2) => b2.date.localeCompare(a.date));
+  const buys = [
+    ...purchases.map((p) => ({ key: `p${p.id}`, date: p.at, el: (
+      <DocRow key={`p${p.id}`} date={p.at} title={p.opening ? "ماندهٔ اول دوره (طلب او)" : p.number} sub={p.supplier_ref ? `فاکتور فروشنده ${p.supplier_ref}` : p.items_count ? `${num(p.items_count)} قلم` : undefined}
+        amount={p.total} muted={p.status === "void"} onClick={() => setOpened({ type: "purchase", id: p.id })}
+        badge={p.status === "void" ? <Badge status="void" /> : p.due > 0 ? <span className="badge bg-amber-500/15 text-amber-700">مانده {money(p.due, false)}</span> : <Badge status="paid" />} />) })),
+    ...buyDocs.map((d) => ({ key: `d${d.id}`, date: d.at, el: (
+      <DocRow key={`d${d.id}`} date={d.at} title={`${d.kind_label} ${d.doc_no}`} amount={d.kind === "purchase_return" ? -d.total : d.total}
+        sub={d.discount > 0 ? `تخفیف ${money(d.discount, false)}` : undefined}
+        badge={<span className="badge bg-amber-500/10 text-amber-700 dark:text-amber-300">{SOURCE_FA[d.source] ?? d.source}</span>}
+        onClick={() => setOpened({ type: "doc", id: d.id })} />) })),
+  ].sort((a, b2) => b2.date.localeCompare(a.date));
   if (receive) return (
     <div className="space-y-3">
       <button className="btn btn-sm" onClick={() => setReceive(false)}>بازگشت به پرونده</button>
@@ -114,6 +148,11 @@ function CustomerView({ id }: { id: number }) {
         <div className="rounded-2xl bg-amber-500/10 p-3"><div className="muted text-xs">بدهی مشتری</div><div className="num font-bold">{money(b.receivable)}</div>
           {b.receivable > 0 && <button className="btn btn-sm mt-1 w-full py-1 text-xs" onClick={() => setReceive(true)}><HandCoins size={13} />دریافت بدهی</button>}</div>
         <div className="rounded-2xl bg-violet-500/10 p-3"><div className="muted text-xs">تعداد مراجعه</div><div className="num font-bold">{num(new Set((data.history ?? []).map((h: any) => h.date.slice(0, 10))).size)}</div>{data.history?.[0] && <div className="muted text-[11px]">آخرین: {jdate(data.history[0].date)}</div>}</div>
+        {isSeller && <>
+          <div className="rounded-2xl bg-pink-500/10 p-3"><div className="muted text-xs">خرید ما از این شخص</div><div className="num font-bold">{money(boughtFromThem)}</div><div className="muted text-[11px]">{num(buyDocs.length + purchases.filter((p) => !p.opening).length)} فاکتور خرید</div></div>
+          <div className="rounded-2xl bg-rose-500/10 p-3"><div className="muted text-xs">بدهی ما به او</div><div className="num font-bold">{money(data.we_owe ?? 0)}</div>
+            {data.suppliers?.[0] && <button className="btn btn-sm mt-1 w-full py-1 text-xs" onClick={() => setOpened({ type: "supplier", id: data.suppliers[0].id })}><Truck size={13} />حساب فروشنده</button>}</div>
+        </>}
       </div>
       {data.notes && <div className="rounded-2xl p-3" style={{ background: "var(--surface)" }}>{data.notes}</div>}
       {data.upcoming?.length > 0 && (
@@ -129,7 +168,9 @@ function CustomerView({ id }: { id: number }) {
         {!data.history?.length ? <div className="muted">بدون سابقه</div> : (
           <div className="max-h-80 space-y-1.5 overflow-y-auto">
             {data.history.map((h: any, k: number) => (
-              <div key={k} className="flex items-center justify-between gap-2 rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}>
+              <div key={k} className={`flex items-center justify-between gap-2 rounded-xl px-3 py-2 ${h.doc_id || h.invoice_id ? "cursor-pointer hover:bg-violet-500/10" : ""}`}
+                style={{ background: "var(--surface)" }} title={h.doc_id || h.invoice_id ? "برای دیدن فاکتور بزنید" : undefined}
+                onClick={() => h.doc_id ? setOpened({ type: "doc", id: h.doc_id }) : h.invoice_id ? setOpened({ type: "invoice", id: h.invoice_id }) : null}>
                 <span><span className="muted num ml-2">{jdate(h.date)}</span><b>{h.service}</b>{h.staff ? <span className="muted"> · {h.staff}</span> : null}</span>
                 <span className="flex items-center gap-2">
                   {h.amount ? <span className="num text-xs">{money(h.amount)}</span> : null}
@@ -143,17 +184,16 @@ function CustomerView({ id }: { id: number }) {
           </div>
         )}
       </div>
-      {data.invoices.length > 0 && (
-        <details>
-          <summary className="mb-2 cursor-pointer font-bold">فاکتورها ({num(data.invoices.length)})</summary>
-          <div className="space-y-1.5">
-            {data.invoices.map((i: any) => (
-              <div key={i.id} className="flex items-center justify-between rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}>
-                <span><span className="muted num ml-2">{jdate(i.issued_at)}</span>{i.number}</span>
-                <span className="flex items-center gap-2"><span className="num font-semibold">{money(i.total)}</span><Badge status={i.status} /></span>
-              </div>
-            ))}
-          </div>
+      {sales.length > 0 && (
+        <details open={sales.length <= 6}>
+          <summary className="mb-2 cursor-pointer font-bold">فاکتورهای فروش به این شخص ({num(sales.length)}) <span className="muted text-xs font-normal">- برای دیدن اقلام روی هر فاکتور بزنید</span></summary>
+          <div className="max-h-80 space-y-1.5 overflow-y-auto">{sales.map((x) => x.el)}</div>
+        </details>
+      )}
+      {buys.length > 0 && (
+        <details open={buys.length <= 6}>
+          <summary className="mb-2 cursor-pointer font-bold">فاکتورهای خرید از این شخص ({num(buys.length)}) <span className="muted text-xs font-normal">- این شخص فروشندهٔ ما هم هست</span></summary>
+          <div className="max-h-80 space-y-1.5 overflow-y-auto">{buys.map((x) => x.el)}</div>
         </details>
       )}
       {data.deposits.length > 0 && (
@@ -165,6 +205,12 @@ function CustomerView({ id }: { id: number }) {
         </div>
       )}
       {data.known_cards?.length > 0 && <div className="muted text-xs">کارت‌های پرداخت‌کننده: <span dir="ltr">{data.known_cards.join(" , ")}</span></div>}
+      <Modal open={opened !== null} onClose={() => setOpened(null)} title={opened ? OPEN_TITLE[opened.type] : ""} wide>
+        {opened?.type === "invoice" && <InvoiceView id={opened.id} onChange={reload} />}
+        {opened?.type === "doc" && <TradeDocView id={opened.id} />}
+        {opened?.type === "purchase" && <PurchaseView id={opened.id} onChange={reload} />}
+        {opened?.type === "supplier" && <SupplierView id={opened.id} onOpenPurchase={(pid) => setOpened({ type: "purchase", id: pid })} onChange={reload} />}
+      </Modal>
     </div>
   );
 }
@@ -175,7 +221,8 @@ const SORT_OPTIONS = [
   { v: "debt", l: "بیشترین بدهی" },
 ];
 const FILTERS = [
-  { v: "", l: "همه" }, { v: "held", l: "دارای بیعانه باز" }, { v: "debt", l: "بدهکار" }, { v: "mobile_issue", l: "موبایل اشتباه/تکراری" },
+  { v: "", l: "همه" }, { v: "held", l: "دارای بیعانه باز" }, { v: "debt", l: "بدهکار" }, { v: "seller", l: "فروشندگان (از آن‌ها خرید کرده‌ایم)" },
+  { v: "mobile_issue", l: "موبایل اشتباه/تکراری" },
   { v: "no_mobile", l: "بدون موبایل" }, { v: "no_history", l: "بدون سابقه" },
 ];
 const PAGE = 100;
@@ -231,7 +278,7 @@ export default function Customers() {
                 {data.items.map((c: any) => (
                   <tr key={c.id} className="cursor-pointer" onClick={() => setView(c.id)}>
                     <td className="num muted">{c.code}</td>
-                    <td className="font-semibold">{c.full_name}{c.source === "import" && <span className="badge mr-2 bg-sky-500/10 text-[10px] text-sky-600 dark:text-sky-300">انتقالی</span>}{c.source === "tizpardaz" && <span className="badge mr-2 bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-300">تیزپرداز</span>}{c.source === "woocommerce" && <span className="badge mr-2 bg-sky-500/10 text-[10px] text-sky-700 dark:text-sky-300">سایت</span>}</td>
+                    <td className="font-semibold">{c.full_name}{c.source === "import" && <span className="badge mr-2 bg-sky-500/10 text-[10px] text-sky-600 dark:text-sky-300">انتقالی</span>}{c.source === "tizpardaz" && <span className="badge mr-2 bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-300">تیزپرداز</span>}{c.source === "woocommerce" && <span className="badge mr-2 bg-sky-500/10 text-[10px] text-sky-700 dark:text-sky-300">سایت</span>}{c.seller && <span className="badge mr-2 bg-pink-500/10 text-[10px] text-pink-700 dark:text-pink-300">فروشنده</span>}</td>
                     <td className="num" dir="ltr">{c.mobile ?? (c.mobile_issue && c.mobile_issue !== "missing"
                       ? <span className={`badge ${MOBILE_ISSUE[c.mobile_issue].cls}`} title={MOBILE_ISSUE[c.mobile_issue].label}>{c.mobile_raw} ⚠</span> : "—")}</td>
                     <td className="num">{c.visits ? num(c.visits) : "—"}</td>

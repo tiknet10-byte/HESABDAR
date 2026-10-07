@@ -395,7 +395,7 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   );
 }
 
-function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
+export function InvoiceView({ id, onChange }: { id: number; onChange: () => void }) {
   const { user } = useAuth();
   const toast = useToast();
   const { data, reload } = useApi<any>(`/api/invoices/${id}`);

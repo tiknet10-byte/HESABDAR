@@ -56,12 +56,17 @@ def init_db() -> None:
         from .services import inventory
 
         inventory.ensure_chart(db)  # inventory, supplier payables, product revenue, cost of goods sold
+        from .services import tizpardaz
+
+        tizpardaz.backfill_docs(db)  # Tizpardaz rows brought over before invoices were kept: their invoices, sellers linked
         db.commit()
 
 
 # indexes for the queries that grow with the data (lists, reports, dashboards); created if missing on start-up
 INDEXES = {
     "ix_deposits_closed_at": "deposits(closed_at)",
+    "ix_trade_history_doc": "trade_history(doc_id)",
+    "ix_suppliers_customer": "suppliers(customer_id)",
     "ix_appt_status_start": "appointments(status, start_at)",
     "ix_appt_customer_status": "appointments(customer_id, status)",
     "ix_appt_invoice": "appointments(invoice_id)",

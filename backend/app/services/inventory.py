@@ -29,6 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import (
+    Customer,
     InvoiceItem,
     JournalEntry,
     LedgerAccount,
@@ -367,6 +368,39 @@ def return_invoice(db: Session, invoice_id: int, *, same_time: bool, notify_site
 
 
 # ------------------------------------------------------------------ purchases & suppliers
+def supplier_for(db: Session, name: str, customer_id: int | None = None, created: dict | None = None) -> Supplier | None:
+    """The supplier for this person / name (ی/ي, spaces and half-spaces don't matter), or a new one. A supplier is
+    linked to the customer who is the same person (given, or the only customer with exactly this name), so the
+    person's file shows what was bought from them."""
+    from .customer_merge import person_key
+    from .service_catalog import name_key
+
+    name = (name or "").strip()
+    if not name and not customer_id:
+        return None
+    s = db.scalar(select(Supplier).where(Supplier.customer_id == customer_id).order_by(Supplier.id)) if customer_id else None
+    if s is None and name:
+        k = name_key(name)
+        s = next((x for x in db.scalars(select(Supplier).order_by(Supplier.id)) if name_key(x.name) == k), None)
+    if customer_id is None and name and (s is None or s.customer_id is None):
+        pk = person_key(name)
+        same = [c.id for c in db.scalars(select(Customer).where(Customer.full_name.is_not(None))) if person_key(c.full_name) == pk]
+        if len(same) == 1 and not db.scalar(select(Supplier.id).where(Supplier.customer_id == same[0]).limit(1)):
+            customer_id = same[0]
+    if s is None:
+        if not name:
+            c = db.get(Customer, customer_id)
+            name = c.full_name if c else "فروشنده"
+        s = Supplier(name=name[:128], customer_id=customer_id)
+        db.add(s)
+        db.flush()
+        if created is not None:
+            created.setdefault("suppliers", []).append(s.id)
+    elif customer_id and not s.customer_id:
+        s.customer_id = customer_id
+    return s
+
+
 def next_purchase_number(db: Session) -> str:
     n = (db.scalar(select(func.max(Purchase.id))) or 0) + 1
     return f"PO-{n:06d}"
@@ -427,6 +461,23 @@ def record_purchase(db: Session, *, supplier: Supplier | None, items: list[dict]
             pay_supplier(db, pur, db.get(PaymentAccount, int(p["payment_account_id"])), int(p["amount"]), paid_at=pur.at, user=user)
     _status(pur)
     audit(db, "purchase.create", "purchase", pur.id, {"number": pur.number, "total": pur.total}, user=user)
+    return pur
+
+
+def opening_payable(db: Session, supplier: Supplier, amount: int, at: datetime | None = None, notes: str = "", user=None) -> Purchase:  # noqa: ANN001
+    """What we already owed a seller when starting with the system (e.g. their credit balance in Tizpardaz): an open
+    "purchase" without goods, against the opening balances; it is paid like any purchase."""
+    if amount <= 0:
+        raise AccountingError("مبلغ طلب فروشنده باید مثبت باشد")
+    ensure_not_future(at, "تاریخ مانده")
+    pur = Purchase(number=next_purchase_number(db), supplier_id=supplier.id, at=at or local_now(), subtotal=0, discount=0, shipping=0,
+                   total=amount, notes=notes or "ماندهٔ اول دوره (طلب فروشنده)")
+    db.add(pur)
+    db.flush()
+    post(db, f"ماندهٔ اول دوره - طلب {supplier.name}", [Leg(account(db, OPENING), debit=amount), Leg(_acc(db, PAYABLE), credit=amount)],
+         "purchase", pur.id, at=pur.at)
+    _status(pur)
+    audit(db, "purchase.opening", "purchase", pur.id, {"supplier": supplier.id, "amount": amount}, user=user)
     return pur
 
 

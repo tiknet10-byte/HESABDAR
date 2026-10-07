@@ -6,7 +6,7 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import Integer, func, or_, select
+from sqlalchemy import Integer, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
@@ -20,9 +20,10 @@ from ..models import (
     StockMove,
     Supplier,
     SupplierPayment,
+    TradeDoc,
     TradeHistory,
 )
-from ..services import inventory, settings_store
+from ..services import inventory, settings_store, tizpardaz
 from ..services.accounting import AccountingError
 from ..services.audit import audit
 from ..services.jalali import gregorian_to_jalali
@@ -183,6 +184,7 @@ def product_detail(pid: int, db: Session = Depends(get_db), _=Depends(require("r
             c = db.get(Customer, h.customer_id)
             names[h.customer_id] = c.full_name if c else ""
         hist.append({"at": h.at.isoformat(timespec="minutes"), "kind": h.kind, "source": h.source, "doc_no": h.doc_no, "party": h.party,
+                     "doc_id": h.doc_id,
                      "customer_id": h.customer_id, "customer": names.get(h.customer_id) if h.customer_id else None,
                      "qty": h.qty, "unit_price": h.unit_price, "amount": h.amount, "cost": h.cost})
     return {**_p(p), "moves": card[::-1], "history": hist}
@@ -255,26 +257,98 @@ class SupplierIn(BaseModel):
     notes: str = ""
 
 
+def _sup(s: Supplier, owed: int = 0, bought: int = 0, history: tuple[int, int] = (0, 0), person: Customer | None = None) -> dict:
+    return {"id": s.id, "name": s.name, "mobile": s.mobile, "notes": s.notes, "owed": int(owed or 0), "bought": int(bought or 0),
+            "history_total": int(history[0] or 0), "history_count": int(history[1] or 0), "customer_id": s.customer_id,
+            "customer": person.full_name if person else None, "customer_code": person.legacy_code if person else None}
+
+
 @router.get("/suppliers")
 def suppliers(db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Sellers: what we owe them, what was bought from them here and in the previous software (Tizpardaz)."""
     owed = dict(db.execute(select(Purchase.supplier_id, func.sum(Purchase.total - Purchase.paid))
                            .where(Purchase.status.in_(("open", "partial"))).group_by(Purchase.supplier_id)).all())
-    bought = dict(db.execute(select(Purchase.supplier_id, func.sum(Purchase.total)).where(Purchase.status != "void")
+    bought = dict(db.execute(select(Purchase.supplier_id, func.sum(Purchase.total)).where(Purchase.status != "void", Purchase.subtotal > 0)
                              .group_by(Purchase.supplier_id)).all())
-    return [{"id": s.id, "name": s.name, "mobile": s.mobile, "notes": s.notes, "owed": int(owed.get(s.id) or 0),
-             "bought": int(bought.get(s.id) or 0)} for s in db.scalars(select(Supplier).order_by(Supplier.name))]
+    signed = case((TradeDoc.kind == "purchase_return", -TradeDoc.total), else_=TradeDoc.total)
+    hist = {sid: (t, n) for sid, t, n in db.execute(select(TradeDoc.supplier_id, func.sum(signed), func.count(TradeDoc.id))
+                                                      .where(TradeDoc.kind.in_(("purchase", "purchase_return"))).group_by(TradeDoc.supplier_id))}
+    people = {c.id: c for c in db.scalars(select(Customer).where(Customer.id.in_(select(Supplier.customer_id))))}
+    return [_sup(s, owed.get(s.id), bought.get(s.id), hist.get(s.id, (0, 0)), people.get(s.customer_id))
+            for s in db.scalars(select(Supplier).order_by(Supplier.name))]
 
 
 @router.post("/suppliers")
 def create_supplier(body: SupplierIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
     if not body.name.strip():
         raise HTTPException(400, "نام تأمین‌کننده را وارد کنید")
-    s = Supplier(name=body.name.strip(), mobile=normalize_mobile(body.mobile) or body.mobile, notes=body.notes)
-    db.add(s)
-    db.flush()
+    s = inventory.supplier_for(db, body.name.strip())  # the same name (ی/ي, spaces) is the same supplier
+    s.mobile = normalize_mobile(body.mobile) or body.mobile or s.mobile
+    s.notes = body.notes or s.notes
     audit(db, "supplier.create", "supplier", s.id, body.model_dump(), user=user)
     db.commit()
-    return {"id": s.id, "name": s.name, "mobile": s.mobile, "notes": s.notes, "owed": 0, "bought": 0}
+    return _sup(s, person=db.get(Customer, s.customer_id) if s.customer_id else None)
+
+
+class SupplierEditIn(SupplierIn):
+    customer_id: int | None = None  # the same person in the customers list (None = not linked)
+
+
+@router.put("/suppliers/{sid}")
+def update_supplier(sid: int, body: SupplierEditIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+    s = db.get(Supplier, sid) or _404("تأمین‌کننده")
+    if not body.name.strip():
+        raise HTTPException(400, "نام تأمین‌کننده را وارد کنید")
+    if body.customer_id and db.get(Customer, body.customer_id) is None:
+        _404("مشتری")
+    s.name, s.mobile, s.notes, s.customer_id = body.name.strip(), normalize_mobile(body.mobile) or body.mobile, body.notes, body.customer_id
+    # the invoices brought over from this seller belong to that person too
+    for d in db.scalars(select(TradeDoc).where(TradeDoc.supplier_id == sid)):
+        d.customer_id = body.customer_id or d.customer_id
+    audit(db, "supplier.update", "supplier", s.id, body.model_dump(), user=user)
+    db.commit()
+    return supplier_detail(sid, db)
+
+
+@router.get("/suppliers/{sid}")
+def supplier_detail(sid: int, db: Session = Depends(get_db), _=Depends(require("read"))):
+    """A seller's account: purchases here (with what is still owed) and purchase invoices of the previous software."""
+    s = db.get(Supplier, sid) or _404("تأمین‌کننده")
+    purchases = list(db.scalars(select(Purchase).where(Purchase.supplier_id == sid).order_by(Purchase.at.desc(), Purchase.id.desc())))
+    docs = list(db.scalars(select(TradeDoc).where(TradeDoc.supplier_id == sid).order_by(TradeDoc.at.desc(), TradeDoc.id.desc())))
+    owed = sum(p.total - p.paid for p in purchases if p.status in ("open", "partial"))
+    bought = sum(p.total for p in purchases if p.status != "void" and p.subtotal > 0)
+    hist = sum(-d.total if d.kind == "purchase_return" else d.total for d in docs if d.kind.startswith("purchase"))
+    person = db.get(Customer, s.customer_id) if s.customer_id else None
+    return {**_sup(s, owed, bought, (hist, len(docs)), person), "purchases": [_pur(p, db) for p in purchases],
+            "docs": [tizpardaz.doc_out(db, d) for d in docs]}
+
+
+# ------------------------------------------------------------------ invoices brought over (Tizpardaz)
+@router.get("/trade-docs")
+def trade_docs(kind: str = "", customer_id: int | None = None, supplier_id: int | None = None, q: str = "", limit: int = 300,
+               db: Session = Depends(get_db), _=Depends(require("read"))):
+    """Sale / purchase invoices brought over from the previous software (kind: sale | purchase)."""
+    stmt = select(TradeDoc).order_by(TradeDoc.at.desc(), TradeDoc.id.desc())
+    if kind in ("sale", "purchase"):
+        stmt = stmt.where(TradeDoc.kind.in_((kind, f"{kind}_return")))
+    if customer_id:
+        stmt = stmt.where(TradeDoc.customer_id == customer_id)
+    if supplier_id:
+        stmt = stmt.where(TradeDoc.supplier_id == supplier_id)
+    if q.strip():
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(or_(TradeDoc.doc_no == to_en_digits(q).strip(), TradeDoc.party.like(like),
+                              TradeDoc.customer_id.in_(select(Customer.id).where(fa_like(Customer.full_name, q))),
+                              TradeDoc.supplier_id.in_(select(Supplier.id).where(fa_like(Supplier.name, q)))))
+    docs = list(db.scalars(stmt.limit(min(max(limit, 1), 2000))))
+    people = {c.id: c for c in db.scalars(select(Customer).where(Customer.id.in_({d.customer_id for d in docs if d.customer_id} or {-1})))}
+    return [tizpardaz.doc_out(db, d, people=people) for d in docs]
+
+
+@router.get("/trade-docs/{did}")
+def trade_doc(did: int, db: Session = Depends(get_db), _=Depends(require("read"))):
+    return tizpardaz.doc_out(db, db.get(TradeDoc, did) or _404("فاکتور"), full=True)
 
 
 class PurchaseItemIn(BaseModel):
@@ -337,9 +411,7 @@ def purchases(status: str = "", supplier_id: int | None = None, start: date | No
 def create_purchase(body: PurchaseIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
     sup = db.get(Supplier, body.supplier_id) if body.supplier_id else None
     if sup is None and (body.supplier_name or "").strip():
-        sup = db.scalar(select(Supplier).where(Supplier.name == body.supplier_name.strip())) or Supplier(name=body.supplier_name.strip())
-        db.add(sup)
-        db.flush()
+        sup = inventory.supplier_for(db, body.supplier_name.strip())  # «سياوش» and «سیاوش» are one supplier
     try:
         pur = inventory.record_purchase(db, supplier=sup, items=[i.model_dump() for i in body.items], at=body.at, discount=body.discount,
                                         shipping=body.shipping, supplier_ref=body.supplier_ref, notes=body.notes,

@@ -129,12 +129,21 @@ export function Badge({ status, children }: { status?: string; children?: ReactN
   return <span className={`badge ${s?.cls ?? "bg-violet-500/10 text-violet-600 dark:text-violet-300"}`}>{children ?? s?.label ?? status}</span>;
 }
 
+const openModals: object[] = []; // stack of open windows: Escape closes only the one on top
+
 export function Modal({ open, onClose, title, children, wide }: { open: boolean; onClose: () => void; title: string; children: ReactNode; wide?: boolean }) {
+  const me = useRef({});
   useEffect(() => {
-    const h = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    if (!open) return;
+    const token = me.current;
+    openModals.push(token);
+    const h = (e: KeyboardEvent) => e.key === "Escape" && openModals[openModals.length - 1] === token && onClose();
     window.addEventListener("keydown", h);
-    return () => window.removeEventListener("keydown", h);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener("keydown", h);
+      openModals.splice(openModals.indexOf(token), 1);
+    };
+  }, [open, onClose]);
   if (!open) return null;
   // rendered at <body>: a parent with backdrop-filter/transform (e.g. .card) would otherwise trap a fixed overlay inside it
   return createPortal(

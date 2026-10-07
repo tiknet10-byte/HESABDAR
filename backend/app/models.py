@@ -444,6 +444,8 @@ class Supplier(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(128))
     mobile: Mapped[str | None] = mapped_column(String(20), nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
+    # the same person in the customers list (Tizpardaz keeps customers and sellers in one list of people)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)
 
 
 class Purchase(TimestampMixin, Base):
@@ -524,6 +526,27 @@ class TradeHistory(Base):
     amount: Mapped[int] = mapped_column(BigInteger, default=0)  # Rial, >= 0
     cost: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # sales: cost of the goods (worked out on import)
     fp: Mapped[str] = mapped_column(String(160), default="", index=True)  # fingerprint: the same row is never imported twice
+    doc_id: Mapped[int | None] = mapped_column(ForeignKey("trade_docs.id"), nullable=True, index=True)  # its invoice
+
+
+class TradeDoc(Base):
+    """An invoice brought over from other software (a Tizpardaz sale / purchase invoice): number, date, the person,
+    the total of the invoice (after its discount) and what was settled on it; its items are TradeHistory rows."""
+    __tablename__ = "trade_docs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(200), index=True)  # source|kind|number|date: one header per invoice
+    batch_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="tizpardaz")
+    kind: Mapped[str] = mapped_column(String(16))  # sale | sale_return | purchase | purchase_return
+    doc_no: Mapped[str] = mapped_column(String(32), default="")
+    at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)  # the person
+    supplier_id: Mapped[int | None] = mapped_column(ForeignKey("suppliers.id"), nullable=True, index=True)  # purchases
+    party: Mapped[str] = mapped_column(String(128), default="")  # as written in the file
+    items_total: Mapped[int] = mapped_column(BigInteger, default=0)  # sum of its items
+    total: Mapped[int] = mapped_column(BigInteger, default=0)  # the invoice amount (the person's row; = items when unknown)
+    paid: Mapped[int] = mapped_column(BigInteger, default=0)  # settled within the same document
+    extras: Mapped[list] = mapped_column(JSON, default=list)  # other rows of the document (discount, cash, tax...)
 
 
 # ---------------------------------------------------------------- website (WooCommerce)
