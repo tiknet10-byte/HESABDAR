@@ -1,45 +1,54 @@
 /** Splitting what the customer pays on an invoice between the lines it contains (all amounts in Rial, integers).
  *
- *  1. each group (service line, products, other) has its gross amount;
- *  2. the invoice discount is shared in proportion to the gross amounts;
- *  3. a deposit taken for a service is taken off that service's line first; what is left of the deposits
- *     (or deposits without a line) is shared in proportion to what each line still has to pay;
+ *  1. every invoice item has its gross amount and its group (service line, products, other);
+ *  2. the invoice discount is shared over the items in proportion to their amounts (exactly as the server does);
+ *  3. deposits are prepayments for SERVICES: they are never taken off product sales. A deposit taken for a service
+ *     is taken off that service's line first; what is left of the deposits (or deposits without a line) is shared
+ *     over the service groups in proportion to what each still has to pay;
  *  4. rounding goes by largest remainder, so the parts always add up exactly to the amount due.
  */
 export type Group = { key: string; gross: number };
 
-/** Share `amount` over `weights` (>= 0) proportionally; the parts are integers that add up to `amount` exactly. */
+/** groups that deposits can never pay for */
+export const NO_DEPOSIT = "products";
+
+/** Share `amount` over `weights` (>= 0) proportionally; the parts are integers that add up to `amount` exactly.
+ *  Integer (BigInt) math: Rial amounts multiplied together pass what a JavaScript number holds exactly. */
 export function share(amount: number, weights: number[]): number[] {
-  const total = weights.reduce((s, w) => s + Math.max(0, w), 0);
-  if (amount <= 0 || total <= 0) return weights.map(() => 0);
-  const raw = weights.map((w) => (Math.max(0, w) * amount) / total);
-  const parts = raw.map(Math.floor);
-  let left = amount - parts.reduce((s, x) => s + x, 0);
-  const order = raw.map((r, i) => [r - Math.floor(r), i] as const).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
-  for (let k = 0; left > 0 && k < order.length; k++, left--) parts[order[k][1]] += 1;
-  return parts;
+  const w = weights.map((x) => BigInt(Math.max(0, Math.round(x))));
+  const total = w.reduce((s, x) => s + x, 0n);
+  if (amount <= 0 || total <= 0n) return weights.map(() => 0);
+  const a = BigInt(Math.round(amount));
+  const parts = w.map((x) => (x * a) / total);
+  const rem = w.map((x) => (x * a) % total);
+  let left = Number(a - parts.reduce((s, x) => s + x, 0n));
+  const order = rem.map((r, i) => [r, i] as const).sort((p, q) => (p[0] === q[0] ? p[1] - q[1] : p[0] > q[0] ? -1 : 1));
+  for (let k = 0; left > 0 && k < order.length; k++, left--) parts[order[k][1]] += 1n;
+  return parts.map(Number);
 }
 
-export function splitDue(groups: Group[], discount: number, deposits: { amount: number; group?: string }[]): Record<string, number> {
-  const gross = groups.map((g) => Math.max(0, g.gross));
-  const subtotal = gross.reduce((s, x) => s + x, 0);
-  const disc = share(Math.min(Math.max(0, discount), subtotal), gross);
-  const net = gross.map((g, i) => g - disc[i]);
-  const total = net.reduce((s, x) => s + x, 0);
-  let applied = Math.min(deposits.reduce((s, d) => s + Math.max(0, d.amount), 0), total);
-  const dep = groups.map(() => 0);
+const sum = (xs: number[]) => xs.reduce((s, x) => s + x, 0);
+
+/** items: one entry per invoice item, in the invoice's order (keys repeat for items of the same line).
+ *  Returns what is still due per group after the discount and the deposits. */
+export function splitDue(items: Group[], discount: number, deposits: { amount: number; group?: string }[]): Record<string, number> {
+  const gross = items.map((g) => Math.max(0, Math.round(g.gross)));
+  const disc = share(Math.min(Math.max(0, discount), sum(gross)), gross);
+  const net: Record<string, number> = {};
+  items.forEach((g, i) => (net[g.key] = (net[g.key] ?? 0) + gross[i] - disc[i]));
+  const keys = Object.keys(net);
+  const room = keys.map((k) => (k === NO_DEPOSIT ? 0 : net[k])); // what deposits may pay
+  let applied = Math.min(sum(deposits.map((d) => Math.max(0, d.amount))), sum(room));
+  const dep = keys.map(() => 0);
   // deposits that belong to a line on this invoice go to that line first
   for (const d of deposits) {
-    const i = groups.findIndex((g) => g.key === d.group);
+    const i = keys.indexOf(d.group ?? "");
     if (i < 0 || applied <= 0) continue;
-    const take = Math.min(Math.max(0, d.amount), net[i] - dep[i], applied);
+    const take = Math.min(Math.max(0, d.amount), room[i] - dep[i], applied);
     dep[i] += take;
     applied -= take;
   }
-  // the rest of the deposits: proportionally to what each line still has to pay
-  if (applied > 0) {
-    const rest = share(applied, net.map((n, i) => n - dep[i]));
-    rest.forEach((x, i) => (dep[i] += x));
-  }
-  return Object.fromEntries(groups.map((g, i) => [g.key, net[i] - dep[i]]));
+  // the rest of the deposits: over the services, proportionally to what each still has to pay
+  if (applied > 0) share(applied, room.map((r, i) => r - dep[i])).forEach((x, i) => (dep[i] += x));
+  return Object.fromEntries(keys.map((k, i) => [k, net[k] - dep[i]]));
 }

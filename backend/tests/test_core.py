@@ -1266,7 +1266,9 @@ def test_products_purchase_sale_profit_exact_under_every_costing_method(client, 
     assert pl["name"] == "فروش محصولات" and pl["revenue"] == 1_000_000 and pl["cogs"] == 400_000 and pl["profit"] == 600_000
     assert not any(x["name"] == "فروش محصولات" for x in rev_rep["staff"])
     month = client.get("/api/dashboard").json()["month"]
-    assert month["cogs"] == 400_000 and month["net_profit"] == month["revenue"] - 400_000 - month["expenses"]
+    # net profit comes from the books: every income minus every cost (goods sold, staff share, expenses, shortages...)
+    prof = {r["key"]: r["value"] for r in month["profit"]["rows"]}
+    assert month["cogs"] == 400_000 and prof["cogs"] == -400_000 and month["net_profit"] == sum(prof.values())
 
 
 def test_tizpardaz_customers_products_and_journal(client, accounts, services):

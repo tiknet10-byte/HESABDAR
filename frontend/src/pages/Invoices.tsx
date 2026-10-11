@@ -122,14 +122,20 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   useEffect(() => setDepOverride({}), [cust.customer_id, doneKey]);
   const [busy, setBusy] = useState(false);
 
-  const subtotal = items.reduce((s, i) => s + i.unit_price * i.quantity, 0);
+  const subtotal = items.filter((i) => i.service_id || i.product_id || i.description).reduce((s, i) => s + i.unit_price * i.quantity, 0);
   const total = Math.max(0, subtotal - discount);
   const selected = check.held_deposits.filter(isPicked);
   const heldSum = selected.reduce((s, d) => s + d.amount, 0);
-  const due = Math.max(0, total - Math.min(heldSum, total));
   // what the customer pays, split per line onto that line's own POS / card (Settings -> each line's accounts)
   const lineOf = (serviceId?: number) => services.find((x) => x.id === serviceId)?.line_id;
   const groupOf = (it: Item) => (it.product_id ? "products" : it.service_id ? `line:${lineOf(it.service_id)}` : "other");
+  // deposits pay only for services (never for products); the rest is due, per line
+  const billed = items.filter((i) => i.service_id || i.product_id || i.description);
+  const dues = splitDue(billed.map((i) => ({ key: groupOf(i), gross: i.unit_price * i.quantity })), discount,
+    selected.map((d) => ({ amount: d.amount, group: d.service_id ? `line:${lineOf(d.service_id)}` : undefined })));
+  const due = Object.values(dues).reduce((s, x) => s + x, 0);
+  const depositUsed = total - due;
+  const servicesNet = billed.some((i) => !i.product_id);
   const groupLabel = (key: string) => key === "products" ? "فروش محصولات" : key === "other" ? "سایر"
     : services.find((x) => `line:${x.line_id}` === key)?.line ?? "لاین";
   const groupAccounts = (key: string): number[] => {
@@ -138,11 +144,10 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   };
   const autoPays = useMemo<Pay[]>(() => {
     const gross: Record<string, number> = {};
-    items.filter((i) => i.service_id || i.description).forEach((i) => (gross[groupOf(i)] = (gross[groupOf(i)] ?? 0) + i.unit_price * i.quantity));
+    billed.forEach((i) => (gross[groupOf(i)] = (gross[groupOf(i)] ?? 0) + i.unit_price * i.quantity));
     const groups = Object.entries(gross).map(([key, g]) => ({ key, gross: g }));
     if (!groups.length || !accounts.length) return [];
     const biggest = [...groups].sort((a, b) => b.gross - a.gross)[0].key;
-    const dues = splitDue(groups, discount, selected.map((d) => ({ amount: d.amount, group: d.service_id ? `line:${lineOf(d.service_id)}` : undefined })));
     const rows: Pay[] = [];
     for (const g of groups) {
       if (dues[g.key] <= 0) continue;
@@ -352,7 +357,8 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
       <div className="rounded-2xl p-4 text-sm" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
         <div className="flex justify-between"><span className="muted">جمع خدمات و محصولات</span><span className="num">{money(subtotal)}</span></div>
         {discount > 0 && <div className="flex justify-between"><span className="muted">تخفیف</span><span className="num">− {money(discount)}</span></div>}
-        {heldSum > 0 && <div className="flex justify-between"><span className="muted">بیعانه</span><span className="num">− {money(Math.min(heldSum, total))}</span></div>}
+        {heldSum > 0 && <div className="flex justify-between"><span className="muted">بیعانه (فقط از خدمات کسر می‌شود)</span><span className="num">− {money(depositUsed)}</span></div>}
+        {heldSum > depositUsed && <div className="text-xs text-amber-600">{servicesNet ? `از بیعانه‌ها ${money(heldSum - depositUsed)} بیشتر از مبلغ خدمات است و برای مشتری باز می‌ماند.` : "این فاکتور خدمتی ندارد؛ بیعانه فقط برای خدمات است و برای مشتری باز می‌ماند."}</div>}
         <div className="mt-2 flex justify-between text-base font-extrabold"><span>قابل پرداخت</span><span className="num gradient-text">{money(due)}</span></div>
         {paid !== due && <div className="mt-1 flex justify-between text-amber-600"><span>مانده پس از دریافت</span><span className="num">{money(due - paid)}</span></div>}
       </div>

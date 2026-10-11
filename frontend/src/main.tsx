@@ -12,6 +12,7 @@ import Customers from "./pages/Customers";
 import Products from "./pages/Products";
 import Dashboard from "./pages/Dashboard";
 import Deposits from "./pages/Deposits";
+import Capital from "./pages/Capital";
 import Expenses from "./pages/Expenses";
 import Invoices from "./pages/Invoices";
 import Ledger from "./pages/Ledger";
@@ -100,6 +101,7 @@ function App() {
                 <Route path="reports" element={<Reports />} />
                 <Route path="staff" element={<StaffShares />} />
                 <Route path="expenses" element={<Expenses />} />
+                <Route path="capital" element={<Capital />} />
                 <Route path="ledger" element={<Ledger />} />
                 <Route path="settings" element={<SettingsPage />} />
                 <Route path="*" element={<Dashboard />} />

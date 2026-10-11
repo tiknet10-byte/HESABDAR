@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..models import (
     Appointment,
+    CapitalMove,
     ConversationMessage,
     Customer,
     Deposit,
@@ -35,9 +36,9 @@ from .service_catalog import name_key
 PLACEHOLDER = "مشتری "  # names the bot gives before a real name is known
 # everything that belongs to a customer: merging moves all of it
 LINKED = (Appointment, WaitlistEntry, Deposit, Invoice, Payment, JournalLine, InboundReceipt, ConversationMessage, TradeHistory,
-          TradeDoc, WooOrder, Supplier)
+          TradeDoc, WooOrder, Supplier, CapitalMove)
 # records that keep a customer alive (messages and receipts are only loosely attached and are detached on delete)
-RECORDS = (Appointment, WaitlistEntry, Deposit, Invoice, Payment, JournalLine, TradeHistory, TradeDoc, WooOrder, Supplier)
+RECORDS = (Appointment, WaitlistEntry, Deposit, Invoice, Payment, JournalLine, TradeHistory, TradeDoc, WooOrder, Supplier, CapitalMove)
 
 
 def with_records():  # noqa: ANN201

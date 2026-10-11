@@ -99,6 +99,19 @@ def _per_account(rows: list[dict]) -> list[dict]:
     return sorted(({**a, "value": a["in"] - a["out"]} for a in acc.values()), key=lambda x: -x["in"])
 
 
+def _net(it: InvoiceItem, inv: Invoice) -> int:
+    """An item's amount after its share of the invoice discount (as booked); older items without it: proportional."""
+    if it.net_amount is not None:
+        return int(it.net_amount)
+    return round(it.amount * inv.total / inv.subtotal) if inv.subtotal else it.amount
+
+
+def _profit(db: Session, s: datetime, e: datetime) -> dict:
+    from .capital import profit_breakdown
+
+    return profit_breakdown(db, s, e + timedelta(microseconds=1))
+
+
 def summary(db: Session, start: date | None = None, end: date | None = None) -> dict:
     s, e = _range(start, end)
     inv_q = (select(Invoice).where(Invoice.issued_at.between(s, e), Invoice.status != "void")
@@ -133,9 +146,8 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
     lines = {l.id: l for l in db.scalars(select(ServiceLine))}
     staff = {p.id: p.full_name for p in db.scalars(select(Staff))}
     for inv in invoices:
-        factor = (inv.total / inv.subtotal) if inv.subtotal else 1
         for it in inv.items:
-            amt = round(it.amount * factor)
+            amt = _net(it, inv)
             by_line[PRODUCTS_NAME if it.product_id else lines[it.line_id].name if it.line_id in lines else "سایر"] += amt
             key = it.description or "—"
             d = by_service.setdefault(key, {"name": key, "count": 0, "revenue": 0})
@@ -160,10 +172,14 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
         "expenses": expenses,
         # gross profit of products = their sales - what they cost (COGS); services have no stock cost
         "cogs": (cogs := product_cogs(db, s, e)),
-        "product_revenue": (prod_rev := sum(round(it.amount * ((i.total / i.subtotal) if i.subtotal else 1))
-                                             for i in invoices for it in i.items if it.product_id)),
+        "product_revenue": (prod_rev := sum(_net(it, i) for i in invoices for it in i.items if it.product_id)),
         "product_profit": prod_rev - cogs,
-        "net_profit": revenue - cogs - expenses,
+        # forfeited deposits (no-shows): income of their line
+        "forfeited": sum(int(x[2]) for x in forfeit_rows(db, s, e)),
+        # profit straight from the books: every income (services, products, forfeits, gold/dollar gains) minus every
+        # cost (goods sold, staff share, expenses, cash and stock shortages) dated in the period
+        "profit": (profit := _profit(db, s, e)),
+        "net_profit": profit["total"],
         # net money of customers: received minus paid back (a refunded deposit is not money kept)
         "cash_in": sum(r["amount"] for r in moves),
         "cash_received": sum(r["amount"] for r in moves if r["kind"] not in ("deposit_refund", "refund")),
@@ -462,6 +478,21 @@ def _jlabel(key: str) -> str:
     return f"{J_MONTHS[int(jm) - 1]} {jy}"
 
 
+FORFEIT_NAME = "بیعانهٔ سوخت‌شده (عدم مراجعه)"
+
+
+def forfeit_rows(db: Session, s: datetime, e: datetime) -> list[tuple]:
+    """(day, line id, amount) of forfeited-deposit income booked in the period."""
+    from ..models import JournalEntry, JournalLine, LedgerAccount
+
+    accs = select(LedgerAccount.id).where((LedgerAccount.code == "4800") | (LedgerAccount.parent_code == "4800"))
+    q = (select(func.date(JournalEntry.at), JournalLine.line_id, func.sum(JournalLine.credit - JournalLine.debit))
+         .join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+         .where(JournalLine.account_id.in_(accs), JournalEntry.at.between(s, e))
+         .group_by(func.date(JournalEntry.at), JournalLine.line_id))
+    return [r for r in db.execute(q) if r[2]]
+
+
 def _revenue_rows(db: Session, s: datetime, e: datetime, source: str = "all") -> list[dict]:
     """Every sale in the period at day x line x staff x service level (sums), from invoices here and from the
     service history brought over from the previous software. Amounts are the full price paid (no staff share deducted)."""
@@ -478,6 +509,11 @@ def _revenue_rows(db: Session, s: datetime, e: datetime, source: str = "all") ->
             rows.append({"day": str(day), "line_id": PRODUCTS_LINE if product_id else line_id, "staff_id": staff_id,
                          "service_id": service_id, "product_id": product_id, "name": desc,
                          "amount": int(total or 0), "count": int(n or 0), "old": False})
+    if source in ("all", "new"):
+        # forfeited deposits: income of their service line (from the ledger: 4800 and its per-line accounts)
+        for day, line_id, total in forfeit_rows(db, s, e):
+            rows.append({"day": str(day), "line_id": line_id, "staff_id": None, "service_id": None, "product_id": None,
+                         "name": FORFEIT_NAME, "amount": int(total or 0), "count": 0, "old": False, "forfeit": True})
     if source in ("all", "old"):
         q = (select(func.date(Appointment.start_at), Service.line_id, Appointment.staff_id, Appointment.service_id,
                     func.sum(Appointment.quoted_price), func.count(Appointment.id))
@@ -527,17 +563,18 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
     agg_line: dict[int, dict] = {}
     agg_staff: dict[int, dict] = {}
     agg_svc: dict[str, dict] = {}
-    total = {"revenue": 0, "count": 0, "old": 0, "new": 0, "inferred_staff": 0}
+    total = {"revenue": 0, "count": 0, "old": 0, "new": 0, "inferred_staff": 0, "forfeits": 0}
     for r in _revenue_rows(db, s, e, source):
         svc = services.get(r["service_id"])
         lid = r["line_id"] or (svc.line_id if svc else None) or (people[r["staff_id"]].line_id if r["staff_id"] in people else None)
         sid = r["staff_id"]
         inferred = False
-        if not sid and lid and lid != PRODUCTS_LINE and len(by_line_staff.get(lid, [])) == 1:
+        forfeit = bool(r.get("forfeit"))
+        if not sid and not forfeit and lid and lid != PRODUCTS_LINE and len(by_line_staff.get(lid, [])) == 1:
             sid, inferred = by_line_staff[lid][0], True
         if line_id and lid != line_id:
             continue
-        if staff_id is not None and (sid or 0) != staff_id:
+        if staff_id is not None and (forfeit or (sid or 0) != staff_id):
             continue
         amt, n = r["amount"], r["count"]
         mk = _jmonth(r["day"], cache)
@@ -548,11 +585,14 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
         m["by_line"][lname] += amt
         L = agg_line.setdefault(lid or 0, {"id": lid or 0, "code": lines[lid].code if lid in lines else None, "name": lname,
                                            "color": lines[lid].color if lid in lines else "#94a3b8", "revenue": 0, "count": 0,
-                                           "months": defaultdict(int)})
+                                           "forfeits": 0, "months": defaultdict(int)})
         L["revenue"] += amt
         L["count"] += n
         L["months"][mk] += amt
-        if lid == PRODUCTS_LINE:  # products are nobody's service: not in the staff table
+        if forfeit:
+            L["forfeits"] += amt
+            total["forfeits"] += amt
+        if lid == PRODUCTS_LINE or forfeit:  # products / forfeited deposits are nobody's service: not in the staff table
             P = {"revenue": 0, "count": 0, "inferred": 0, "months": defaultdict(int), "last": None}
         else:
             P = agg_staff.setdefault(sid or 0, {
@@ -565,7 +605,7 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
         P["months"][mk] += amt
         P["last"] = max(P["last"] or r["day"], r["day"])
         prod = products.get(r.get("product_id")) if r.get("product_id") else None
-        key = f"p:{prod.id}" if prod else str(r["service_id"]) if r["service_id"] else f"name:{r['name'] or 'نامشخص'}"
+        key = f"forfeit:{lid or 0}" if forfeit else f"p:{prod.id}" if prod else str(r["service_id"]) if r["service_id"] else f"name:{r['name'] or 'نامشخص'}"
         S = agg_svc.setdefault(key, {"id": r["service_id"], "product_id": prod.id if prod else None,
                                      "code": prod.code if prod else svc.code if svc else None,
                                      "name": prod.name if prod else svc.name if svc else (r["name"] or "خدمت نامشخص"),

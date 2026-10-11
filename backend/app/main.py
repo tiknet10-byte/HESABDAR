@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .api import auth, catalog, customers, finance, legacy, products, system, tizpardaz
 from .api import woo as woo_api
+from .api import capital as capital_api
 from .core import db as dbmod
 from .core.config import get_settings
 from .core.db import Base, SessionLocal
@@ -48,14 +49,18 @@ def init_db() -> None:
     _ensure_indexes()
     with SessionLocal() as db:
         seed_base(db)
-        from .services.accounting import assign_missing_codes, backfill_deposit_closures
+        from .services.accounting import assign_missing_codes, backfill_deposit_closures, reclass_forfeits
 
         assign_missing_codes(db)  # every customer has a customer code
         codes.assign_missing(db)  # every service line and service has a code
         backfill_deposit_closures(db)  # refund date/account of deposits refunded before it was recorded
+        reclass_forfeits(db)  # forfeited deposits booked before they were income of their own line
         from .services import inventory
 
         inventory.ensure_chart(db)  # inventory, supplier payables, product revenue, cost of goods sold
+        from .services import capital
+
+        capital.ensure_chart(db)  # gold / coins / currency, gain on selling them
         from .services import tizpardaz
 
         tizpardaz.backfill_docs(db)  # Tizpardaz rows brought over before invoices were kept: their invoices, sellers linked
@@ -179,7 +184,7 @@ def create_app() -> FastAPI:
         return response
 
     for r in (auth.router, catalog.router, customers.router, finance.router, legacy.router, products.router, system.router, tizpardaz.router,
-              woo_api.router):
+              woo_api.router, capital_api.router):
         app.include_router(r)
 
     manager.discover()

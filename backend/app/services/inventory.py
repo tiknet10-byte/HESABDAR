@@ -407,14 +407,15 @@ def next_purchase_number(db: Session) -> str:
 
 
 def _share(amount: int, weights: list[int]) -> list[int]:
-    """Split amount over weights proportionally; integer parts adding up exactly (largest remainder)."""
-    total = sum(weights)
+    """Split amount over weights proportionally; integer parts adding up exactly (largest remainder).
+    Pure integer math (no float rounding on big Rial amounts); a zero weight never gets anything."""
+    w = [max(0, int(x)) for x in weights]
+    total = sum(w)
     if amount <= 0 or total <= 0:
-        return [0] * len(weights)
-    raw = [w * amount / total for w in weights]
-    parts = [int(x) for x in raw]
-    order = sorted(range(len(weights)), key=lambda i: (-(raw[i] - parts[i]), i))
-    for i in order[: amount - sum(parts)]:
+        return [0] * len(w)
+    parts = [x * amount // total for x in w]
+    rem = [x * amount % total for x in w]
+    for i in sorted(range(len(w)), key=lambda i: (-rem[i], i))[: amount - sum(parts)]:
         parts[i] += 1
     return parts
 
@@ -523,6 +524,9 @@ def void_purchase(db: Session, pur: Purchase, reason: str = "", user=None) -> Pu
         db.flush()
         post(db, f"برگشت پرداخت خرید باطل‌شده {pur.number}", [Leg(cash_account_for(db, pa), debit=sp.amount), Leg(_acc(db, PAYABLE), credit=sp.amount)],
              "supplier_payment", back.id, at=sp.paid_at)
+    from . import capital
+
+    capital.void_for_purchase(db, pur, user=user)  # what the owner paid on it from their own pocket goes back to them
     products = set()
     for it in pur.items:
         for m in db.scalars(select(StockMove).where(StockMove.purchase_item_id == it.id)):

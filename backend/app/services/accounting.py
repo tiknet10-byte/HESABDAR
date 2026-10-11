@@ -319,9 +319,11 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
         dep.status = "refunded"
         dep.refund_account_id = pa.id
     elif action == "forfeit":
+        # a forfeited deposit is income of the line of its service (laser, skin...), booked under 48xx per line
+        line_id = deposit_line_id(db, dep)
         post(db, "سوخت بیعانه (عدم مراجعه)", [
-            Leg(account(db, DEPOSITS), debit=dep.amount, customer_id=dep.customer_id),
-            Leg(account(db, FORFEITED), credit=dep.amount, customer_id=dep.customer_id),
+            Leg(account(db, DEPOSITS), debit=dep.amount, customer_id=dep.customer_id, line_id=line_id, staff_id=dep.staff_id),
+            Leg(forfeit_account(db, line_id), credit=dep.amount, customer_id=dep.customer_id, line_id=line_id, staff_id=dep.staff_id),
         ], "deposit", dep.id, at=at)
         dep.status = "forfeited"
     else:
@@ -329,6 +331,71 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
     dep.closed_at = at or local_now()
     audit(db, f"deposit.{action}", "deposit", dep.id, {"amount": dep.amount}, user=user)
     return dep
+
+
+def deposit_line_id(db: Session, dep: Deposit, _seen: set | None = None) -> int | None:
+    """The service line a deposit belongs to: its service, else its appointment's service, else its staff member's line,
+    else the line its money was booked on when received; the rest of a split deposit follows the deposit it came from."""
+    import re
+
+    svc = db.get(Service, dep.service_id) if dep.service_id else None
+    if svc is None and dep.appointment_id:
+        a = db.get(Appointment, dep.appointment_id)
+        svc = db.get(Service, a.service_id) if a and a.service_id else None
+    if svc is not None and svc.line_id:
+        return svc.line_id
+    person = db.get(Staff, dep.staff_id) if dep.staff_id else None
+    if person is not None and person.line_id:
+        return person.line_id
+    booked = db.scalar(select(JournalLine.line_id).join(JournalEntry, JournalEntry.id == JournalLine.entry_id).where(
+        JournalEntry.ref_type == "deposit", JournalEntry.ref_id == dep.id, JournalLine.account_id == account(db, DEPOSITS).id,
+        JournalLine.credit > 0, JournalLine.line_id.is_not(None)).limit(1))
+    if booked:
+        return booked
+    m = re.search(r"باقیمانده بیعانه #(\d+)", dep.notes or "")
+    seen = _seen or set()
+    if m and int(m.group(1)) not in seen and int(m.group(1)) != dep.id:
+        parent = db.get(Deposit, int(m.group(1)))
+        if parent is not None:
+            return deposit_line_id(db, parent, seen | {dep.id})
+    return None
+
+
+def forfeit_account(db: Session, line_id: int | None) -> LedgerAccount:
+    """Income from forfeited deposits: one account per service line under 4800 (4800 itself when the line is unknown)."""
+    from ..models import ServiceLine
+
+    line = db.get(ServiceLine, line_id) if line_id else None
+    if line is None:
+        return account(db, FORFEITED)
+    return _child(db, FORFEITED, f"بیعانه سوخت‌شده {line.name}", "revenue")
+
+
+def reclass_forfeits(db: Session) -> int:
+    """Deposits forfeited before forfeits were income of their line (all on 4800): move each one's income to the
+    48xx account of its line (same entry, same date and amount; only the income account and the line change)."""
+    plain = account(db, FORFEITED)
+    n = 0
+    for dep in db.scalars(select(Deposit).where(Deposit.status == "forfeited")):
+        legs = db.scalars(select(JournalLine).join(JournalEntry, JournalEntry.id == JournalLine.entry_id).where(
+            JournalEntry.ref_type == "deposit", JournalEntry.ref_id == dep.id, JournalEntry.description.like("سوخت%"))).all()
+        income = [ln for ln in legs if ln.account_id == plain.id and ln.credit > 0]
+        if not income:
+            continue
+        line_id = deposit_line_id(db, dep)
+        if not line_id:
+            continue
+        target = forfeit_account(db, line_id)
+        for ln in legs:
+            ln.line_id = line_id
+            ln.staff_id = ln.staff_id or dep.staff_id
+            if ln in income:
+                ln.account_id = target.id
+        n += 1
+    if n:
+        audit(db, "deposit.forfeit_reclass", "deposit", "", {"count": n})
+    db.flush()
+    return n
 
 
 def backfill_deposit_closures(db: Session) -> int:
@@ -388,7 +455,6 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     channel = channel if channel in ("online", "in_person") else None
     inv = Invoice(number=next_invoice_number(db), customer_id=customer.id, issued_at=issued_at or local_now(),
                   discount=discount, source=source, notes=notes, channel=channel)
-    revenue_by_line: dict[int | str | None, int] = {}  # service line id, or "products"
     line_names: dict[int | str | None, str] = {}
     for it in items:
         prod = db.get(Product, it["product_id"]) if it.get("product_id") else None
@@ -412,8 +478,6 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
         if item.amount < 0:
             raise AccountingError("مبلغ آیتم منفی است")
         inv.items.append(item)
-        key = "products" if prod else item.line_id
-        revenue_by_line[key] = revenue_by_line.get(key, 0) + item.amount
         if svc:
             line_names[item.line_id] = svc.line.name
     wanted: dict[int, int] = {}
@@ -433,29 +497,28 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     db.add(inv)
     db.flush()
 
-    # allocate invoice-level discount proportionally across lines, revenue recorded net
+    # the invoice discount is shared over the items in proportion to their amounts (largest remainder, exact to the
+    # Rial; the invoice form splits it the same way). Every figure uses these net amounts: revenue per line, staff
+    # commission, product sales, reports.
+    for item, share in zip(inv.items, inventory._share(discount, [i.amount for i in inv.items])):
+        item.net_amount = item.amount - share
+    revenue_by_line: dict[int | str | None, int] = {}  # service line id, or "products"
+    for item in inv.items:
+        key = "products" if item.product_id else item.line_id
+        revenue_by_line[key] = revenue_by_line.get(key, 0) + item.net_amount
     legs = [Leg(account(db, AR), debit=inv.total, customer_id=customer.id)]
-    remaining_discount = discount
-    keys = list(revenue_by_line)
-    for idx, line_id in enumerate(keys):
-        gross = revenue_by_line[line_id]
-        share = remaining_discount if idx == len(keys) - 1 else (discount * gross // inv.subtotal if inv.subtotal else 0)
-        remaining_discount -= share
+    for line_id, net in revenue_by_line.items():
         if line_id == "products":
-            legs.append(Leg(inventory._acc(db, inventory.PRODUCT_REVENUE), credit=gross - share, customer_id=customer.id))
+            legs.append(Leg(inventory._acc(db, inventory.PRODUCT_REVENUE), credit=net, customer_id=customer.id))
             continue
         name = line_names.get(line_id) or "سایر خدمات"
-        legs.append(Leg(revenue_account_for_line(db, name), credit=gross - share, customer_id=customer.id, line_id=line_id))
+        legs.append(Leg(revenue_account_for_line(db, name), credit=net, customer_id=customer.id, line_id=line_id))
     post(db, f"فاکتور {inv.number} - {customer.full_name}", legs, "invoice", inv.id, at=inv.issued_at)
 
     # staff commission: each item's net (after its share of the invoice discount) x the staff member's percent.
     # Booked as an expense of the salon and a liability to the staff member until it is paid out.
-    remaining_discount = discount
     comm_legs: list[Leg] = []
-    for idx, item in enumerate(inv.items):
-        share = remaining_discount if idx == len(inv.items) - 1 else (discount * item.amount // inv.subtotal if inv.subtotal else 0)
-        remaining_discount -= share
-        item.net_amount = item.amount - share
+    for item in inv.items:
         person = db.get(Staff, item.staff_id) if item.staff_id else None
         if person and person.commission_percent:
             item.commission_percent = float(person.commission_percent)
@@ -478,22 +541,28 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
             if source != "woocommerce":  # a website order is already out of the website's stock
                 woo_queue.add(db, item.product_id, -item.quantity, f"فروش حضوری {inv.number}")
 
-    # apply customer deposits
+    # apply customer deposits. A deposit is a prepayment for SERVICES: it pays only the services of the invoice
+    # (after their share of the discount), never its products; what is left of it stays the customer's open deposit.
     deposit_q = select(Deposit).where(Deposit.customer_id == customer.id, Deposit.status == "held")
     if apply_deposit_ids:
         deposit_q = deposit_q.where(Deposit.id.in_(apply_deposit_ids))
+    room = sum(i.net_amount for i in inv.items if not i.product_id)
+    if apply_deposit_ids and room <= 0:
+        raise AccountingError("بیعانه فقط برای خدمات است؛ این فاکتور خدمتی ندارد. تیک بیعانه را بردارید (بیعانه برای مشتری باز می‌ماند).")
     if apply_deposit_ids or apply_all_deposits:
-        for dep in db.scalars(deposit_q.order_by(Deposit.received_at)):
-            due = inv.total - inv.paid
+        for dep in db.scalars(deposit_q.order_by(Deposit.received_at, Deposit.id)):
+            due = min(inv.total - inv.paid, room)
             if due <= 0:
                 break
             if dep.amount > due:
-                # split: the remainder stays as a held deposit
+                # split: the remainder stays as a held deposit of the same service / appointment / staff member
                 remainder = Deposit(customer_id=dep.customer_id, amount=dep.amount - due, payment_account_id=dep.payment_account_id,
                                     received_at=dep.received_at, reference=dep.reference, source=dep.source,
-                                    notes=f"باقیمانده بیعانه #{dep.id}")
+                                    service_id=dep.service_id, appointment_id=dep.appointment_id, staff_id=dep.staff_id,
+                                    service_guess=dep.service_guess or {}, notes=f"باقیمانده بیعانه #{dep.id}")
                 dep.amount = due
                 db.add(remainder)
+            room -= dep.amount
             post(db, f"تسویه بیعانه با فاکتور {inv.number}", [
                 Leg(account(db, DEPOSITS), debit=dep.amount, customer_id=customer.id),
                 Leg(account(db, AR), credit=dep.amount, customer_id=customer.id),
@@ -569,19 +638,22 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payment
         return inv
     if payments not in ("cancel", "refund", "deposit"):
         raise AccountingError("نحوهٔ برگشت وجه نامعتبر است")
-    for original in db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(["invoice", "commission"]),
-                                                         JournalEntry.ref_id == inv.id)):
+    # "cancel" = the invoice was a mistake: everything is undone on its own date, so that day's (and month's) sales,
+    # staff shares and goods sold go back to what they really were. Otherwise it is a return today.
+    undo_at = inv.issued_at if payments == "cancel" else None
+    for original in list(db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(["invoice", "commission"]),
+                                                              JournalEntry.ref_id == inv.id))):
         post(db, f"ابطال {'فاکتور' if original.ref_type == 'invoice' else 'سهم پرسنل'} {inv.number}", [
             Leg(db.get(LedgerAccount, l.account_id), debit=l.credit, credit=l.debit, customer_id=l.customer_id,
                 line_id=l.line_id, staff_id=l.staff_id)
             for l in original.lines
-        ], "invoice_void", inv.id)
+        ], "invoice_void", inv.id, at=undo_at)
     # deposits that paid part of it: back to open
-    for dep in db.scalars(select(Deposit).where(Deposit.applied_invoice_id == inv.id, Deposit.status == "applied")):
+    for dep in list(db.scalars(select(Deposit).where(Deposit.applied_invoice_id == inv.id, Deposit.status == "applied"))):
         post(db, f"برگشت بیعانه از فاکتور باطل‌شده {inv.number}", [
             Leg(account(db, AR), debit=dep.amount, customer_id=inv.customer_id),
             Leg(account(db, DEPOSITS), credit=dep.amount, customer_id=inv.customer_id),
-        ], "deposit", dep.id)
+        ], "deposit", dep.id, at=undo_at)
         dep.status = "held"
         dep.applied_invoice_id = None
     # money received on it
@@ -778,6 +850,7 @@ REF_LABELS = {
     "payment": "دریافت وجه", "expense": "هزینه", "commission": "سهم پرسنل", "staff_payout": "پرداخت به پرسنل",
     "purchase": "خرید محصول", "purchase_void": "ابطال خرید", "supplier_payment": "پرداخت به تأمین‌کننده",
     "stock_move": "گردش انبار (بهای تمام‌شده)", "stock_opening": "موجودی اول دورهٔ کالا",
+    "capital": "سرمایهٔ مدیر", "capital_void": "ابطال سرمایه", "holding": "طلا و ارز", "holding_void": "ابطال طلا و ارز",
 }
 
 

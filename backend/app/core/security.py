@@ -23,6 +23,7 @@ PERMISSIONS: dict[str, set[str]] = {
     "reports": {"owner", "admin", "accountant", "ai_agent"},
     "settings": {"owner", "admin"},
     "void": {"owner", "admin"},  # cancelling an invoice: management only
+    "capital": {"owner", "admin"},  # the owner's own money, gold and dollars, the business's worth
     "users": {"owner"},
     "backup": {"owner", "admin"},
     "plugins": {"owner", "admin"},

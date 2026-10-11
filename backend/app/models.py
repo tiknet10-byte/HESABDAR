@@ -610,3 +610,56 @@ class WooLog(Base):
     at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     level: Mapped[str] = mapped_column(String(8), default="info")  # info | warn | error
     message: Mapped[str] = mapped_column(String(400))
+
+
+# ---------------------------------------------------------------- owner's capital, gold and currency
+class CapitalMove(TimestampMixin, Base):
+    """Money the owner puts into the business or takes out of it (equity 3100):
+    add (into a cash/bank account), withdraw (out of one), supplier (the owner paid a supplier from their own pocket),
+    convert (what we "owed" a person - e.g. a customer named «سرمایه» - is really the owner's capital)."""
+    __tablename__ = "capital_moves"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # add | withdraw | supplier | convert
+    amount: Mapped[int] = mapped_column(BigInteger)  # always > 0; the kind says the direction
+    payment_account_id: Mapped[int | None] = mapped_column(ForeignKey("payment_accounts.id"), nullable=True)
+    purchase_id: Mapped[int | None] = mapped_column(ForeignKey("purchases.id"), nullable=True, index=True)
+    deposit_id: Mapped[int | None] = mapped_column(ForeignKey("deposits.id"), nullable=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(8), default="active")  # active | void
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class Holding(TimestampMixin, Base):
+    """Gold, coins, dollars... kept as an asset of the business (1400). Quantities are kept in thousandths of the
+    unit (grams with 3 decimals) as integers; cost is what was paid (Rial); market price only for display."""
+    __tablename__ = "holdings"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(16), default="gold")  # gold | coin | currency | other
+    unit: Mapped[str] = mapped_column(String(16), default="گرم")
+    qty_m: Mapped[int] = mapped_column(BigInteger, default=0)  # thousandths of a unit
+    cost: Mapped[int] = mapped_column(BigInteger, default=0)  # book value (Rial) = ledger balance of its account
+    market_price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # Rial per 1 unit
+    market_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ledger_account_id: Mapped[int | None] = mapped_column(ForeignKey("ledger_accounts.id"), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
+class HoldingMove(TimestampMixin, Base):
+    """opening (had it before) | buy (paid from an account) | sell (money into an account) |
+    owner_in (the owner brought it in as capital) | owner_out (the owner took it out of the business)."""
+    __tablename__ = "holding_moves"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    holding_id: Mapped[int] = mapped_column(ForeignKey("holdings.id"), index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    qty_m: Mapped[int] = mapped_column(BigInteger)  # + in, - out (thousandths)
+    amount: Mapped[int] = mapped_column(BigInteger, default=0)  # money paid / received / value brought in (Rial)
+    cost: Mapped[int] = mapped_column(BigInteger, default=0)  # + added to / - taken from the book value
+    gain: Mapped[int] = mapped_column(BigInteger, default=0)  # sell: money received - book value sold (loss < 0)
+    payment_account_id: Mapped[int | None] = mapped_column(ForeignKey("payment_accounts.id"), nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(8), default="active")  # active | void

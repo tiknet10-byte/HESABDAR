@@ -44,6 +44,8 @@ export const STATUS: Record<string, { label: string; cls: string }> = {
   applied: { label: "تسویه‌شده", cls: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
   refunded: { label: "مسترد", cls: "bg-sky-500/15 text-sky-600 dark:text-sky-400" },
   forfeited: { label: "سوخت‌شده", cls: "bg-rose-500/15 text-rose-600 dark:text-rose-400" },
+  capital: { label: "سرمایهٔ مدیر شد", cls: "bg-violet-500/15 text-violet-600 dark:text-violet-400" },
+  active: { label: "ثبت‌شده", cls: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
   issued: { label: "پرداخت‌نشده", cls: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
   partial: { label: "پرداخت جزئی", cls: "bg-orange-500/15 text-orange-600 dark:text-orange-400" },
   paid: { label: "تسویه", cls: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
