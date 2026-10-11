@@ -17,7 +17,7 @@ def test_auth_security(client):
     assert anon.post("/api/auth/setup", json={"username": "x", "password": "Secret123"}).status_code == 400
     for _ in range(5):
         assert anon.post("/api/auth/login", json={"username": "owner", "password": "wrong"}).status_code == 401
-    assert anon.post("/api/auth/login", json={"username": "owner", "password": "Secret123"}).status_code == 423  # locked
+    assert anon.post("/api/auth/login", json={"username": "owner", "password": "Secret123"}).status_code == 401  # locked: same answer as a wrong password
     assert client.get("/api/audit/verify").json()["ok"]
 
 
@@ -70,6 +70,7 @@ def test_deposit_forfeit_and_expense(client, accounts):
 
 
 def test_receipt_bot_and_bank_matching(client, accounts):
+    assert client.put("/api/plugins/messaging_receipts", json={"enabled": True}).status_code == 200  # off on a new install
     sender = "+989121112233"
     receipt_text = "کارت به کارت موفق\nمبلغ: 3,000,000 ریال\nشماره پیگیری: 555666\n1405/07/11 10:20"
     r = client.post("/api/plugins/messaging_receipts/simulate", json={"channel": "whatsapp", "sender": sender, "text": receipt_text}).json()

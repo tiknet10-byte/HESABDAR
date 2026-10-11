@@ -15,8 +15,13 @@ Signed webhooks use HMAC-SHA256 of the raw body with `HESABDAR_WEBHOOK_SECRET`
 | Channel | Endpoint |
 |---|---|
 | SMS (forwarder app) | `POST /api/plugins/messaging_receipts/webhook/sms` (signed) `{"sender","text","image_base64?"}` — response contains `replies` for the app to send back |
-| WhatsApp Business Cloud API | verify `GET …/webhook/whatsapp`, messages `POST …/webhook/whatsapp`; set verify token, access token and phone-number id in plugin settings |
-| Instagram Messaging API | `POST …/webhook/instagram`; set the page access token |
+| WhatsApp Business Cloud API | verify `GET …/webhook/whatsapp`, messages `POST …/webhook/whatsapp`; set verify token, access token, phone-number id **and the App Secret** of your Meta app in plugin settings |
+| Instagram Messaging API | `POST …/webhook/instagram`; set the page access token **and the App Secret** |
+
+The receipts plugin (messaging_receipts) starts **turned off** on a new install. Every WhatsApp/Instagram message must
+carry Meta's `X-Hub-Signature-256` made with the App Secret; without the secret (or with a wrong signature) the
+webhook refuses it (401). A receipt from a chat books a deposit by itself only when the bank shows the same amount
+and the same tracking number; an amount+time-only match waits for a person to press «ثبت».
 | Manual / testing | Reconciliation page → *Customer message* (`/simulate`) |
 
 Bot flow: receipt arrives → parsed (text rules or Claude vision) → matched against bank transactions.

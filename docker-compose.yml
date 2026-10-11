@@ -11,6 +11,8 @@ services:
       HESABDAR_BACKUP_KEY: ${HESABDAR_BACKUP_KEY:?set a backup passphrase in .env}
       HESABDAR_WEBHOOK_SECRET: ${HESABDAR_WEBHOOK_SECRET:?set a webhook secret in .env}
       HESABDAR_CORS_ORIGINS: '["https://your-domain.example"]'
+      # names the server may be opened with (besides localhost and IP addresses); others get 400 (DNS-rebinding guard)
+      HESABDAR_ALLOWED_HOSTS: your-domain.example
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - hesabdar-data:/app/backend/data
