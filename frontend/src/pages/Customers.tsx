@@ -203,9 +203,10 @@ function CustomerView({ id }: { id: number }) {
       )}
       {data.deposits.length > 0 && (
         <div>
-          <div className="mb-2 font-bold">بیعانه‌ها</div>
+          <div className="mb-2 font-bold">بیعانه‌ها و اعتبار</div>
           {data.deposits.map((d: any) => (
-            <div key={d.id} className="flex justify-between py-1"><span className="muted num">{jdatetime(d.received_at)}</span><span className="flex gap-2"><span className="num">{money(d.amount)}</span><Badge status={d.status} /></span></div>
+            <div key={d.id} className="flex justify-between py-1"><span className="muted num">{jdatetime(d.received_at)}</span><span className="flex gap-2"><span className="num">{money(d.amount)}</span>
+              {d.kind === "credit" && <span className="badge bg-sky-500/15 text-sky-700 dark:text-sky-300" title="پول مشتری نزد ما؛ برای هر خریدی قابل استفاده است">اعتبار</span>}<Badge status={d.status} /></span></div>
           ))}
         </div>
       )}

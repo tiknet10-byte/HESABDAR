@@ -244,6 +244,7 @@ function DepositView({ id, onChange }: { id: number; onChange: () => void }) {
         </div>
         <div className="flex flex-col items-end gap-1">
           <Badge status={d.status} />
+          {d.kind === "credit" && <span className="badge mr-1 bg-sky-500/15 text-sky-700 dark:text-sky-300" title="پول مشتری نزد ما (مثلاً ماندهٔ بستانکار تیزپرداز)؛ برای هر خریدی قابل استفاده است و سوخت نمی‌شود">اعتبار مشتری</span>}
           {d.source === "import" && <span className="badge bg-sky-500/10 text-sky-600 dark:text-sky-300">انتقالی از سیستم قبلی</span>}
         </div>
       </div>
@@ -319,7 +320,7 @@ function DepositView({ id, onChange }: { id: number; onChange: () => void }) {
         <button className="btn btn-sm" onClick={() => setEdit(!edit)}><Pencil size={14} />ویرایش جزئیات</button>
         {d.status === "held" && can(user, "finance") && <>
           <button className="btn btn-sm" onClick={() => setRefund(!refund)}><Undo2 size={14} />استرداد به مشتری</button>
-          <button className="btn btn-sm text-rose-600" onClick={() => close("forfeit")}><Flame size={14} />سوخت (عدم مراجعه)</button>
+          {d.kind !== "credit" && <button className="btn btn-sm text-rose-600" onClick={() => close("forfeit")}><Flame size={14} />سوخت (عدم مراجعه)</button>}
         </>}
       </div>
       {refund && (
@@ -419,7 +420,7 @@ export default function Deposits() {
                         {d.overdue && <span className="badge bg-rose-500/15 text-rose-600">گذشته</span>}
                       </> : d.status === "held" ? <span className="badge bg-amber-500/15 text-amber-700 dark:text-amber-300">بدون نوبت</span> : <span className="muted">—</span>}
                     </td>
-                    <td><Badge status={d.status} /></td>
+                    <td><Badge status={d.status} />{d.kind === "credit" && <span className="badge mr-1 bg-sky-500/15 text-[10px] text-sky-700 dark:text-sky-300">اعتبار</span>}</td>
                   </tr>
                 ))}
               </tbody>

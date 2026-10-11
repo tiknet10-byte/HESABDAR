@@ -365,7 +365,7 @@ def _dep(d: Deposit, name: str | None = None, db: Session | None = None) -> dict
            "payment_account_id": d.payment_account_id, "service_id": d.service_id, "appointment_id": d.appointment_id,
            "received_at": d.received_at.isoformat(timespec="minutes"), "reference": d.reference, "source": d.source,
            "applied_invoice_id": d.applied_invoice_id, "service_guess": d.service_guess, "notes": d.notes,
-           "staff_id": d.staff_id}
+           "staff_id": d.staff_id, "kind": d.kind or "deposit"}
     if db is not None:
         svc = db.get(Service, d.service_id) if d.service_id else None
         person = db.get(Staff, d.staff_id) if d.staff_id else None
@@ -444,7 +444,7 @@ def deposits_search(q: str = "", status: str = "held", sort: str = "received_des
     items = []
     for d, name, code, mobile, at, astatus, unknown in rows:
         items.append({"id": d.id, "customer_id": d.customer_id, "customer": name, "code": code, "mobile": mobile, "amount": d.amount,
-                      "status": d.status, "received_at": d.received_at.isoformat(timespec="minutes"), "reference": d.reference,
+                      "kind": d.kind or "deposit", "status": d.status, "received_at": d.received_at.isoformat(timespec="minutes"), "reference": d.reference,
                       "service_id": d.service_id, "service": names["service"].get(d.service_id), "line": line_of.get(d.service_id),
                       "staff_id": d.staff_id, "staff": names["staff"].get(d.staff_id), "account": names["account"].get(d.payment_account_id),
                       "appointment_id": d.appointment_id, "appointment_at": at.isoformat(timespec="minutes") if at else None,

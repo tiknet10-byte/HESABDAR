@@ -270,7 +270,7 @@ def get_customer(cid: int, db: Session = Depends(get_db), _=Depends(require("rea
         "invoices": [{"id": i.id, "number": i.number, "issued_at": i.issued_at.isoformat(), "total": i.total, "paid": i.paid,
                       "status": i.status, "items": [it.description for it in i.items]} for i in invoices],
         "deposits": [{"id": d.id, "amount": d.amount, "status": d.status, "received_at": d.received_at.isoformat(),
-                      "service_id": d.service_id, "source": d.source} for d in deposits],
+                      "service_id": d.service_id, "source": d.source, "kind": d.kind or "deposit"} for d in deposits],
         "payments": [{"id": p.id, "amount": p.amount, "paid_at": p.paid_at.isoformat(), "account_id": p.payment_account_id} for p in payments],
         "appointments": [{"id": a.id, "start_at": a.start_at.isoformat(), "status": a.status, "service_id": a.service_id} for a in appts],
         "history": sorted(_service_history(db, invoices, appts) + _trade_history(db, cid), key=lambda x: x["date"], reverse=True),

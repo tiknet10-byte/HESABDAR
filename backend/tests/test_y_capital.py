@@ -234,3 +234,86 @@ def test_capital_is_management_only(client):
     c.headers["Authorization"] = "Bearer " + c.post("/api/auth/login", json={"username": "acc_cap", "password": "Account123"}).json()["access_token"]
     assert c.get("/api/capital/position").status_code == 403
     assert c.post("/api/capital/moves", json={"kind": "withdraw", "amount": 1, "payment_account_id": 1}).status_code == 403
+
+
+def test_customer_credit_pays_products_and_is_never_forfeited(client, accounts):
+    from app.core.db import SessionLocal
+    from app.models import Deposit
+    from app.services import accounting
+
+    cash = accounts["صندوق نقدی"]
+    prod = client.post("/api/products", json={"name": "کرم اعتبار تست", "sale_price": 1_000_000}).json()
+    inv = client.post("/api/invoices", json={"customer_name": "اعتبار دار", "customer_mobile": "09159990006",
+                                             "items": [{"product_id": prod["id"], "quantity": 2}],
+                                             "payments": [{"payment_account_id": cash, "amount": 2_000_000}]}).json()
+    # voided, money kept for the customer: a credit (not a service deposit)
+    assert client.post(f"/api/invoices/{inv['id']}/void?payments=deposit").status_code == 200
+    credit = client.get(f"/api/deposits?customer_id={inv['customer_id']}&status=held").json()[0]
+    assert credit["kind"] == "credit" and credit["amount"] == 2_000_000
+    assert client.post(f"/api/deposits/{credit['id']}/close", json={"action": "forfeit"}).status_code == 400
+    # it pays a products-only invoice
+    inv2 = client.post("/api/invoices", json={"customer_id": inv["customer_id"], "deposit_ids": [credit["id"]],
+                                              "items": [{"product_id": prod["id"], "quantity": 1, "unit_price": 1_500_000}]})
+    assert inv2.status_code == 200, inv2.text
+    assert inv2.json()["paid"] == 1_500_000 and inv2.json()["status"] == "paid"
+    left = client.get(f"/api/deposits?customer_id={inv['customer_id']}&status=held").json()
+    assert [(d["amount"], d["kind"]) for d in left] == [(500_000, "credit")]
+    tb(client)
+    # balances brought over from Tizpardaz (product software) become credits at start
+    with SessionLocal() as db:
+        c = db.get(Deposit, credit["id"])
+        d = Deposit(customer_id=c.customer_id, amount=10, payment_account_id=cash, source="import", notes="ماندهٔ بستانکار تیزپرداز (کد 9)")
+        db.add(d)
+        db.commit()
+        assert accounting.classify_credits(db) >= 1
+        db.commit()
+        db.expire_all()
+        assert db.get(Deposit, d.id).kind == "credit"
+        db.delete(db.get(Deposit, d.id))
+        db.commit()
+
+
+def test_two_requests_cannot_pay_or_void_twice(client, accounts, services):
+    """Two people (or a double click) act on the same invoice with stale data: only the first one is booked."""
+    import pytest
+
+    from app.core.db import SessionLocal
+    from app.models import Deposit, Invoice, PaymentAccount
+    from app.services import accounting
+
+    cash = accounts["صندوق نقدی"]
+    svc = services["کاشت ناخن"]
+    inv = client.post("/api/invoices", json={"customer_name": "دوبار کلیک", "customer_mobile": "09159990007",
+                                             "items": [{"service_id": svc["id"], "unit_price": 1_000_000}]}).json()
+    a, b = SessionLocal(), SessionLocal()
+    try:
+        ia, ib = a.get(Invoice, inv["id"]), b.get(Invoice, inv["id"])  # both loaded "unpaid"
+        pa_a, pa_b = a.get(PaymentAccount, cash), b.get(PaymentAccount, cash)
+        accounting.record_payment(a, payment_account=pa_a, amount=1_000_000, invoice=ia)
+        a.commit()
+        with pytest.raises(accounting.AccountingError):
+            accounting.record_payment(b, payment_account=pa_b, amount=1_000_000, invoice=ib)
+        b.rollback()
+        # void twice with stale objects: the second one is refused
+        ia, ib = a.get(Invoice, inv["id"]), b.get(Invoice, inv["id"])
+        a.refresh(ia), b.refresh(ib)
+        accounting.void_invoice(a, ia, payments="refund")
+        a.commit()
+        with pytest.raises(accounting.AccountingError):
+            accounting.void_invoice(b, ib, payments="refund")
+        b.rollback()
+        # a deposit refunded twice
+        dep = client.post("/api/deposits", json={"customer_name": "دوبار کلیک", "customer_mobile": "09159990007", "amount": 300_000,
+                                                 "payment_account_id": cash}).json()
+        da, db_ = a.get(Deposit, dep["id"]), b.get(Deposit, dep["id"])
+        accounting.close_deposit(a, da, "refund")
+        a.commit()
+        with pytest.raises(accounting.AccountingError):
+            accounting.close_deposit(b, db_, "refund")
+        b.rollback()
+    finally:
+        a.close()
+        b.close()
+    full = client.get(f"/api/invoices/{inv['id']}").json()
+    assert full["status"] == "void" and sum(p["amount"] for p in full["payments"]) == 0  # paid once, refunded once
+    tb(client)

@@ -285,14 +285,16 @@ def record_deposit(db: Session, *, customer: Customer, amount: int, payment_acco
                    received_at: datetime | None = None, reference: str | None = None, service_id: int | None = None,
                    staff_id: int | None = None,
                    appointment_id: int | None = None, source: str = "manual", notes: str = "",
-                   service_guess: dict | None = None, user=None) -> Deposit:
+                   service_guess: dict | None = None, kind: str | None = None, user=None) -> Deposit:
     if amount <= 0:
         raise AccountingError("مبلغ بیعانه باید مثبت باشد")
+    if source == "woocommerce":
+        kind = "credit"  # website money (e.g. a partial refund) is never a service deposit
     ensure_not_future(received_at, "تاریخ دریافت بیعانه")
     svc = db.get(Service, service_id) if service_id else None
     dep = Deposit(customer_id=customer.id, amount=amount, payment_account_id=payment_account.id,
                   received_at=received_at or local_now(), reference=reference, service_id=service_id,
-                  appointment_id=appointment_id, source=source, notes=notes, service_guess=service_guess or {},
+                  appointment_id=appointment_id, source=source, notes=notes, service_guess=service_guess or {}, kind=kind,
                   staff_id=default_staff_id(db, service_id, staff_id))
     db.add(dep)
     db.flush()
@@ -310,6 +312,8 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
     """action: refund (money returned) or forfeit (customer no-show, deposit becomes income). at: when (default now)."""
     if action not in ("refund", "forfeit"):
         raise AccountingError("unknown action")
+    if action == "forfeit" and is_credit(dep):
+        raise AccountingError("این مبلغ اعتبار مشتری است (نه بیعانهٔ نوبت) و سوخت نمی‌شود؛ فقط می‌شود آن را پس داد یا در خرید بعدی استفاده کرد")
     if dep.status != "held" or not _claim(db, dep, "held", "refunded" if action == "refund" else "forfeited"):
         raise AccountingError("این بیعانه قبلاً تسویه شده است")
     if action == "refund":
@@ -333,6 +337,24 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
     dep.closed_at = at or local_now()
     audit(db, f"deposit.{action}", "deposit", dep.id, {"amount": dep.amount}, user=user)
     return dep
+
+
+def is_credit(dep: Deposit) -> bool:
+    """A customer credit (اعتبار), not a service deposit (بیعانه): pays anything and is never forfeited."""
+    return dep.kind == "credit"
+
+
+def classify_credits(db: Session) -> int:
+    """Open money kept for customers that is not a service deposit becomes a credit (once, at start): balances
+    brought over from Tizpardaz (product software), money of a voided invoice kept for the customer, website refunds."""
+    from sqlalchemy import or_, update
+
+    n = db.execute(update(Deposit).where(Deposit.kind.is_(None), or_(
+        Deposit.source.in_(("void_credit", "woocommerce")),
+        (Deposit.source == "import") & Deposit.notes.like("%تیزپرداز%"))).values(kind="credit")
+        .execution_options(synchronize_session=False)).rowcount or 0
+    db.flush()
+    return n
 
 
 def _claim(db: Session, obj, old: str, new: str) -> bool:  # noqa: ANN001
@@ -566,25 +588,29 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     deposit_q = select(Deposit).where(Deposit.customer_id == customer.id, Deposit.status == "held")
     if apply_deposit_ids:
         deposit_q = deposit_q.where(Deposit.id.in_(apply_deposit_ids))
+    # A customer CREDIT (اعتبار: money of theirs kept with us, e.g. a product credit brought over) pays anything.
     room = sum(i.net_amount for i in inv.items if not i.product_id)
-    if apply_deposit_ids and room <= 0:
-        raise AccountingError("بیعانه فقط برای خدمات است؛ این فاکتور خدمتی ندارد. تیک بیعانه را بردارید (بیعانه برای مشتری باز می‌ماند).")
     if apply_deposit_ids or apply_all_deposits:
-        for dep in list(db.scalars(deposit_q.order_by(Deposit.received_at, Deposit.id))):
-            due = min(inv.total - inv.paid, room)
+        chosen = list(db.scalars(deposit_q))
+        if apply_deposit_ids and room <= 0 and chosen and not any(is_credit(d) for d in chosen):
+            raise AccountingError("بیعانه فقط برای خدمات است؛ این فاکتور خدمتی ندارد. تیک بیعانه را بردارید (بیعانه برای مشتری باز می‌ماند).")
+        # service deposits first (they can only pay the services), then credits (they can pay the rest)
+        for dep in sorted(chosen, key=lambda d: (is_credit(d), d.received_at, d.id)):
+            due = inv.total - inv.paid if is_credit(dep) else min(inv.total - inv.paid, room)
             if due <= 0:
-                break
+                continue
             if not _claim(db, dep, "held", "applied"):
                 continue  # used a moment ago by another request
             if dep.amount > due:
                 # split: the remainder stays as a held deposit of the same service / appointment / staff member
                 remainder = Deposit(customer_id=dep.customer_id, amount=dep.amount - due, payment_account_id=dep.payment_account_id,
-                                    received_at=dep.received_at, reference=dep.reference, source=dep.source,
+                                    received_at=dep.received_at, reference=dep.reference, source=dep.source, kind=dep.kind,
                                     service_id=dep.service_id, appointment_id=dep.appointment_id, staff_id=dep.staff_id,
                                     service_guess=dep.service_guess or {}, notes=f"باقیمانده بیعانه #{dep.id}")
                 dep.amount = due
                 db.add(remainder)
-            room -= dep.amount
+            if not is_credit(dep):
+                room -= dep.amount
             post(db, f"تسویه بیعانه با فاکتور {inv.number}", [
                 Leg(account(db, DEPOSITS), debit=dep.amount, customer_id=customer.id),
                 Leg(account(db, AR), credit=dep.amount, customer_id=customer.id),
@@ -704,7 +730,7 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payment
             ], "payment", back.id, at=when)
         else:
             credit = Deposit(customer_id=inv.customer_id, amount=pay.amount, payment_account_id=pay.payment_account_id,
-                             received_at=pay.paid_at, reference=pay.reference, source="void_credit",
+                             received_at=pay.paid_at, reference=pay.reference, source="void_credit", kind="credit",
                              notes=f"وجه فاکتور باطل‌شده {inv.number}")
             db.add(credit)
             db.flush()

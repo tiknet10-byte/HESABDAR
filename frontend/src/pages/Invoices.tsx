@@ -114,6 +114,8 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   const invoiced = new Set(items.map((i) => i.service_id).filter(Boolean));
   const depAppt = (d: any) => appts.find((a) => a.id === d.appointment_id);
   const depDefault = (d: any) => {
+    // a service deposit pays only services: not ticked when the invoice has none (a customer credit pays anything)
+    if (d.kind !== "credit" && !items.some((i) => !i.product_id && (i.service_id || i.description))) return false;
     const a = depAppt(d);
     if (a) return doneIds.includes(a.id);
     return d.service_id ? invoiced.has(d.service_id) : true;
@@ -132,10 +134,11 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
   // deposits pay only for services (never for products); the rest is due, per line
   const billed = items.filter((i) => i.service_id || i.product_id || i.description);
   const dues = splitDue(billed.map((i) => ({ key: groupOf(i), gross: i.unit_price * i.quantity })), discount,
-    selected.map((d) => ({ amount: d.amount, group: d.service_id ? `line:${lineOf(d.service_id)}` : undefined })));
+    selected.map((d) => ({ amount: d.amount, credit: d.kind === "credit", group: d.service_id ? `line:${lineOf(d.service_id)}` : undefined })));
   const due = Object.values(dues).reduce((s, x) => s + x, 0);
   const depositUsed = total - due;
   const servicesNet = billed.some((i) => !i.product_id);
+  const creditSum = selected.filter((d) => d.kind === "credit").reduce((s, d) => s + d.amount, 0);
   const groupLabel = (key: string) => key === "products" ? "فروش محصولات" : key === "other" ? "سایر"
     : services.find((x) => `line:${x.line_id}` === key)?.line ?? "لاین";
   const groupAccounts = (key: string): number[] => {
@@ -294,7 +297,7 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
       </div>
       {check.held_deposits.length > 0 && (
         <div className="space-y-2 rounded-2xl bg-emerald-500/10 p-3 text-sm">
-          <div className="font-bold">بیعانه‌های باز این مشتری</div>
+          <div className="font-bold">بیعانه‌ها و اعتبار باز این مشتری</div>
           <div className="muted text-xs">بیعانهٔ هر نوبت فقط وقتی کسر می‌شود که همان نوبت «انجام شد» باشد؛ بیعانهٔ نوبت‌های حفظ‌شده برای خودشان می‌ماند. در صورت نیاز دستی تغییر دهید.</div>
           {check.held_deposits.map((d) => {
             const a = depAppt(d);
@@ -304,7 +307,8 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
               <input type="checkbox" checked={isPicked(d)} onChange={(e) => setDepOverride((o) => ({ ...o, [d.id]: e.target.checked }))} />
               <span className="num font-bold">{money(d.amount)}</span>
               <span className="muted text-xs">دریافت: {formatJ(d.received_at)}</span>
-              <span className="text-xs">خدمت: <b>{d.service ?? "نامشخص"}</b></span>
+              {d.kind === "credit" ? <span className="badge bg-sky-500/15 text-sky-700 dark:text-sky-300" title="پول مشتری نزد ما؛ برای هر خریدی (خدمت یا محصول) قابل استفاده است">اعتبار مشتری</span>
+                : <span className="text-xs">خدمت: <b>{d.service ?? "نامشخص"}</b></span>}
               {d.appointment_at && <span className="text-xs text-violet-600 dark:text-violet-300">نوبت: {formatJ(d.appointment_at)}</span>}
               {a && <span className={`badge ${kept ? "bg-violet-500/10 text-violet-600 dark:text-violet-300" : "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"}`}>{kept ? "نوبتش حفظ می‌شود" : "نوبتش انجام شد"}</span>}
               {kept && isPicked(d) && <span className="w-full text-xs font-semibold text-amber-600">⚠ این بیعانه برای نوبتی است که حفظ می‌شود؛ اگر کسر شود، آن نوبت بدون بیعانه می‌ماند.</span>}
@@ -357,8 +361,8 @@ export function InvoiceForm({ onDone, preset, appointmentId }: { onDone: () => v
       <div className="rounded-2xl p-4 text-sm" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
         <div className="flex justify-between"><span className="muted">جمع خدمات و محصولات</span><span className="num">{money(subtotal)}</span></div>
         {discount > 0 && <div className="flex justify-between"><span className="muted">تخفیف</span><span className="num">− {money(discount)}</span></div>}
-        {heldSum > 0 && <div className="flex justify-between"><span className="muted">بیعانه (فقط از خدمات کسر می‌شود)</span><span className="num">− {money(depositUsed)}</span></div>}
-        {heldSum > depositUsed && <div className="text-xs text-amber-600">{servicesNet ? `از بیعانه‌ها ${money(heldSum - depositUsed)} بیشتر از مبلغ خدمات است و برای مشتری باز می‌ماند.` : "این فاکتور خدمتی ندارد؛ بیعانه فقط برای خدمات است و برای مشتری باز می‌ماند."}</div>}
+        {heldSum > 0 && <div className="flex justify-between"><span className="muted">{creditSum === heldSum ? "اعتبار مشتری" : creditSum ? "بیعانه و اعتبار مشتری" : "بیعانه (فقط از خدمات کسر می‌شود)"}</span><span className="num">− {money(depositUsed)}</span></div>}
+        {heldSum > depositUsed && <div className="text-xs text-amber-600">{servicesNet || creditSum ? `${money(heldSum - depositUsed)} از بیعانه/اعتبار استفاده نشد و برای مشتری باز می‌ماند${creditSum < heldSum ? " (بیعانه فقط مبلغ خدمات را می‌پردازد)" : ""}.` : "این فاکتور خدمتی ندارد؛ بیعانه فقط برای خدمات است و برای مشتری باز می‌ماند."}</div>}
         <div className="mt-2 flex justify-between text-base font-extrabold"><span>قابل پرداخت</span><span className="num gradient-text">{money(due)}</span></div>
         {paid !== due && <div className="mt-1 flex justify-between text-amber-600"><span>مانده پس از دریافت</span><span className="num">{money(due - paid)}</span></div>}
       </div>

@@ -55,6 +55,9 @@ def init_db() -> None:
         codes.assign_missing(db)  # every service line and service has a code
         backfill_deposit_closures(db)  # refund date/account of deposits refunded before it was recorded
         reclass_forfeits(db)  # forfeited deposits booked before they were income of their own line
+        from .services.accounting import classify_credits
+
+        classify_credits(db)  # customers' money kept with us that is not a service deposit: a credit (pays anything)
         from .services import inventory
 
         inventory.ensure_chart(db)  # inventory, supplier payables, product revenue, cost of goods sold

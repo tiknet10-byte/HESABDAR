@@ -19,7 +19,7 @@ ROLES = ("owner", "admin", "accountant", "receptionist", "staff", "ai_agent")
 PERMISSIONS: dict[str, set[str]] = {
     "read": {"owner", "admin", "accountant", "receptionist", "staff", "ai_agent"},
     "write": {"owner", "admin", "accountant", "receptionist", "ai_agent"},
-    "finance": {"owner", "admin", "accountant", "ai_agent"},
+    "finance": {"owner", "admin", "accountant"},  # moving money (refunds, expenses, payouts): never an AI login
     "reports": {"owner", "admin", "accountant", "ai_agent"},
     "settings": {"owner", "admin"},
     "void": {"owner", "admin"},  # cancelling an invoice: management only

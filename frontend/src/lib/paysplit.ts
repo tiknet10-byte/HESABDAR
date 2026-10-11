@@ -31,17 +31,18 @@ const sum = (xs: number[]) => xs.reduce((s, x) => s + x, 0);
 
 /** items: one entry per invoice item, in the invoice's order (keys repeat for items of the same line).
  *  Returns what is still due per group after the discount and the deposits. */
-export function splitDue(items: Group[], discount: number, deposits: { amount: number; group?: string }[]): Record<string, number> {
+export function splitDue(items: Group[], discount: number, deposits: { amount: number; group?: string; credit?: boolean }[]): Record<string, number> {
   const gross = items.map((g) => Math.max(0, Math.round(g.gross)));
   const disc = share(Math.min(Math.max(0, discount), sum(gross)), gross);
   const net: Record<string, number> = {};
   items.forEach((g, i) => (net[g.key] = (net[g.key] ?? 0) + gross[i] - disc[i]));
   const keys = Object.keys(net);
-  const room = keys.map((k) => (k === NO_DEPOSIT ? 0 : net[k])); // what deposits may pay
-  let applied = Math.min(sum(deposits.map((d) => Math.max(0, d.amount))), sum(room));
+  const room = keys.map((k) => (k === NO_DEPOSIT ? 0 : net[k])); // what service deposits may pay
+  const service = deposits.filter((d) => !d.credit);
+  let applied = Math.min(sum(service.map((d) => Math.max(0, d.amount))), sum(room));
   const dep = keys.map(() => 0);
   // deposits that belong to a line on this invoice go to that line first
-  for (const d of deposits) {
+  for (const d of service) {
     const i = keys.indexOf(d.group ?? "");
     if (i < 0 || applied <= 0) continue;
     const take = Math.min(Math.max(0, d.amount), room[i] - dep[i], applied);
@@ -50,5 +51,9 @@ export function splitDue(items: Group[], discount: number, deposits: { amount: n
   }
   // the rest of the deposits: over the services, proportionally to what each still has to pay
   if (applied > 0) share(applied, room.map((r, i) => r - dep[i])).forEach((x, i) => (dep[i] += x));
+  // a customer credit (اعتبار) pays anything that is still due, products included (as the server does)
+  const left = keys.map((k, i) => net[k] - dep[i]);
+  const credit = Math.min(sum(deposits.filter((d) => d.credit).map((d) => Math.max(0, d.amount))), sum(left));
+  if (credit > 0) share(credit, left).forEach((x, i) => (dep[i] += x));
   return Object.fromEntries(keys.map((k, i) => [k, net[k] - dep[i]]));
 }

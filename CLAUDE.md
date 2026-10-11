@@ -44,11 +44,19 @@ and how to use it. Commit messages end with the attribution lines the session as
 ## Rules of the money (do not break)
 * All amounts are **integer Rial**; the UI shows Toman (`money()`, `MoneyInput`). Dates are shown in Jalali.
 * Every operation posts a **balanced journal entry** (`services/accounting.post`). Chart: 1100 cash/POS/card/bank
-  (one sub-account each), 1200 receivables, 1300 inventory, 2100 customer deposits, 2200 staff payable,
-  2300 supplier payables, 3100 equity, 3200 opening balances, 41xx revenue per service line, 4200 product sales,
-  4800 forfeited deposits, 5100 expenses, 5200 staff commission, 5300 cash difference, 5400 COGS, 5500 shrinkage.
+  (one sub-account each), 1200 receivables, 1300 inventory, 1400 gold/coins/currency (one 14xx each),
+  2100 customer deposits, 2200 staff payable, 2300 supplier payables, 3100 owner's capital, 3200 opening balances,
+  41xx revenue per service line, 4200 product sales, 48xx forfeited deposits per service line (4800 = line unknown),
+  4900 gain/loss on selling gold/currency, 5100 expenses, 5200 staff commission, 5300 cash difference, 5400 COGS,
+  5500 shrinkage. Entry table: `docs/ARCHITECTURE.md`.
+* Deposits (بیعانه) pay **only services** (capped at the services' net in `issue_invoice`; `paysplit.ts` the same);
+  `Deposit.kind = "credit"` (اعتبار: Tizpardaz balances, money of a voided invoice kept, website refunds) pays anything
+  and is never forfeited. A forfeited deposit is income of its service line (`deposit_line_id`, `forfeit_account`).
+* Profit everywhere = the ledger (`capital.profit_breakdown`); a report figure must agree with the ledger.
+* State changes that must happen once (pay, void, deposit refund/forfeit/use, supplier payment, capital voids) go
+  through `accounting._claim` / atomic `paid` updates (double clicks, two users at once).
 * Money dates can't be in the future (`ensure_not_future`). Nothing is deleted: invoices are **voided** (reversing
-  entries); a void either cancels the payment on its own date ("cancel": it never happened) or refunds it today.
+  entries); a void either cancels everything on the invoice's own date ("cancel": it never happened) or refunds today.
 * Exactness matters to the owner: integer math, largest-remainder splits (`inventory._share`, `lib/paysplit.ts`),
   tests that check totals to the Rial.
 * Schema changes: new **nullable** columns are added automatically at start (`main._add_missing_columns`); new tables
@@ -58,6 +66,11 @@ and how to use it. Commit messages end with the attribution lines the session as
 
 ## Features and where they live
 * Deposits (بیعانه) + appointments: refunded deposit cancels its appointment; appointments easy to change / delete.
+* Owner's capital and worth (`services/capital.py`, `api/capital.py`, page «سرمایه و دارایی‌ها» `pages/Capital.tsx`,
+  permission `capital` = owner/admin): put money in / take it out (3100), owner paid a supplier from own pocket,
+  a person's credit (e.g. a customer named «سرمایه») turned into capital (suggested, user confirms), gold / coins /
+  dollars (`Holding`, `HoldingMove`; qty in thousandths, average cost, market price only for display, only the last
+  move can be voided), one-glance position: assets, liabilities, net worth, and worth at start + in - out + profit.
 * Invoices: services + products in one invoice; channel in_person / online; payments split per service line onto
   that line's default POS/card (`services/routing.py`, Settings > cards). Deposits and products have their own.
 * Products (`services/inventory.py`): system code (1..), website SKU, purchases from suppliers (discount/shipping
@@ -86,7 +99,7 @@ and how to use it. Commit messages end with the attribution lines the session as
   +; stock count = exact) and sent to the product with the same SKU. Tested against `backend/tests/fake_woo.py`
   (in-memory WooCommerce); **not yet tried on the real site**.
 
-## Status (1.19.0)
+## Status (1.20.0)
 * GitHub: `tiknet10-byte/HESABDAR`, branch `claude/beauty-salon-accounting-system-9zzoep` holds the full history
   (pushed after the Claude GitHub App was installed). Work on that branch and push to it.
 * Next possible work: connect the real website and fix what differs (currency IRT/IRR, security plugins blocking
