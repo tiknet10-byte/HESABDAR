@@ -206,6 +206,10 @@ class Deposit(TimestampMixin, Base):
     # when it was refunded / forfeited, and the account the refund was paid from (money going out that day)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     refund_account_id: Mapped[int | None] = mapped_column(ForeignKey("payment_accounts.id"), nullable=True)
+    # None / "deposit": بیعانه, a prepayment for a SERVICE (pays only services, can be forfeited);
+    # "credit": اعتبار, the customer's money kept with us (a product-side credit brought over, money of a voided
+    # invoice kept for them): pays anything, is never forfeited
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class Invoice(TimestampMixin, Base):

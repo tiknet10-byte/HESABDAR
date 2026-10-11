@@ -556,3 +556,12 @@ def void_purchase(db: Session, pur: Purchase, reason: str = "", user=None) -> Pu
         recost(db, pid)
     audit(db, "purchase.void", "purchase", pur.id, {"reason": reason}, user=user)
     return pur
+
+
+def product_in_use(db: Session, pid: int) -> bool:
+    """The product appears somewhere (stock card, sale, purchase, imported history, website link or queue): it is
+    archived, never deleted, so nothing that points at it breaks."""
+    from ..models import TradeHistory, WooOutbox, WooProduct
+
+    return any(db.scalar(select(m.id).where(m.product_id == pid).limit(1)) is not None
+               for m in (StockMove, InvoiceItem, PurchaseItem, TradeHistory, WooProduct, WooOutbox))
