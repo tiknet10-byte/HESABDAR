@@ -410,17 +410,20 @@ export function InvoiceView({ id, onChange }: { id: number; onChange: () => void
   const [voiding, setVoiding] = useState(false);
   const [payBack, setPayBack] = useState<"cancel" | "refund" | "deposit">("cancel");
   const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false); // one click = one request (no double payment / double void)
   if (!data) return <Loading />;
   const accName = (aid: number) => accounts.find((a) => a.id === aid)?.name ?? aid;
   const cashPaid = data.payments.filter((p: any) => p.amount > 0).reduce((t: number, p: any) => t + p.amount, 0);
   async function doVoid() {
+    if (busy) return;
+    setBusy(true);
     try {
       await api(`/api/invoices/${id}/void?payments=${payBack}&reason=${encodeURIComponent(reason)}`, { method: "POST" });
       toast("فاکتور باطل شد");
       setVoiding(false);
       reload();
       onChange();
-    } catch (e: any) { toast(e.message, "error"); }
+    } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
   }
   return (
     <div className="space-y-4 text-sm">
@@ -459,8 +462,10 @@ export function InvoiceView({ id, onChange }: { id: number; onChange: () => void
             {accounts.filter((a) => a.is_active).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </select>
           <div className="col-span-4"><MoneyInput value={pay.amount || data.due} onChange={(v) => setPay({ ...pay, amount: v })} /></div>
-          <button className="btn btn-primary btn-sm col-span-2" disabled={!pay.payment_account_id} onClick={async () => {
-            try { await api(`/api/invoices/${id}/payments`, { body: { ...pay, amount: pay.amount || data.due } }); toast("دریافت ثبت شد"); reload(); onChange(); } catch (e: any) { toast(e.message, "error"); }
+          <button className="btn btn-primary btn-sm col-span-2" disabled={!pay.payment_account_id || busy} onClick={async () => {
+            setBusy(true);
+            try { await api(`/api/invoices/${id}/payments`, { body: { ...pay, amount: pay.amount || data.due } }); toast("دریافت ثبت شد"); setPay({ payment_account_id: 0, amount: 0 }); reload(); onChange(); }
+            catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
           }}>ثبت</button>
         </div>
       )}
@@ -480,7 +485,7 @@ export function InvoiceView({ id, onChange }: { id: number; onChange: () => void
             )}
             <input className="input" placeholder="دلیل ابطال (اختیاری)" value={reason} onChange={(e) => setReason(e.target.value)} />
             <div className="flex gap-2">
-              <button className="btn btn-danger flex-1" onClick={doVoid}>تأیید ابطال</button>
+              <button className="btn btn-danger flex-1" disabled={busy} onClick={doVoid}>تأیید ابطال</button>
               <button className="btn" onClick={() => setVoiding(false)}>انصراف</button>
             </div>
           </div>

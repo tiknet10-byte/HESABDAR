@@ -50,3 +50,12 @@ def jalali_to_gregorian(jy: int, jm: int, jd: int) -> tuple[int, int, int]:
             break
         gd -= month_days[gm]
     return gy, gm, gd
+
+
+def month_start(d):  # noqa: ANN001, ANN201
+    """The first day (00:00) of the Jalali month that contains datetime/date d, as a datetime."""
+    from datetime import date, datetime
+
+    day = d.date() if isinstance(d, datetime) else d
+    jy, jm, _ = gregorian_to_jalali(day.year, day.month, day.day)
+    return datetime.combine(date(*jalali_to_gregorian(jy, jm, 1)), datetime.min.time())

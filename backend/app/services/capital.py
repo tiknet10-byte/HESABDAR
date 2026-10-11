@@ -110,12 +110,11 @@ def owner_paid_supplier(db: Session, *, purchase: Purchase, amount: int, at: dat
     m = CapitalMove(kind=kind, amount=amount, purchase_id=purchase.id, customer_id=customer_id, at=at or local_now(),
                     notes=notes, user_id=getattr(user, "id", None))
     db.add(m)
-    db.flush()
+    inventory._add_paid(db, purchase, amount)
     sup = db.get(Supplier, purchase.supplier_id) if purchase.supplier_id else None
     post(db, f"{'پرداخت از جیب مدیر' if kind == 'supplier' else 'تبدیل طلب به سرمایه'} - خرید {purchase.number}"
          + (f" - {sup.name}" if sup else ""),
          [Leg(inventory._acc(db, inventory.PAYABLE), debit=amount), Leg(_acc(db, CAPITAL), credit=amount)], "capital", m.id, at=m.at)
-    purchase.paid += amount
     inventory._status(purchase)
     audit(db, f"capital.{kind}", "capital", m.id, {"amount": amount, "purchase": purchase.id}, user=user)
     return m
@@ -163,7 +162,7 @@ def convert(db: Session, *, deposit_ids: list[int] | None = None, purchase_ids: 
     out = {"converted": 0, "amount": 0}
     for did in deposit_ids or []:
         d = db.get(Deposit, int(did))
-        if d is None or d.status != "held":
+        if d is None or d.status != "held" or not accounting._claim(db, d, "held", "capital"):
             raise AccountingError("این بیعانه دیگر باز نیست")
         m = CapitalMove(kind="convert", amount=d.amount, deposit_id=d.id, customer_id=d.customer_id, at=d.received_at,
                         notes=f"بیعانه/طلب #{d.id}", user_id=getattr(user, "id", None))
@@ -194,13 +193,13 @@ def void_move(db: Session, m: CapitalMove, reason: str = "", user=None) -> Capit
     """Undo a capital move entered by mistake: its entry is reversed on its own date (as if it never happened)."""
     from . import inventory
 
-    if m.status == "void":
+    if m.status == "void" or not accounting._claim(db, m, "active", "void"):
         return m
     if m.deposit_id:
         d = db.get(Deposit, m.deposit_id)
-        if d is None or d.status != "capital":
+        if d is None or not accounting._claim(db, d, "capital", "held"):
             raise AccountingError("وضعیت این بیعانه عوض شده است")
-        d.status, d.closed_at = "held", None
+        d.closed_at = None
     if m.purchase_id:
         pur = db.get(Purchase, m.purchase_id)
         if pur.status != "void":
@@ -214,7 +213,7 @@ def void_move(db: Session, m: CapitalMove, reason: str = "", user=None) -> Capit
 
 def void_for_purchase(db: Session, pur: Purchase, user=None) -> None:  # noqa: ANN001
     """A purchase is voided: what the owner paid on it from their own pocket goes back to them (reversed)."""
-    for m in db.scalars(select(CapitalMove).where(CapitalMove.purchase_id == pur.id, CapitalMove.status == "active")):
+    for m in list(db.scalars(select(CapitalMove).where(CapitalMove.purchase_id == pur.id, CapitalMove.status == "active"))):
         _reverse(db, "capital", m.id, f"ابطال {KIND_FA.get(m.kind, m.kind)} (خرید {pur.number} باطل شد)", m.at)
         m.status = "void"
         audit(db, "capital.void", "capital", m.id, {"kind": m.kind, "amount": m.amount, "reason": "purchase void"}, user=user)
@@ -349,6 +348,7 @@ def void_holding_move(db: Session, m: HoldingMove, reason: str = "", user=None) 
     """Only the latest move of a holding can be undone (the average cost of later moves depends on earlier ones)."""
     if m.status == "void":
         return m
+    db.flush()
     last = db.scalar(select(HoldingMove).where(HoldingMove.holding_id == m.holding_id, HoldingMove.status == "active")
                      .order_by(HoldingMove.at.desc(), HoldingMove.id.desc()).limit(1))
     if last is None or last.id != m.id:
@@ -358,8 +358,9 @@ def void_holding_move(db: Session, m: HoldingMove, reason: str = "", user=None) 
         _refresh(db, h)
         if h.qty_m - m.qty_m < 0:
             raise AccountingError("بعد از این ورود، بخشی از آن خارج شده است")
+    if not accounting._claim(db, m, "active", "void"):
+        return m
     _reverse(db, "holding", m.id, f"ابطال {MOVE_FA.get(m.kind, m.kind)} {h.name}", m.at)
-    m.status = "void"
     _refresh(db, h)
     audit(db, "holding.void", "holding", h.id, {"move": m.id, "reason": reason}, user=user)
     return m

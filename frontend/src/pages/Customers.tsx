@@ -52,7 +52,10 @@ function ReceiveDebt({ customer, owed, onDone }: { customer: any; owed: number; 
     .filter((id: number) => accounts.some((a) => a.id === id));
   const [f, setF] = useState({ amount: owed, payment_account_id: 0, reference: "", paid_at: toLocalIso(new Date()) });
   const acc = f.payment_account_id || preferred[0] || accounts[0]?.id || 0;
+  const [busy, setBusy] = useState(false);
   async function save() {
+    if (busy) return;
+    setBusy(true);
     try {
       const r = await api(`/api/customers/${customer.id}/receive`, { body: { ...f, payment_account_id: acc, reference: f.reference || null } });
       const inv = r.paid.filter((p: any) => p.invoice).map((p: any) => p.invoice);
@@ -60,6 +63,8 @@ function ReceiveDebt({ customer, owed, onDone }: { customer: any; owed: number; 
       onDone();
     } catch (e: any) {
       toast(e.message, "error");
+    } finally {
+      setBusy(false);
     }
   }
   return (
@@ -75,7 +80,7 @@ function ReceiveDebt({ customer, owed, onDone }: { customer: any; owed: number; 
         <Field label="تاریخ دریافت"><JalaliPicker pastOnly value={f.paid_at} onChange={(v) => setF({ ...f, paid_at: v })} /></Field>
         <Field label="شمارهٔ پیگیری (اختیاری)"><input className="input num" dir="ltr" value={f.reference} onChange={(e) => setF({ ...f, reference: e.target.value })} /></Field>
       </div>
-      <button className="btn btn-primary w-full" disabled={!f.amount || f.amount > owed || !acc} onClick={save}>ثبت دریافت {money(f.amount)}</button>
+      <button className="btn btn-primary w-full" disabled={!f.amount || f.amount > owed || !acc || busy} onClick={save}>ثبت دریافت {money(f.amount)}</button>
       {f.amount > owed && <div className="text-xs text-rose-600">مبلغ از بدهی بیشتر است؛ مازاد را به‌عنوان بیعانه ثبت کنید.</div>}
     </div>
   );

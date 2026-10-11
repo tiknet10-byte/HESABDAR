@@ -293,7 +293,11 @@ export default function Dashboard() {
             <Stat label="فروش ۳۰ روز" value={compactMoney(m.revenue)} icon={g ? (g.up ? <TrendingUp size={20} /> : <TrendingDown size={20} />) : undefined} tone={g && !g.up ? "pink" : "emerald"}
               hint={<>{g && <b className={g.up ? "text-emerald-600" : "text-rose-600"}>{g.up ? "▲" : "▼"} {faDigits(Math.abs(g.pct))}٪ نسبت به ۳۰ روز قبل · </b>}میانگین هر فاکتور {compactMoney(m.avg_ticket)}</>} />
             <Stat label="سود خالص ۳۰ روز" value={compactMoney(m.net_profit)}
-              hint={m.cogs ? `هزینه‌ها ${compactMoney(m.expenses)} · بهای کالای فروش‌رفته ${compactMoney(m.cogs)}` : `هزینه‌ها ${compactMoney(m.expenses)}`} />
+              hint={m.forfeited ? `شامل ${compactMoney(m.forfeited)} بیعانهٔ سوخت‌شده` : `هزینه‌ها ${compactMoney(m.expenses)}`}
+              help={m.profit?.rows?.length ? <div className="space-y-1">
+                <div>از روی دفاتر: همهٔ درآمدها منهای همهٔ هزینه‌های این ۳۰ روز.</div>
+                {m.profit.rows.map((r: any) => <div key={r.key} className="flex justify-between gap-3"><span>{r.label}</span><span className="num">{compactMoney(r.value)}</span></div>)}
+              </div> : undefined} />
             <Stat label="مشتریان بازگشتی" value={`${num(m.returning_customers)} از ${num(m.customers_served)}`} hint={`${num(m.new_customers)} مشتری جدید`} />
           </div>
 

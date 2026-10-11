@@ -45,7 +45,7 @@ def test_deposit_invoice_payment_flow(client, accounts, services):
     assert client.get(f"/api/customers/{cid}").json()["mobile"] == "09123456789"
 
     inv = client.post("/api/invoices", json={"customer_id": cid, "items": [{"service_id": svc["id"], "unit_price": 9_000_000}],
-                                             "discount": 500_000, "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 6_500_000}]})
+                                             "apply_deposits": True, "discount": 500_000, "payments": [{"payment_account_id": accounts["کارتخوان ملت"], "amount": 6_500_000}]})
     assert inv.status_code == 200, inv.text
     inv = inv.json()
     assert inv["total"] == 8_500_000 and inv["paid"] == 8_500_000 and inv["status"] == "paid"

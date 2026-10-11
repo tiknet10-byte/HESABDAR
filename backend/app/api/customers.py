@@ -365,6 +365,10 @@ def receive_debt(cid: int, body: ReceiveIn, db: Session = Depends(get_db), user=
         if left:
             accounting.record_payment(db, payment_account=pa, amount=left, customer=c, reference=body.reference, paid_at=body.paid_at, user=user)
             paid.append({"invoice": None, "amount": left})
+        db.flush()
+        # checked again after booking (a double click or two people at once must not take more than the debt)
+        if accounting.customer_balance(db, cid)["receivable"] < 0:
+            raise accounting.AccountingError("این بدهی همین الان دریافت شده است؛ صفحه را تازه کنید")
     except accounting.AccountingError as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc

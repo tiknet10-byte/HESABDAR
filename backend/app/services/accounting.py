@@ -308,7 +308,9 @@ def record_deposit(db: Session, *, customer: Customer, amount: int, payment_acco
 def close_deposit(db: Session, dep: Deposit, action: str, refund_account: PaymentAccount | None = None, user=None,
                   at: datetime | None = None) -> Deposit:
     """action: refund (money returned) or forfeit (customer no-show, deposit becomes income). at: when (default now)."""
-    if dep.status != "held":
+    if action not in ("refund", "forfeit"):
+        raise AccountingError("unknown action")
+    if dep.status != "held" or not _claim(db, dep, "held", "refunded" if action == "refund" else "forfeited"):
         raise AccountingError("این بیعانه قبلاً تسویه شده است")
     if action == "refund":
         pa = refund_account or db.get(PaymentAccount, dep.payment_account_id)
@@ -331,6 +333,20 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
     dep.closed_at = at or local_now()
     audit(db, f"deposit.{action}", "deposit", dep.id, {"amount": dep.amount}, user=user)
     return dep
+
+
+def _claim(db: Session, obj, old: str, new: str) -> bool:  # noqa: ANN001
+    """Change a row's status only if it still has the old one (in the database, not just in memory): a double click or
+    two people at once can't refund, forfeit, use or cancel the same thing twice."""
+    from sqlalchemy import update
+
+    db.flush()
+    model = type(obj)
+    done = db.execute(update(model).where(model.id == obj.id, model.status == old).values(status=new)
+                      .execution_options(synchronize_session=False)).rowcount
+    if done:
+        obj.status = new
+    return bool(done)
 
 
 def deposit_line_id(db: Session, dep: Deposit, _seen: set | None = None) -> int | None:
@@ -453,7 +469,10 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
         raise AccountingError("فاکتور بدون آیتم قابل ثبت نیست")
     ensure_not_future(issued_at, "تاریخ فاکتور")
     channel = channel if channel in ("online", "in_person") else None
-    inv = Invoice(number=next_invoice_number(db), customer_id=customer.id, issued_at=issued_at or local_now(),
+    import uuid
+
+    # a temporary unique number; the real one comes from the id once saved (never the same for two invoices)
+    inv = Invoice(number=f"TMP-{uuid.uuid4().hex[:16]}", customer_id=customer.id, issued_at=issued_at or local_now(),
                   discount=discount, source=source, notes=notes, channel=channel)
     line_names: dict[int | str | None, str] = {}
     for it in items:
@@ -496,6 +515,7 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
         raise AccountingError("تخفیف بیشتر از مبلغ فاکتور است")
     db.add(inv)
     db.flush()
+    inv.number = f"INV-{inv.id:06d}"
 
     # the invoice discount is shared over the items in proportion to their amounts (largest remainder, exact to the
     # Rial; the invoice form splits it the same way). Every figure uses these net amounts: revenue per line, staff
@@ -550,10 +570,12 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     if apply_deposit_ids and room <= 0:
         raise AccountingError("بیعانه فقط برای خدمات است؛ این فاکتور خدمتی ندارد. تیک بیعانه را بردارید (بیعانه برای مشتری باز می‌ماند).")
     if apply_deposit_ids or apply_all_deposits:
-        for dep in db.scalars(deposit_q.order_by(Deposit.received_at, Deposit.id)):
+        for dep in list(db.scalars(deposit_q.order_by(Deposit.received_at, Deposit.id))):
             due = min(inv.total - inv.paid, room)
             if due <= 0:
                 break
+            if not _claim(db, dep, "held", "applied"):
+                continue  # used a moment ago by another request
             if dep.amount > due:
                 # split: the remainder stays as a held deposit of the same service / appointment / staff member
                 remainder = Deposit(customer_id=dep.customer_id, amount=dep.amount - due, payment_account_id=dep.payment_account_id,
@@ -603,6 +625,14 @@ def record_payment(db: Session, *, payment_account: PaymentAccount, amount: int,
             raise AccountingError("فاکتور باطل شده است")
         if invoice.paid + amount > invoice.total:
             raise AccountingError("مبلغ پرداخت از مانده فاکتور بیشتر است؛ مازاد را به‌عنوان بیعانه ثبت کنید")
+        # the check again, in the database itself: two requests at once can't both pay the same remainder
+        from sqlalchemy import update
+
+        db.flush()
+        ok = db.execute(update(Invoice).where(Invoice.id == invoice.id, Invoice.status != "void", Invoice.paid + amount <= Invoice.total)
+                        .values(paid=Invoice.paid + amount).execution_options(synchronize_session=False)).rowcount
+        if not ok:
+            raise AccountingError("این فاکتور همین الان تسویه یا باطل شده است؛ صفحه را تازه کنید")
     pay = Payment(invoice_id=invoice.id if invoice else None, customer_id=customer_id,
                   payment_account_id=payment_account.id, amount=amount, reference=reference,
                   paid_at=paid_at or local_now(), source=source)
@@ -613,7 +643,7 @@ def record_payment(db: Session, *, payment_account: PaymentAccount, amount: int,
         Leg(account(db, AR), credit=amount, customer_id=customer_id),
     ], "payment", pay.id, at=pay.paid_at)
     if invoice is not None:
-        invoice.paid += amount
+        db.refresh(invoice, ["paid", "status"])
         _refresh_status(invoice)
     if not _update_only:
         audit(db, "payment.create", "payment", pay.id, {"amount": amount, "invoice": invoice.id if invoice else None}, user=user)
@@ -638,6 +668,8 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payment
         return inv
     if payments not in ("cancel", "refund", "deposit"):
         raise AccountingError("نحوهٔ برگشت وجه نامعتبر است")
+    if not _claim(db, inv, inv.status, "void"):
+        raise AccountingError("این فاکتور همین الان تغییر کرده (پرداخت یا ابطال)؛ صفحه را تازه کنید")
     # "cancel" = the invoice was a mistake: everything is undone on its own date, so that day's (and month's) sales,
     # staff shares and goods sold go back to what they really were. Otherwise it is a return today.
     undo_at = inv.issued_at if payments == "cancel" else None

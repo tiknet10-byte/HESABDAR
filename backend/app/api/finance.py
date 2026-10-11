@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..core.db import get_db
 from ..models import (
     Appointment,
+    AuditLog,
     Customer,
     Deposit,
     Expense,
@@ -267,6 +268,14 @@ def update_appointment(aid: int, status: str, deposits: str = "keep", refund_acc
     was_booked = a.status == "booked"
     a.status = status
     settled = []
+    if status == "booked" and not was_booked:
+        # booked again: the deposits that were kept for the customer when it was cancelled come back to it
+        last = db.scalar(select(AuditLog).where(AuditLog.action == "appointment.status", AuditLog.entity == "appointment",
+                                                AuditLog.entity_id == str(a.id)).order_by(AuditLog.id.desc()).limit(1))
+        for did in ((last.data or {}).get("unlinked") or []) if last else []:
+            d = db.get(Deposit, did)
+            if d is not None and d.status == "held" and d.appointment_id is None and d.customer_id == a.customer_id:
+                d.appointment_id = a.id
     if status in ("cancelled", "no_show"):
         held = list(db.scalars(select(Deposit).where(Deposit.appointment_id == a.id, Deposit.status == "held")))
         if held and deposits != "keep" and not has_permission(user.role, "finance"):
@@ -282,7 +291,9 @@ def update_appointment(aid: int, status: str, deposits: str = "keep", refund_acc
                     db.rollback()
                     raise HTTPException(400, str(exc)) from exc
             settled.append({"id": d.id, "amount": d.amount, "result": deposits})
-    audit(db, "appointment.status", "appointment", a.id, {"status": status, "deposits": deposits if settled else None}, user=user)
+    unlinked = [x["id"] for x in settled if x["result"] == "keep"]
+    audit(db, "appointment.status", "appointment", a.id, {"status": status, "deposits": deposits if settled else None,
+                                                          **({"unlinked": unlinked} if unlinked else {})}, user=user)
     db.commit()
     # a cancelled future appointment frees its time: tell the UI so it can offer it to the waiting (VIP) list
     freed = _freed_slot(db, a, a.start_at) if status == "cancelled" and was_booked else None
@@ -448,9 +459,13 @@ def deposits_search(q: str = "", status: str = "held", sort: str = "received_des
                                   .where(Deposit.status == "held", Appointment.start_at < now)).one()
     noappt_n, noappt_sum = db.execute(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
                                       .where(Deposit.status == "held", Deposit.appointment_id.is_(None))).one()
-    month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # received this (Jalali) month: real money only (not balances brought over, void credits or website refunds)
+    from ..services.jalali import month_start
+    from ..services.reports import REAL_DEPOSIT
+
     month_n, month_sum = db.execute(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
-                                    .where(Deposit.received_at >= month)).one()
+                                    .where(Deposit.received_at >= month_start(now), REAL_DEPOSIT,
+                                           Deposit.source != "woocommerce")).one()
     return {"total": total, "amount": int(amount), "items": items,
             "stats": {"held": [held_n, int(held_sum)], "overdue": [over_n, int(over_sum)], "no_appointment": [noappt_n, int(noappt_sum)],
                       "month": [month_n, int(month_sum)]}}
@@ -505,6 +520,8 @@ def create_deposit(body: DepositIn, db: Session = Depends(get_db), user=Depends(
     pa = _get(db, PaymentAccount, body.payment_account_id, "حساب دریافت")
     guess = [] if body.service_id else learning.guess_service_for_deposit(db, body.amount, c.id, body.notes)
     appointment_id = body.appointment_id
+    if appointment_id and _get(db, Appointment, appointment_id, "نوبت").customer_id != c.id:
+        raise HTTPException(400, "نوبت متعلق به مشتری دیگری است")
     book_at = body.book_at
     service_id = body.service_id
     if not book_at and not appointment_id and service_id and settings_store.get(db, "booking.auto"):
@@ -591,7 +608,7 @@ class InvoiceIn(BaseModel):
     customer_mobile: str | None = None
     items: list[ItemIn]
     discount: int = 0
-    apply_deposits: bool = True
+    apply_deposits: bool = False  # deposits are applied only when asked (the invoice form ticks them)
     deposit_ids: list[int] | None = None
     payments: list[PayIn] = []
     issued_at: datetime | None = None
@@ -694,7 +711,9 @@ def invoices_search(q: str = "", status: str = "", sort: str = "date_desc", star
     # headline numbers (independent of filters)
     now = local_now()
     day = datetime.combine(now.date(), datetime.min.time())
-    month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    from ..services.jalali import month_start
+
+    month = month_start(now)  # the Jalali month, as the owner counts it
     week = day - timedelta(days=(now.weekday() + 2) % 7)  # Saturday
     sums = lambda since: db.execute(select(func.count(Invoice.id), func.coalesce(func.sum(Invoice.total), 0))  # noqa: E731
                                     .where(Invoice.issued_at >= since, Invoice.status != "void")).one()

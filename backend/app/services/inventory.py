@@ -487,6 +487,18 @@ def _status(pur: Purchase) -> None:
         pur.status = "paid" if pur.paid >= pur.total else ("partial" if pur.paid > 0 else "open")
 
 
+def _add_paid(db: Session, pur: Purchase, amount: int) -> None:
+    """pur.paid += amount, checked in the database itself: two payments at once can't pay more than the purchase."""
+    from sqlalchemy import update
+
+    db.flush()
+    ok = db.execute(update(Purchase).where(Purchase.id == pur.id, Purchase.status != "void", Purchase.paid + amount <= Purchase.total)
+                    .values(paid=Purchase.paid + amount).execution_options(synchronize_session=False)).rowcount
+    if not ok:
+        raise AccountingError("این خرید همین الان پرداخت یا باطل شده است؛ صفحه را تازه کنید")
+    db.refresh(pur, ["paid"])
+
+
 def pay_supplier(db: Session, pur: Purchase, pa: PaymentAccount | None, amount: int, paid_at: datetime | None = None,
                  notes: str = "", user=None) -> SupplierPayment:  # noqa: ANN001
     if pa is None:
@@ -496,13 +508,13 @@ def pay_supplier(db: Session, pur: Purchase, pa: PaymentAccount | None, amount: 
     if pur.status == "void":
         raise AccountingError("این خرید باطل شده است")
     ensure_not_future(paid_at, "تاریخ پرداخت")
+    _add_paid(db, pur, amount)
     sp = SupplierPayment(supplier_id=pur.supplier_id, purchase_id=pur.id, payment_account_id=pa.id, amount=amount,
                          paid_at=paid_at or local_now(), notes=notes)
     db.add(sp)
     db.flush()
     post(db, f"پرداخت بابت خرید {pur.number}", [Leg(_acc(db, PAYABLE), debit=amount), Leg(cash_account_for(db, pa), credit=amount)],
          "supplier_payment", sp.id, at=sp.paid_at)
-    pur.paid += amount
     _status(pur)
     audit(db, "purchase.pay", "purchase", pur.id, {"amount": amount, "account": pa.id}, user=user)
     return sp
@@ -513,7 +525,11 @@ def void_purchase(db: Session, pur: Purchase, reason: str = "", user=None) -> Pu
     the debt to the supplier and the payments made for it are reversed."""
     if pur.status == "void":
         return pur
-    for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "purchase", JournalEntry.ref_id == pur.id)):
+    from .accounting import _claim
+
+    if not _claim(db, pur, pur.status, "void"):
+        raise AccountingError("این خرید همین الان تغییر کرده است؛ صفحه را تازه کنید")
+    for e in list(db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "purchase", JournalEntry.ref_id == pur.id))):
         post(db, f"ابطال خرید {pur.number}", [Leg(db.get(LedgerAccount, ln.account_id), debit=ln.credit, credit=ln.debit) for ln in e.lines],
              "purchase_void", pur.id)
     for sp in list(db.scalars(select(SupplierPayment).where(SupplierPayment.purchase_id == pur.id, SupplierPayment.amount > 0))):
