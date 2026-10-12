@@ -45,6 +45,7 @@ class BasePlugin:
     author: str = ""
     category: str = "general"  # integration | ai | reports | operations
     status: str = "stable"  # stable | beta | concept
+    enabled_by_default: bool = True  # on at the first start (a 'concept' plugin never is); False = the owner turns it on
     config_schema: dict = {"type": "object", "properties": {}}
     default_config: dict = {}
     ui: list[dict] = []  # [{"path": "/plugins/x", "title": "...", "icon": "..."}]

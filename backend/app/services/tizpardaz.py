@@ -20,7 +20,7 @@ from collections import defaultdict
 from datetime import datetime, time
 from types import SimpleNamespace
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -30,16 +30,20 @@ from ..models import (
     ImportBatch,
     InvoiceItem,
     JournalEntry,
+    JournalLine,
     PaymentAccount,
     Product,
+    PurchaseItem,
     Service,
     StockMove,
     Supplier,
     TradeDoc,
     TradeHistory,
+    WooOutbox,
+    WooProduct,
     local_now,
 )
-from . import accounting, inventory, settings_store
+from . import accounting, inventory, settings_store, woo_queue
 from .customer_merge import has_records, person_key
 from .legacy_import import ImportProblem, _amount, _key, _text, parse_date, read_table
 from .service_catalog import keys_alike, name_key
@@ -179,9 +183,25 @@ def _spent(db: Session, ids: list[int]) -> dict[int, int]:
     return out
 
 
+def _placeholder(c: Customer | None) -> bool:
+    """A person a journal made from a bare Tizpardaz code («مشتری تیزپرداز 7701») before the customers list came."""
+    return c is not None and c.source == SOURCE and (c.full_name or "").startswith("مشتری تیزپرداز")
+
+
+def _by_tp(db: Session) -> dict[str, Customer]:
+    """Customers by Tizpardaz account code; a merged duplicate's code is kept as «tp:<code>» among the other codes."""
+    out: dict[str, Customer] = {}
+    for c in db.scalars(select(Customer).where(Customer.other_codes.is_not(None))):
+        for x in c.other_codes or []:
+            if str(x).startswith("tp:"):
+                out.setdefault(str(x)[3:], c)
+    out.update({c.tp_code: c for c in db.scalars(select(Customer).where(Customer.tp_code.is_not(None)))})
+    return out
+
+
 def preview_customers(db: Session, rows: list[list[object]], mapping: dict[str, int], unit: str) -> dict:
     idx = _customer_index(db)
-    by_tp = {c.tp_code: c for c in db.scalars(select(Customer).where(Customer.tp_code.is_not(None)))}
+    by_tp = _by_tp(db)
     parsed = []
     for n, r in enumerate(rows, start=1):
         raw = _text(_get(r, mapping, "name"))
@@ -194,6 +214,11 @@ def preview_customers(db: Session, rows: list[list[object]], mapping: dict[str, 
                "debit": debit, "credit": credit, "balance": debit - credit}
         linked = by_tp.get(code) if code else None
         matches = idx.get(person_key(name), [])
+        # the code is held by a placeholder a journal made, but the real person is here too: they are the answer
+        # (the placeholder is offered as well, and gets the real name so it can be merged with them afterwards)
+        placeholder = linked if _placeholder(linked) and any(c.id != linked.id for c in matches) else None
+        if placeholder is not None:
+            linked, matches = None, [c for c in matches if c.id != placeholder.id]
         if linked is None and is_generic(name):  # «متفرقه», «صندوق» ...: not a person
             row.update(status="generic", customer_id=None, candidates=[])
         elif linked is not None:
@@ -207,11 +232,19 @@ def preview_customers(db: Session, rows: list[list[object]], mapping: dict[str, 
                        candidates=matches)
         else:
             row.update(status="new", customer_id=None, candidates=[])
+        if placeholder is not None:
+            row["candidates"] = [*row["candidates"], placeholder]
         parsed.append(row)
     ids = list({c.id for p in parsed for c in p["candidates"]})
     spent = _spent(db, ids)
     sellers = _sellers(db)
+    used = defaultdict(int)
     for p in parsed:
+        if p.get("customer_id"):
+            used[p["customer_id"]] += 1
+    for p in parsed:
+        # two accounts of the file found as the same customer: both balances are brought over (added up) - check it
+        p["shared"] = used.get(p.get("customer_id"), 0) > 1
         p["candidates"] = [_cbrief(c, spent) for c in p["candidates"]]
         # a credit balance is what we owe: to a seller that is a debt of ours, to a customer it is prepaid credit
         p["seller"] = bool(p.get("customer_id") and p["customer_id"] in sellers)
@@ -220,7 +253,7 @@ def preview_customers(db: Session, rows: list[list[object]], mapping: dict[str, 
     for p in parsed:
         count[p["status"]] += 1
     return {"rows": parsed, "summary": {"total": len(parsed), **count, "debit": sum(p["debit"] for p in parsed),
-                                        "credit": sum(p["credit"] for p in parsed)}}
+                                        "credit": sum(p["credit"] for p in parsed), "shared": sum(1 for p in parsed if p["shared"])}}
 
 
 def _sellers(db: Session) -> set[int]:
@@ -229,13 +262,37 @@ def _sellers(db: Session) -> set[int]:
         {x for x in db.scalars(select(TradeDoc.customer_id).where(TradeDoc.customer_id.is_not(None), TradeDoc.kind.in_(("purchase", "purchase_return"))))}
 
 
+def _had_opening(db: Session, cid: int) -> bool:
+    """A Tizpardaz balance was already brought over for this customer. Found through the records themselves (ledger
+    lines, credits, the seller's payables), which move with the person when two records are merged."""
+    from ..models import Purchase
+    return bool(
+        db.scalar(select(JournalLine.id).join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+                  .where(JournalEntry.ref_type == "tp_opening", JournalLine.customer_id == cid).limit(1))
+        or db.scalar(select(Deposit.id).where(Deposit.customer_id == cid, Deposit.source == "import", Deposit.notes.like("%تیزپرداز%")).limit(1))
+        or db.scalar(select(Purchase.id).where(Purchase.supplier_id.in_(select(Supplier.id).where(Supplier.customer_id == cid)),
+                                               Purchase.notes.like("%تیزپرداز%")).limit(1)))
+
+
 def commit_customers(db: Session, batch: ImportBatch, choices: dict[str, int | str], *, balances: bool, at: datetime | None,
                      account_id: int | None, user=None, credit_as: dict[str, str] | None = None) -> dict:  # noqa: ANN001
+    if balances:
+        accounting.ensure_not_future(at, "تاریخ مانده‌ها")
     at = at or local_now()
-    created = {"customers": [], "entries": [], "deposits": [], "linked": [], "purchases": [], "suppliers": []}
+    created = {"customers": [], "entries": [], "deposits": [], "linked": [], "purchases": [], "suppliers": [], "renamed": []}
     credit_as = credit_as or {}
     counts = defaultdict(int)
     account = db.get(PaymentAccount, account_id) if account_id else db.scalar(select(PaymentAccount).order_by(PaymentAccount.id))
+    # customer -> a balance came over in an EARLIER file (asked before this file posts anything for them, so two
+    # accounts of this file that are the same customer are both brought over - added up - and none is dropped)
+    prior: dict[int, bool] = {}
+
+    def real_name(x: Customer, name: str) -> None:
+        if _placeholder(x) and name:  # the placeholder of a journal gets the person's name: offered for merging
+            created["renamed"].append([x.id, x.full_name])
+            x.full_name = name
+            counts["renamed"] += 1
+
     for row in batch.rows:
         key = str(row["row"])
         choice = choices.get(key, row.get("customer_id") or {"ambiguous": "", "generic": "skip"}.get(row["status"], "new"))
@@ -258,23 +315,24 @@ def commit_customers(db: Session, batch: ImportBatch, choices: dict[str, int | s
             c = db.get(Customer, int(choice))
             if c is None:
                 raise ImportProblem(f"مشتری انتخاب‌شده برای ردیف {row['row']} پیدا نشد")
-            if row["code"] and c.tp_code != row["code"]:
+            # (a merged duplicate's code, kept as «tp:<code>», already points here)
+            if row["code"] and c.tp_code != row["code"] and f"tp:{row['code']}" not in (c.other_codes or []):
                 other = db.scalar(select(Customer).where(Customer.tp_code == row["code"], Customer.id != c.id))
                 if other is not None:
+                    created["linked"].append([other.id, other.tp_code])
                     other.tp_code = None
+                    real_name(other, row["name"])
                 created["linked"].append([c.id, c.tp_code])
                 c.tp_code = row["code"]
+            real_name(c, row["name"])
             if row["mobile"] and not c.mobile and not accounting.find_customer(db, row["mobile"]):
                 c.mobile, c.mobile_issue = row["mobile"], None
             counts["linked"] += 1
         if not balances:
             continue
-        from ..models import Purchase
-        already = db.scalar(select(func.count(JournalEntry.id)).where(JournalEntry.ref_type == "tp_opening", JournalEntry.ref_id == c.id)) or \
-            db.scalar(select(func.count(Deposit.id)).where(Deposit.customer_id == c.id, Deposit.source == "import", Deposit.notes.like("%تیزپرداز%"))) or \
-            db.scalar(select(func.count(Purchase.id)).where(Purchase.supplier_id.in_(select(Supplier.id).where(Supplier.customer_id == c.id)),
-                                                            Purchase.notes.like("%تیزپرداز%")))
-        if already and (row["debit"] or row["credit"]):
+        if c.id not in prior:
+            prior[c.id] = _had_opening(db, c.id)
+        if prior[c.id] and (row["debit"] or row["credit"]):
             counts["balance_already"] += 1
             continue
         if row["debit"] > 0:  # owed by the customer: opening receivable
@@ -292,9 +350,13 @@ def commit_customers(db: Session, batch: ImportBatch, choices: dict[str, int | s
             created["purchases"].append(pur.id)
             counts["payables"] += 1
             counts["payable_amount"] += row["credit"]
-        elif row["credit"] > 0 and account is not None:  # customer's credit: kept as an open deposit to use on a next invoice
+        elif row["credit"] > 0:
+            # the customer's credit from the PRODUCT software: a customer credit (اعتبار), not a service deposit
+            # (بیعانه) - it pays anything on a next invoice and is never forfeited
+            if account is None:
+                raise ImportProblem("برای نگه‌داشتن بستانکاری مشتریان یک حساب دریافت (کارتخوان، صندوق...) لازم است")
             dep = Deposit(customer_id=c.id, amount=row["credit"], payment_account_id=account.id, received_at=at, source="import",
-                          notes=f"ماندهٔ بستانکار تیزپرداز (کد {row['code']})")
+                          kind="credit", notes=f"ماندهٔ بستانکار تیزپرداز (کد {row['code']})")
             db.add(dep)
             db.flush()
             accounting.post(db, f"ماندهٔ بستانکار انتقالی از تیزپرداز - {c.full_name}", [
@@ -347,7 +409,8 @@ def preview_products(db: Session, rows: list[list[object]], mapping: dict[str, i
             row["warnings"].append("SKU ندارد")
         cands, default = [], "new"
         linked = by_code.get(code)
-        if linked is not None and (linked.sku or "").lower() == (sku or "").lower() or (linked is not None and name_key(linked.name) == k):
+        # the same code is the same product only with the same SKU or name (both programs number products 1, 2, 3...)
+        if linked is not None and (sku and (linked.sku or "").lower() == sku.lower() or name_key(linked.name) == k):
             cands, default = [_pbrief(linked)], f"p:{linked.id}"
             row["status"] = "linked"
         else:
@@ -374,8 +437,10 @@ def preview_products(db: Session, rows: list[list[object]], mapping: dict[str, i
 
 
 def commit_products(db: Session, batch: ImportBatch, choices: dict[str, str], *, at: datetime | None, user=None) -> dict:  # noqa: ANN001
+    accounting.ensure_not_future(at, "تاریخ موجودی")
     at = at or local_now()
-    created = {"products": [], "snapshots": {}, "moves": [], "history": [], "services": [], "appointments": []}
+    # recoded / unsku: other products whose code or website SKU this file took (given back on undo)
+    created = {"products": [], "snapshots": {}, "moves": [], "history": [], "services": [], "appointments": [], "recoded": {}, "unsku": {}}
     counts = defaultdict(int)
     incoming = {r["code"] for r in batch.rows}  # Tizpardaz's codes: a product moved aside never gets one of them
     for row in batch.rows:
@@ -386,7 +451,11 @@ def commit_products(db: Session, batch: ImportBatch, choices: dict[str, str], *,
         service = None
         if choice.startswith("p:"):
             p = db.get(Product, int(choice[2:]))
-            created["snapshots"][str(p.id)] = {k: getattr(p, k) for k in ("code", "sku", "name", "category", "sale_price", "last_purchase_cost", "is_active")}
+            if p is None:
+                raise ImportProblem(f"کالای انتخاب‌شده برای ردیف {row['row']} پیدا نشد")
+            # (two rows combined with one product: the first snapshot is what it was before this file)
+            created["snapshots"].setdefault(str(p.id), {k: getattr(p, k) for k in ("code", "sku", "name", "category", "sale_price",
+                                                                                   "last_purchase_cost", "is_active")})
             counts["combined"] += 1
         else:
             if choice.startswith("s:"):
@@ -399,12 +468,14 @@ def commit_products(db: Session, batch: ImportBatch, choices: dict[str, str], *,
         # Tizpardaz is the reference: its code, name, group, prices and SKU
         other = db.scalar(select(Product).where(Product.code == row["code"], Product.id != p.id))
         if other is not None:  # a product made here took that number: it gets the next free one
+            created["recoded"].setdefault(str(other.id), other.code)
             other.code = f"x{other.id}"
             db.flush()
             other.code = inventory.next_product_code(db, incoming)
             counts["codes_moved"] += 1
         if row["sku"]:
             for o in db.scalars(select(Product).where(func.lower(Product.sku) == row["sku"].lower(), Product.id != p.id)):
+                created["unsku"].setdefault(str(o.id), o.sku)
                 o.sku = None
         old_name = p.name
         p.code, p.name, p.sku = row["code"], row["name"], row["sku"] or p.sku
@@ -418,11 +489,16 @@ def commit_products(db: Session, batch: ImportBatch, choices: dict[str, str], *,
         # stock: the final quantity of Tizpardaz
         target = max(0, row["qty"])
         has_moves = db.scalar(select(func.count(StockMove.id)).where(StockMove.product_id == p.id))
-        if not has_moves:
-            if target > 0:
-                m = inventory.opening_stock(db, p, target, row["buy"], at, user=user)
-                created["moves"].append(m.id)
-        else:
+        # stock here on that date (a product that already has moves: what is missing to reach Tizpardaz's quantity
+        # is stock that was already on the shelf - opening stock at Tizpardaz's purchase price, against the opening
+        # balances, never a "found stock" profit at the old cost)
+        here = int(db.scalar(select(func.coalesce(func.sum(StockMove.qty), 0))
+                             .where(StockMove.product_id == p.id, StockMove.at <= at.replace(tzinfo=None))) or 0) if has_moves else 0
+        if target > here:
+            m = inventory.opening_stock(db, p, target - here, row["buy"], at, user=user)
+            created["moves"].append(m.id)
+            counts["opening_units"] += target - here
+        elif target < here:  # less than here: a real shortage (costed by the method)
             m = inventory.count_stock(db, p, target, at, note="هم‌سان‌سازی با موجودی تیزپرداز", user=user)
             if m is not None:
                 created["moves"].append(m.id)
@@ -434,8 +510,30 @@ def commit_products(db: Session, batch: ImportBatch, choices: dict[str, str], *,
     return dict(counts)
 
 
+def _chehreh_batches(db: Session) -> dict[int, int]:
+    """Appointment -> the Chehreh file that brought it (still committed)."""
+    out: dict[int, int] = {}
+    for b in db.scalars(select(ImportBatch).where(ImportBatch.kind.like("legacy_%"), ImportBatch.status == "committed")):
+        for aid in ((b.summary or {}).get("created") or {}).get("appointments", []):
+            out[aid] = b.id
+    return out
+
+
+def _relink_chehreh(db: Session, bid: int, old: int, new: int) -> None:
+    """An appointment moved back from a product has a new id: its Chehreh file must still know it (for its undo)."""
+    b = db.get(ImportBatch, bid)
+    s = (b.summary or {}) if b is not None else {}
+    cr = s.get("created") or {}
+    if b is None or old not in cr.get("appointments", []):
+        return
+    b.summary = {**s, "created": {**cr, "appointments": [new if x == old else x for x in cr["appointments"]]},
+                 # a history file's rows each made an appointment (the record its re-import check follows)
+                 **({"fp_rec": [new if x == old else x for x in s["fp_rec"]]} if "fp_rec" in s and b.kind == "legacy_history" else {})}
+
+
 def _service_to_product(db: Session, service: Service, product: Product, batch_id: int, created: dict) -> int:
     n = 0
+    source = _chehreh_batches(db)
     for a in list(db.scalars(select(Appointment).where(Appointment.service_id == service.id, Appointment.status == "done",
                                                        Appointment.invoice_id.is_(None)))):
         h = TradeHistory(batch_id=batch_id, source="chehreh", kind="sale", at=a.start_at, product_id=product.id, customer_id=a.customer_id,
@@ -444,7 +542,7 @@ def _service_to_product(db: Session, service: Service, product: Product, batch_i
         db.add(h)
         created["appointments"].append({"id": a.id, "customer_id": a.customer_id, "service_id": a.service_id, "staff_id": a.staff_id,
                                         "start_at": a.start_at.isoformat(), "quoted_price": a.quoted_price, "notes": a.notes,
-                                        "status": a.status, "duration_minutes": a.duration_minutes})
+                                        "status": a.status, "duration_minutes": a.duration_minutes, "batch": source.get(a.id)})
         db.delete(a)
         n += 1
     db.flush()
@@ -575,7 +673,7 @@ def _build_docs(parsed: list[dict], others: dict[str, list[dict]]) -> dict[str, 
 def preview_journal(db: Session, rows: list[list[object]], mapping: dict[str, int], unit: str) -> dict:
     p_exact, p_all = _product_index(db)
     idx = _customer_index(db)
-    by_tp = {c.tp_code: c for c in db.scalars(select(Customer).where(Customer.tp_code.is_not(None)))}
+    by_tp = _by_tp(db)
     done = set(db.scalars(select(TradeHistory.fp).where(TradeHistory.source == SOURCE)))
     parsed, ignored = [], defaultdict(int)
     others: dict[str, list[dict]] = defaultdict(list)  # the person / discount / cash rows of each invoice
@@ -763,12 +861,23 @@ def commit_journal(db: Session, batch: ImportBatch, product_map: dict[str, int |
     return dict(counts)
 
 
+def _net(h: TradeHistory) -> int:
+    """What the item really sold / was bought for: after its share of the invoice's discount (or charges)."""
+    return int(h.net_amount if h.net_amount is not None else h.amount or 0)
+
+
 def _refresh_doc(db: Session, doc: TradeDoc) -> None:
-    """Sum of the invoice's items; without its own amount from the file, the invoice total is that sum."""
-    items = int(db.scalar(select(func.coalesce(func.sum(TradeHistory.amount), 0)).where(TradeHistory.doc_id == doc.id)) or 0)
+    """Sum of the invoice's items; without its own amount from the file, the invoice total is that sum. The invoice's
+    discount (or its charges) is spread over its items (largest remainder, to the Rial): each item's net amount is
+    what it really sold / cost for, so the reports agree with the invoice total."""
+    lines = list(db.scalars(select(TradeHistory).where(TradeHistory.doc_id == doc.id).order_by(TradeHistory.id)))
+    items = sum(int(h.amount or 0) for h in lines)
     if not doc.total or doc.total == doc.items_total:
         doc.total = items
     doc.items_total = items
+    diff = doc.total - items
+    for h, part in zip(lines, inventory._share(abs(diff), [int(h.amount or 0) for h in lines])):
+        h.net_amount = int(h.amount or 0) + (part if diff > 0 else -part)
 
 
 def seller_credits(db: Session) -> list[dict]:
@@ -801,8 +910,16 @@ def credit_to_payable(db: Session, deposit_ids: list[int], user=None) -> dict:  
         c = db.get(Customer, d.customer_id)
         for e in entries:
             db.delete(e)
-        sup = inventory.supplier_for(db, c.full_name, c.id)
+        # the customers file that brought the credit: its undo takes back the payable (and a seller made for it) instead
+        batch = next((b for b in db.scalars(select(ImportBatch).where(ImportBatch.kind == "tp_customers", ImportBatch.status == "committed"))
+                      if did in ((b.summary or {}).get("created") or {}).get("deposits", [])), None)
+        made: dict = {}
+        sup = inventory.supplier_for(db, c.full_name, c.id, made)
         pur = inventory.opening_payable(db, sup, d.amount, at=d.received_at, notes=f"{d.notes} - طلب فروشنده", user=user)
+        if batch is not None:
+            cr = batch.summary.get("created") or {}
+            batch.summary = {**batch.summary, "created": {**cr, "purchases": [*cr.get("purchases", []), pur.id],
+                                                          "suppliers": [*cr.get("suppliers", []), *made.get("suppliers", [])]}}
         db.delete(d)
         db.flush()
         from .audit import audit
@@ -829,7 +946,8 @@ def doc_out(db: Session, doc: TradeDoc, full: bool = False, people: dict | None 
         out["items"] = [{"id": h.id, "product_id": h.product_id, "code": products[h.product_id].code if h.product_id in products else None,
                          "name": products[h.product_id].name if h.product_id in products else (h.description or "—"),
                          "description": h.description, "qty": h.qty, "unit_price": h.unit_price, "amount": h.amount,
-                         "cost": h.cost if sale else None, "profit": h.amount - (h.cost or 0) if sale and h.cost is not None else None}
+                         "net_amount": _net(h),  # after its share of the invoice's discount
+                         "cost": h.cost if sale else None, "profit": _net(h) - (h.cost or 0) if sale and h.cost is not None else None}
                         for h in lines]
         out["extras"] = doc.extras or []
         out["lines"] = len(lines)
@@ -839,12 +957,22 @@ def doc_out(db: Session, doc: TradeDoc, full: bool = False, people: dict | None 
 def backfill_docs(db: Session) -> int:
     """Rows brought over before invoices were kept: group them into their invoices (number + date), and link the
     seller of each purchase to the person (customer) and supplier. Runs at start; does nothing once done."""
+    # items brought over before the invoices' discounts were spread over them: their net amounts (and the costs of
+    # the sales, worked out from the purchases' net cost)
+    stale = list(db.scalars(select(TradeDoc).where(TradeDoc.id.in_(
+        select(TradeHistory.doc_id).where(TradeHistory.doc_id.is_not(None), TradeHistory.net_amount.is_(None))))))
+    for doc in stale:
+        _refresh_doc(db, doc)
+    if stale:
+        db.flush()
+        recost_history(db, set(db.scalars(select(TradeHistory.product_id).where(
+            TradeHistory.doc_id.in_([d.id for d in stale if d.total != d.items_total]), TradeHistory.product_id.is_not(None)))))
     rows = list(db.scalars(select(TradeHistory).where(TradeHistory.doc_id.is_(None), TradeHistory.kind.in_(DOC_KINDS))
                            .order_by(TradeHistory.id)))
     if not rows:
         return 0
     idx = _customer_index(db)
-    by_tp = {c.tp_code: c for c in db.scalars(select(Customer).where(Customer.tp_code.is_not(None)))}
+    by_tp = _by_tp(db)
     groups: dict[str, list[TradeHistory]] = defaultdict(list)
     for h in rows:
         groups[doc_key(h.source, h.kind, h.doc_no, h.at.date().isoformat(), fallback=f"h{h.id}")].append(h)
@@ -891,13 +1019,13 @@ def recost_history(db: Session, product_ids) -> None:  # noqa: ANN001
             run += sign[h.kind] * h.qty
             low = min(low, run)
         moves = []
-        unit = p.last_purchase_cost or next((h.amount // h.qty for h in hist if h.kind == "purchase" and h.qty), 0)
+        unit = p.last_purchase_cost or next((_net(h) // h.qty for h in hist if h.kind == "purchase" and h.qty), 0)
         if low < 0:  # sold before any purchase in the history: there was stock at the start
             moves.append(SimpleNamespace(id=-1, at=hist[0].at, kind="opening", qty=-low, cost=-low * unit, ref_move_id=None))
         kinds = {"purchase": "purchase", "sale": "sale", "sale_return": "adjust_in", "purchase_return": "adjust_out"}
-        for h in hist:
+        for h in hist:  # a purchase costs what was paid for it: after its share of the invoice's discount
             moves.append(SimpleNamespace(id=h.id, at=h.at, kind=kinds[h.kind], qty=sign[h.kind] * h.qty,
-                                         cost=h.amount if h.kind == "purchase" else 0, ref_move_id=None))
+                                         cost=_net(h) if h.kind == "purchase" else 0, ref_move_id=None))
         r = inventory.replay(moves, how)
         for h in hist:
             if h.kind in ("sale", "sale_return"):
@@ -926,15 +1054,53 @@ def preview(db: Session, filename: str, data: bytes, kind: str, unit: str = "tom
     return batch
 
 
+def _opening_left(db: Session, cid: int) -> int:
+    """What the customer still owes beyond their unpaid invoices here: what is left of their opening debts."""
+    from ..models import Invoice
+    unpaid = db.scalar(select(func.coalesce(func.sum(Invoice.total - Invoice.paid), 0))
+                       .where(Invoice.customer_id == cid, Invoice.status != "void")) or 0
+    return accounting.customer_balance(db, cid)["receivable"] - int(unpaid)
+
+
+def _restore_codes(db: Session, want: dict[int, str]) -> int:
+    """Products get their old codes back; a code that another product holds now stays with it (and this product keeps
+    its current code). Returns how many could not be given back."""
+    todo = []
+    for pid, code in want.items():
+        p = db.get(Product, pid)
+        if p is not None and code and p.code != code:
+            todo.append((p, p.code, code))
+    for p, _, _ in todo:  # free their codes first, so two of them can swap
+        p.code = f"x{p.id}"
+    db.flush()
+    kept = 0
+    for p, _, code in todo:
+        if db.scalar(select(Product.id).where(Product.code == code).limit(1)) is None:
+            p.code = code
+            db.flush()
+        else:
+            kept += 1
+    for p, now, _ in todo:
+        if p.code == f"x{p.id}":
+            p.code = now if db.scalar(select(Product.id).where(Product.code == now).limit(1)) is None else inventory.next_product_code(db)
+            db.flush()
+    return kept
+
+
 def undo(db: Session, batch: ImportBatch) -> dict:
-    """Take back what a committed file added (customers that got other records since are kept)."""
+    """Take back what a committed file added. What was used since stays, with what used it (counted as *_kept): a
+    debt (partly) received, a credit used on an invoice, stock sold or counted after it, a payable paid, a product
+    sold or in a later file, a customer with other records."""
     if batch.status != "committed":
         raise ImportProblem("فقط فایل‌های ثبت‌شده قابل برگشت هستند")
     c = (batch.summary or {}).get("created", {})
     out = defaultdict(int)
+    docs_left, hist_products = set(), set()  # invoices that keep items of other files, products whose history changes
     for hid in c.get("history", []):
         h = db.get(TradeHistory, hid)
         if h:
+            docs_left.add(h.doc_id)
+            hist_products.add(h.product_id)
             db.delete(h)
             out["history"] += 1
     db.flush()
@@ -958,51 +1124,122 @@ def undo(db: Session, batch: ImportBatch) -> dict:
                 and not db.scalar(select(Purchase.id).where(Purchase.supplier_id == sid).limit(1)):
             db.delete(sup)
     for a in c.get("appointments", []):  # Chehreh history that had moved to a product goes back to its service
-        db.add(Appointment(customer_id=a["customer_id"], service_id=a["service_id"], staff_id=a["staff_id"],
+        src = db.get(ImportBatch, a["batch"]) if a.get("batch") else None
+        if src is not None and src.status != "committed":  # its Chehreh file was taken back meanwhile: it stays gone
+            continue
+        appt = Appointment(customer_id=a["customer_id"], service_id=a["service_id"], staff_id=a["staff_id"],
                            start_at=datetime.fromisoformat(a["start_at"]), quoted_price=a["quoted_price"], notes=a["notes"],
-                           status=a["status"], duration_minutes=a["duration_minutes"]))
+                           status=a["status"], duration_minutes=a["duration_minutes"])
+        db.add(appt)
+        db.flush()
+        if src is not None:
+            _relink_chehreh(db, src.id, a["id"], appt.id)
     for sid in c.get("services", []):
         s = db.get(Service, sid)
         if s:
             s.is_active = True
     db.flush()
+    mine = set(c.get("moves", []))
     for mid in c.get("moves", []):
         m = db.get(StockMove, mid)
-        if m:
-            for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(("stock_move", "stock_opening")), JournalEntry.ref_id == m.id)):
-                db.delete(e)
-            pid = m.product_id
-            db.delete(m)
+        if m is None:
+            continue
+        # stock sold, counted or bought after it (or a later file): it stays, or the stock and its value would go wrong
+        if db.scalar(select(StockMove.id).where(StockMove.product_id == m.product_id, StockMove.id > m.id,
+                                                StockMove.id.not_in(mine)).limit(1)) is not None:
+            out["moves_kept"] += 1
+            continue
+        for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(("stock_move", "stock_opening")), JournalEntry.ref_id == m.id)):
+            db.delete(e)
+        pid, kind, qty = m.product_id, m.kind, m.qty
+        db.delete(m)
+        db.flush()
+        inventory.recost(db, pid)
+        p = db.get(Product, pid)
+        if kind == "opening":  # the website got this stock: it is taken back there too
+            woo_queue.add(db, pid, -qty, f"برگشت انتقال تیزپرداز - {p.name}")
+        else:
+            woo_queue.set_to_stock(db, pid, f"برگشت انتقال تیزپرداز - {p.name}")
+        out["moves"] += 1
+    db.flush()
+    # products this file made (before the old codes are given back: one of them may hold such a code)
+    for pid in c.get("products", []):
+        p = db.get(Product, pid)
+        if p is None:
+            continue
+        used = any(db.scalar(select(m.id).where(m.product_id == pid).limit(1)) is not None
+                   for m in (StockMove, InvoiceItem, PurchaseItem, TradeHistory))
+        sent = db.scalar(select(WooOutbox.id).where(WooOutbox.product_id == pid, WooOutbox.status != "pending").limit(1)) is not None
+        if not used and not sent:  # nothing of it reached the website: what waits to be sent goes, its site link is let go
+            for o in db.scalars(select(WooOutbox).where(WooOutbox.product_id == pid)):
+                db.delete(o)
+            db.execute(update(WooProduct).where(WooProduct.product_id == pid).values(product_id=None)
+                       .execution_options(synchronize_session=False))
             db.flush()
-            inventory.recost(db, pid)
-            out["moves"] += 1
-    for pid, snap in (c.get("snapshots") or {}).items():
+        if inventory.product_in_use(db, pid):  # sold, in a later file, or the website already got its stock: archived
+            if not used:
+                p.is_active = False
+            out["products_kept"] += 1
+            continue
+        db.delete(p)
+        out["products"] += 1
+    db.flush()
+    snaps = c.get("snapshots") or {}
+    for pid, snap in snaps.items():  # combined products: back to what they were (their code below)
         p = db.get(Product, int(pid))
         if p:
             for k, v in snap.items():
-                setattr(p, k, v)
-    for pid in c.get("products", []):
-        p = db.get(Product, pid)
-        if p and not db.scalar(select(func.count(StockMove.id)).where(StockMove.product_id == pid)) \
-                and not db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.product_id == pid)):
-            db.delete(p)
-            out["products"] += 1
+                if k != "code":
+                    setattr(p, k, v)
+    db.flush()
+    for pid, sku in (c.get("unsku") or {}).items():  # the website SKU this file took from another product
+        p = db.get(Product, int(pid))
+        if p is not None and sku and not p.sku and pid not in snaps \
+                and db.scalar(select(Product.id).where(func.lower(Product.sku) == sku.lower()).limit(1)) is None:
+            p.sku = sku
+    codes_kept = _restore_codes(db, {**{int(k): v for k, v in (c.get("recoded") or {}).items()},
+                                     **{int(k): s.get("code") for k, s in snaps.items()}})
+    if codes_kept:
+        out["codes_kept"] = codes_kept
+    # opening debts: what was received on them since stays (with the debt), only what is still owed is taken back
+    ar = accounting.account(db, accounting.AR).id
+    left: dict[int, int] = {}
     for eid in c.get("entries", []):
         e = db.get(JournalEntry, eid)
-        if e:
-            db.delete(e)
-            out["balances"] += 1
+        if e is None:
+            continue
+        ln = next((x for x in e.lines if x.account_id == ar and x.debit > 0), None)
+        if ln is not None and ln.customer_id is not None:
+            if ln.customer_id not in left:
+                left[ln.customer_id] = _opening_left(db, ln.customer_id)
+            if ln.debit > left[ln.customer_id]:  # (part of) it was received: taking it back would leave a false credit
+                out["balances_kept"] += 1
+                continue
+            left[ln.customer_id] -= ln.debit
+        db.delete(e)
+        out["balances"] += 1
     for did in c.get("deposits", []):
         d = db.get(Deposit, did)
-        if d and d.status == "held":
-            for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "deposit", JournalEntry.ref_id == did)):
-                db.delete(e)
-            db.delete(d)
-            out["credits"] += 1
-    for cid, old in c.get("linked", []):
+        if d is None:
+            continue
+        # used on an invoice (also one voided since: open again, but its settlement entry stays in the books),
+        # refunded or forfeited: it stays with all its entries
+        if d.status != "held" or db.scalar(select(JournalEntry.id).where(JournalEntry.ref_type == "deposit_apply",
+                                                                         JournalEntry.ref_id == did).limit(1)) is not None:
+            out["credits_kept"] += 1
+            continue
+        for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "deposit", JournalEntry.ref_id == did)):
+            db.delete(e)
+        db.delete(d)
+        out["credits"] += 1
+    for cid, old in reversed(c.get("linked", [])):  # last change first: each code goes back to where it was
         cust = db.get(Customer, cid)
         if cust:
             cust.tp_code = old
+    for cid, old in reversed(c.get("renamed", [])):
+        cust = db.get(Customer, cid)
+        if cust:
+            cust.full_name = old
     db.flush()
     unused = []
     for cid in c.get("customers", []):
@@ -1013,6 +1250,11 @@ def undo(db: Session, batch: ImportBatch) -> dict:
             continue
         unused.append(cust)
     out["customers"] = accounting.delete_customers(db, unused)
+    # invoices that keep items of other files: their sums and discounts; sales whose cost came from what was removed
+    for doc in db.scalars(select(TradeDoc).where(TradeDoc.id.in_([x for x in docs_left if x] or [-1]))):
+        _refresh_doc(db, doc)
+    db.flush()
+    recost_history(db, [x for x in hist_products if x and db.get(Product, x) is not None])
     batch.status = "undone"
     batch.summary = {**batch.summary, "undo": dict(out)}
     return dict(out)

@@ -47,6 +47,12 @@ function App() {
 
   const logout = useCallback(() => {
     setToken(null);
+    try {
+      // the assistant's chat may hold money answers: never leave it for the next person on this PC
+      Object.keys(sessionStorage).filter((k) => k.startsWith("hesabdar.chat")).forEach((k) => sessionStorage.removeItem(k));
+    } catch {
+      /* storage unavailable */
+    }
     setUser(null);
   }, []);
 

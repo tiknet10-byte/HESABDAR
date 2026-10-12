@@ -106,6 +106,8 @@ function serviceProblem(s: any): string {
 
 function Catalog() {
   const toast = useToast();
+  const { user } = useAuth();
+  const canEdit = can(user, "settings"); // lines and services are changed by the owner / admin only (as the server)
   // archived lines/services too: a sold service that was deleted is only hidden (its code and history stay)
   const lines = useApi<any[]>("/api/lines?all=1");
   const services = useApi<any[]>("/api/services?all=1");
@@ -233,8 +235,8 @@ function Catalog() {
     const count = serviceCount[line.id] ?? 0;
     if (!confirm(`لاین «${line.name}»${count ? ` و ${count} خدمت آن` : ""} حذف شود؟`)) return;
     try {
-      await api(`/api/lines/${line.id}`, { method: "DELETE" });
-      toast("لاین حذف شد");
+      const r = await api(`/api/lines/${line.id}`, { method: "DELETE" });
+      toast(r.archived ? "لاین سابقهٔ فروش داشت؛ پاک نشد و بایگانی شد (در «لاین‌های بایگانی‌شده» قابل بازگردانی است)" : "لاین حذف شد");
       if (selected === line.id) setSelected(0);
       setLine(null);
       reload();
@@ -282,7 +284,8 @@ function Catalog() {
 
   return (
     <div className="space-y-4">
-      <Card title="لاین‌ها" actions={<button className="btn btn-sm" onClick={() => setLine({ name: "", color: LINE_COLORS[allLines.length % LINE_COLORS.length] })}><Plus size={14} />لاین جدید</button>}>
+      {!canEdit && <p className="muted rounded-2xl bg-violet-500/10 px-4 py-2 text-sm">لاین‌ها و خدمات را فقط مدیر می‌تواند تغییر دهد؛ این‌جا فقط برای دیدن است.</p>}
+      <Card title="لاین‌ها" actions={canEdit && <button className="btn btn-sm" onClick={() => setLine({ name: "", color: LINE_COLORS[allLines.length % LINE_COLORS.length] })}><Plus size={14} />لاین جدید</button>}>
         <div className="flex flex-wrap gap-2">
           {lineButton(0, "همه لاین‌ها", "#8b5cf6", allServices.length)}
           {allLines.map((l) => lineButton(l.id, <>{l.code && <span className="num muted ml-1 text-xs">{l.code}</span>}{l.name}</>, l.color, serviceCount[l.id] ?? 0,
@@ -305,13 +308,13 @@ function Catalog() {
           : "همه خدمات"}
         actions={
           <div className="flex shrink-0 flex-wrap gap-2">
-            <button className="btn btn-sm" onClick={() => setShowHealth(true)} title="پیدا کردن خدمات تکراری، بایگانی‌شده، کدهای ناهماهنگ و ...">
+            {canEdit && <button className="btn btn-sm" onClick={() => setShowHealth(true)} title="پیدا کردن خدمات تکراری، بایگانی‌شده، کدهای ناهماهنگ و ...">
               <Stethoscope size={14} /><span className="hidden sm:inline">بررسی خدمات</span>
               {health.data?.count > 0 && <span className="num rounded-md bg-amber-500 px-1.5 text-xs text-white">{num(health.data.count)}</span>}
-            </button>
-            {current && !current.is_active && <button className="btn btn-sm" onClick={() => restoreLine(current)}><RotateCcw size={14} />بازگردانی لاین</button>}
-            {current && current.is_active && <button className="btn btn-sm" onClick={() => setLine({ ...current })} title="ویرایش یا حذف لاین"><Pencil size={14} /><span className="hidden sm:inline">ویرایش لاین</span></button>}
-            <button className="btn btn-sm btn-primary" disabled={!allLines.length} onClick={newService}><Plus size={14} />خدمت جدید{current && <span className="hidden sm:inline"> در این لاین</span>}</button>
+            </button>}
+            {canEdit && current && !current.is_active && <button className="btn btn-sm" onClick={() => restoreLine(current)}><RotateCcw size={14} />بازگردانی لاین</button>}
+            {canEdit && current && current.is_active && <button className="btn btn-sm" onClick={() => setLine({ ...current })} title="ویرایش یا حذف لاین"><Pencil size={14} /><span className="hidden sm:inline">ویرایش لاین</span></button>}
+            {canEdit && <button className="btn btn-sm btn-primary" disabled={!allLines.length} onClick={newService}><Plus size={14} />خدمت جدید{current && <span className="hidden sm:inline"> در این لاین</span>}</button>}
           </div>
         }>
         <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
@@ -344,7 +347,7 @@ function Catalog() {
             <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
               <thead><tr><th>کد</th><th>خدمت</th><th>سابقه فروش</th><th>مدت <span className="font-normal">(دقیقه)</span></th><th>قیمت پایه <span className="font-normal">({unitLabel()})</span></th><th>قیمت آموخته‌شده <span className="font-normal">({unitLabel()})</span></th><th>بیعانه <span className="font-normal">({unitLabel()})</span></th><th></th></tr></thead>
               <tbody>{shown.map((s) => (
-                <tr key={s.id} className={`cursor-pointer ${s.is_active ? "" : "opacity-80"}`} onDoubleClick={() => openEdit(s)}>
+                <tr key={s.id} className={`${canEdit ? "cursor-pointer" : ""} ${s.is_active ? "" : "opacity-80"}`} onDoubleClick={() => canEdit && openEdit(s)}>
                   <td className="num font-bold text-violet-600 dark:text-violet-300">{s.code}</td>
                   <td>
                     <div className="font-semibold">{s.name}{!s.is_active && <span className="badge mr-1.5 bg-slate-500/15 text-[11px] text-slate-500">بایگانی‌شده</span>}</div>
@@ -361,7 +364,7 @@ function Catalog() {
                   </td>
                   <td><SalesHistory u={usageOf[s.id]} loading={!usage.data} /></td>
                   <td onDoubleClick={(e) => e.stopPropagation()}>
-                    {!s.is_active ? <span className="num muted">{num(s.duration_minutes)}</span> : <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
+                    {!s.is_active || !canEdit ? <span className="num muted">{num(s.duration_minutes)}</span> : <input type="number" min={5} step={5} defaultValue={s.duration_minutes} key={s.duration_minutes} title="مدت انجام خدمت (دقیقه) - فاصله پیش‌فرض نوبت‌ها"
                       className="input num w-16 px-2 py-1 text-sm" onBlur={(e) => saveDuration(s, Number(e.target.value))}
                       onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />}
                   </td>
@@ -372,7 +375,7 @@ function Catalog() {
                   <td className="num whitespace-nowrap">{s.learned_avg_price ? <>{money(s.learned_avg_price, false)} <span className="muted text-xs" title="تعداد فروش‌هایی که این میانگین از آن‌ها آموخته شده">({num(s.learned_count)})</span></> : "—"}</td>
                   <td className="num whitespace-nowrap">{s.default_deposit ? money(s.default_deposit, false) : "—"}</td>
                   <td className="whitespace-nowrap">
-                    {s.is_active ? <>
+                    {!canEdit ? null : s.is_active ? <>
                       <button className="btn btn-ghost btn-sm" onClick={() => openEdit(s)} title="ویرایش"><Pencil size={15} /></button>
                       <button className="btn btn-ghost btn-sm text-rose-500" onClick={() => deleteService(s)} title="حذف"><Trash2 size={15} /></button>
                     </> : <>
@@ -389,7 +392,7 @@ function Catalog() {
           <Empty icon={<Scissors size={28} />} text={q ? "خدمتی با این جستجو پیدا نشد" : sold === "archived" ? "خدمت بایگانی‌شده‌ای در این بخش نیست" : sold === "unsold" ? "همه خدمات این بخش حداقل یک فاکتور دارند" : sold === "sold" ? "هیچ خدمتی در این بخش فاکتور ندارد" : current ? "این لاین هنوز خدمتی ندارد؛ با «خدمت جدید در این لاین» اضافه کنید" : "هنوز خدمتی تعریف نشده"} />
         )}
         {shown.length > 0 && (
-          <p className="muted px-5 pb-4 text-xs">{num(shown.length)} خدمت · مبالغ به {unitLabel()} · برای ویرایش روی ردیف دوبار کلیک کنید · مدت انجام را مستقیم در جدول تغییر دهید (Enter = ذخیره)</p>
+          <p className="muted px-5 pb-4 text-xs">{num(shown.length)} خدمت · مبالغ به {unitLabel()}{canEdit && " · برای ویرایش روی ردیف دوبار کلیک کنید · مدت انجام را مستقیم در جدول تغییر دهید (Enter = ذخیره)"}</p>
         )}
       </Card>
 
@@ -610,13 +613,14 @@ function Accounts() {
   const [refresh, setRefresh] = useState(0);
   const reload = () => { reloadList(); setRefresh((n) => n + 1); };
   const [edit, setEdit] = useState<any>(null);
+  const canEdit = can(user, "settings"); // adding / changing / deleting an account: owner and admin (as the server)
   return (
     <div className="space-y-5">
-    <Card title="کارتخوان‌ها، کارت‌ها و حساب‌ها" actions={<button className="btn btn-sm btn-primary" onClick={() => setEdit({ kind: "pos", name: "", bank_name: "", provider_config: {}, is_active: true })}>افزودن</button>} pad={false}>
+    <Card title="کارتخوان‌ها، کارت‌ها و حساب‌ها" actions={canEdit && <button className="btn btn-sm btn-primary" onClick={() => setEdit({ kind: "pos", name: "", bank_name: "", provider_config: {}, is_active: true })}>افزودن</button>} pad={false}>
       <table className="table">
         <thead><tr><th>نام</th><th>نوع</th><th>بانک</th><th>کارت / ترمینال</th><th>اتصال API</th><th>وضعیت</th></tr></thead>
         <tbody>{(data ?? []).map((a) => (
-          <tr key={a.id} className="cursor-pointer" onClick={() => setEdit({ ...a })} title="برای ویرایش یا حذف کلیک کنید">
+          <tr key={a.id} className={canEdit ? "cursor-pointer" : ""} onClick={() => canEdit && setEdit({ ...a })} title={canEdit ? "برای ویرایش یا حذف کلیک کنید" : ""}>
             <td className="font-semibold">{a.name}</td><td>{ACCOUNT_KINDS[a.kind]}</td><td>{a.bank_name}</td><td className="num" dir="ltr">{a.card_mask || a.terminal_id || "—"}</td>
             <td>{a.provider ? <Badge status="registered">{a.provider}</Badge> : "—"}</td><td>{a.is_active ? "فعال" : "غیرفعال"}</td>
           </tr>
@@ -650,16 +654,20 @@ function Accounts() {
               }}>ذخیره</button>
               {edit.id && <button className="btn btn-danger" onClick={async () => {
                 if (!confirm(`«${edit.name}» حذف شود؟`)) return;
-                const r = await api(`/api/accounts/${edit.id}`, { method: "DELETE" });
-                toast(r.archived ? "این حساب تراکنش داشت؛ برای سالم ماندن دفاتر بایگانی و از فهرست‌ها حذف شد" : "حذف شد");
-                setEdit(null); reload();
+                try {
+                  const r = await api(`/api/accounts/${edit.id}`, { method: "DELETE" });
+                  toast(r.archived ? "این حساب تراکنش داشت؛ برای سالم ماندن دفاتر بایگانی و از فهرست‌ها حذف شد" : "حذف شد");
+                  setEdit(null); reload();
+                } catch (e: any) {
+                  toast(`حذف انجام نشد: ${e.message}`, "error");
+                }
               }}><Trash2 size={15} />حذف</button>}
             </div>
           </div>
         )}
       </Modal>
     </Card>
-    <AccountRouting refresh={refresh} canEdit={can(user, "settings")} />
+    <AccountRouting refresh={refresh} canEdit={canEdit} />
     {can(user, "finance") && <OpeningBalances refresh={refresh} />}
     </div>
   );
@@ -688,10 +696,12 @@ function StaffAndUsers() {
   }
   const saveAll = async () => { for (const id of dirtyIds) await save(id); };
   const [u, setU] = useState({ username: "", full_name: "", password: "", role: "receptionist" });
+  const canEdit = can(user, "settings"); // staff are added / changed by the owner / admin only (as the server)
   return (
     <div className="space-y-4">
       <Card title="پرسنل" actions={dirtyIds.length > 0 ? <button className="btn btn-primary btn-sm" onClick={saveAll}><Save size={14} />ذخیره همه ({num(dirtyIds.length)})</button> : null}>
-        <div className="space-y-2">
+        {!canEdit && <p className="muted mb-2 text-xs">پرسنل را فقط مدیر می‌تواند اضافه یا تغییر دهد؛ این‌جا فقط برای دیدن است.</p>}
+        <fieldset disabled={!canEdit} className="space-y-2">
           <div className="muted hidden grid-cols-12 gap-2 px-1 text-xs font-bold sm:grid">
             <span className="col-span-3">نام</span><span className="col-span-2">موبایل</span><span className="col-span-3">لاین</span><span className="col-span-2">سهم پرسنل</span><span className="col-span-2"></span>
           </div>
@@ -717,14 +727,14 @@ function StaffAndUsers() {
                       <button className="btn btn-ghost btn-sm" onClick={() => setDrafts(({ [p.id]: _x, ...rest }) => rest)} title="انصراف">✕</button>
                     </>
                   ) : (
-                    <button className="btn btn-sm" onClick={async () => { await api(`/api/staff/${p.id}`, { method: "PUT", body: { ...p, is_active: !p.is_active } }); toast(p.is_active ? `${p.full_name} غیرفعال شد` : `${p.full_name} فعال شد`, "info"); staff.reload(); }}>{p.is_active ? "غیرفعال" : "فعال"}</button>
+                    <button className="btn btn-sm" onClick={async () => { try { await api(`/api/staff/${p.id}`, { method: "PUT", body: { ...p, is_active: !p.is_active } }); toast(p.is_active ? `${p.full_name} غیرفعال شد` : `${p.full_name} فعال شد`, "info"); staff.reload(); } catch (e: any) { toast(e.message, "error"); } }}>{p.is_active ? "غیرفعال" : "فعال"}</button>
                   )}
                 </span>
               </div>
             );
           })}
-        </div>
-        <div className="mt-4 grid grid-cols-12 gap-2 rounded-2xl border border-dashed p-2" style={{ borderColor: "var(--border)" }}>
+        </fieldset>
+        {canEdit && <div className="mt-4 grid grid-cols-12 gap-2 rounded-2xl border border-dashed p-2" style={{ borderColor: "var(--border)" }}>
           <input className="input col-span-12 sm:col-span-4" placeholder="نام پرسنل جدید" value={s.full_name} onChange={(e) => setS({ ...s, full_name: e.target.value })} />
           <select className="input col-span-6 sm:col-span-4" value={s.line_id} onChange={(e) => setS({ ...s, line_id: Number(e.target.value) })}>
             <option value={0}>لاین…</option>
@@ -735,7 +745,7 @@ function StaffAndUsers() {
             try { await api("/api/staff", { body: { ...s, line_id: s.line_id || null } }); toast(`${s.full_name} اضافه شد`); setS({ full_name: "", commission_percent: 30, line_id: 0 }); staff.reload(); }
             catch (e: any) { toast(e.message, "error"); }
           }}><Plus size={14} />افزودن</button>
-        </div>
+        </div>}
         <p className="muted mt-2 text-xs leading-6">هر پرسنل به یک لاین وصل می‌شود؛ با انتخاب هر خدمت، پرسنل همان لاین خودکار انتخاب می‌شود (اگر لاین چند پرسنل داشته باشد، فقط پرسنل همان لاین نمایش داده می‌شوند). درصد = سهم پرسنل از مبلغ خالص هر خدمت؛ باقیمانده سهم سالن است. گزارش در منوی «پرسنل و سهم‌ها». ردیف‌های تغییرکرده زرد می‌شوند تا ذخیره کنید.</p>
       </Card>
       {can(user, "users") && (
@@ -756,8 +766,19 @@ function StaffAndUsers() {
 
 function Plugins() {
   const toast = useToast();
+  const { user } = useAuth();
+  const canEdit = can(user, "settings"); // turning plugins on/off and their settings: owner and admin (as the server)
   const { data, reload } = useApi<any[]>("/api/plugins");
   const [cfg, setCfg] = useState<any>(null);
+  const toggle = async (p: any, on: boolean) => {
+    try {
+      await api(`/api/plugins/${p.name}`, { method: "PUT", body: { enabled: on } });
+      toast(on ? "فعال شد" : "غیرفعال شد", "info");
+      reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  };
   if (!data) return <Loading />;
   return (
     <div className="grid gap-4 md:grid-cols-2">
@@ -769,13 +790,13 @@ function Plugins() {
               <div className="muted mt-1 text-sm">{p.description}</div>
               <div className="mt-2 flex gap-2"><Badge>v{p.version}</Badge>{p.status !== "stable" && <Badge status="pending">{p.status === "beta" ? "آزمایشی" : "ایده"}</Badge>}</div>
             </div>
-            <label className="relative inline-flex cursor-pointer items-center">
-              <input type="checkbox" className="peer sr-only" checked={p.enabled} onChange={async (e) => { await api(`/api/plugins/${p.name}`, { method: "PUT", body: { enabled: e.target.checked } }); toast(e.target.checked ? "فعال شد" : "غیرفعال شد", "info"); reload(); }} />
+            <label className={`relative inline-flex items-center ${canEdit ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`} title={canEdit ? "" : "فقط مدیر می‌تواند افزونه‌ها را روشن یا خاموش کند"}>
+              <input type="checkbox" className="peer sr-only" checked={p.enabled} disabled={!canEdit} onChange={(e) => toggle(p, e.target.checked)} />
               <span className="h-6 w-11 rounded-full bg-zinc-300 transition peer-checked:bg-violet-600 dark:bg-zinc-700" />
               <span className="absolute right-0.5 h-5 w-5 rounded-full bg-white shadow transition peer-checked:-translate-x-5" />
             </label>
           </div>
-          {Object.keys(p.config_schema?.properties ?? {}).length > 0 && <button className="btn btn-sm mt-3" onClick={() => setCfg({ ...p, draft: { ...p.config } })}>تنظیمات</button>}
+          {canEdit && Object.keys(p.config_schema?.properties ?? {}).length > 0 && <button className="btn btn-sm mt-3" onClick={() => setCfg({ ...p, draft: { ...p.config } })}>تنظیمات</button>}
         </Card>
       ))}
       <Modal open={!!cfg} onClose={() => setCfg(null)} title={cfg?.title ?? ""}>
@@ -787,7 +808,7 @@ function Plugins() {
                   onChange={(e) => setCfg({ ...cfg, draft: { ...cfg.draft, [k]: s.type === "integer" ? Number(e.target.value) : e.target.value } })} />
               </Field>
             ))}
-            <button className="btn btn-primary w-full" onClick={async () => { await api(`/api/plugins/${cfg.name}`, { method: "PUT", body: { config: cfg.draft } }); toast("ذخیره شد"); setCfg(null); reload(); }}>ذخیره</button>
+            <button className="btn btn-primary w-full" onClick={async () => { try { await api(`/api/plugins/${cfg.name}`, { method: "PUT", body: { config: cfg.draft } }); toast("ذخیره شد"); setCfg(null); reload(); } catch (e: any) { toast(e.message, "error"); } }}>ذخیره</button>
           </div>
         )}
       </Modal>
@@ -803,9 +824,41 @@ function Backups() {
   const { user } = useAuth();
   const { data, reload } = useApi<any[]>("/api/backups");
   const [busy, setBusy] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [pass, setPass] = useState("");
+  // after a restore the page reloads; a restored file from before an update may ask for one restart of the program
+  const restored = (r: any) => {
+    toast(r?.warning ?? "بازگردانی شد", r?.warning ? "info" : "ok");
+    setTimeout(() => location.reload(), r?.warning ? 5000 : 800);
+  };
+  async function restoreFile() {
+    if (!file || !confirm(`اطلاعات به فایل «${file.name}» برگردانده شود؟\nقبل از آن از وضعیت فعلی یک پشتیبان ایمنی گرفته می‌شود.`)) return;
+    setBusy(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("passphrase", pass);
+      restored(await api("/api/backups/upload-restore", { form }));
+    } catch (e: any) {
+      toast(e.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <Card title="پشتیبان‌گیری رمزگذاری‌شده" actions={<button className="btn btn-primary btn-sm" disabled={busy} onClick={async () => { setBusy(true); try { await api("/api/backups", { method: "POST" }); toast("پشتیبان ساخته شد"); reload(); } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); } }}>پشتیبان‌گیری الان</button>} pad={false}>
       <p className="muted px-5 pb-3 text-sm">پشتیبان خودکار هر چند ساعت با رمزنگاری AES و کنترل صحت (checksum) ساخته می‌شود. قبل از هر بازگردانی، یک نسخه از وضعیت فعلی ذخیره می‌شود.</p>
+      {user?.role === "owner" && (
+        <div className="mx-5 mb-4 space-y-2 rounded-2xl border border-dashed p-3 text-sm" style={{ borderColor: "var(--border)" }}>
+          <div className="font-bold">بازگردانی از فایل پشتیبان (مثلاً از فلش یا پوشهٔ کپی دوم)</div>
+          <div className="grid gap-2 sm:grid-cols-[1fr_14rem_auto]">
+            <input type="file" accept=".hbk" className="input" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            <input className="input" type="password" dir="ltr" placeholder="رمز فایل (معمولاً خالی)" value={pass} onChange={(e) => setPass(e.target.value)}
+              title="فقط اگر پشتیبان در برنامهٔ دیگری با رمز دیگری ساخته شده؛ وگرنه خالی بگذارید" />
+            <button className="btn btn-danger" disabled={busy || !file} onClick={restoreFile}>بازگردانی این فایل</button>
+          </div>
+        </div>
+      )}
       {!data ? <Loading /> : data.length === 0 ? <Empty text="هنوز پشتیبانی ساخته نشده" /> : (
         <div className="overflow-x-auto">
           <table className="table">
@@ -814,9 +867,9 @@ function Backups() {
               <tr key={b.name}>
                 <td className="num">{jdatetime(b.created_at)}</td><td className="muted text-xs">{b.reason}</td><td className="num">{Math.round(b.size / 1024)} KB</td>
                 <td className="flex gap-1">
-                  <button className="btn btn-sm" onClick={async () => { const r = await api(`/api/backups/${b.name}/verify`, { method: "POST" }); toast(r.ok ? "سالم است ✓" : "خراب است!", r.ok ? "ok" : "error"); }}>بررسی سلامت</button>
-                  <button className="btn btn-sm" onClick={() => download(`/api/backups/${b.name}/download`, `${b.name}.hbk`)}>دانلود</button>
-                  {user?.role === "owner" && <button className="btn btn-sm btn-danger" onClick={async () => { if (!confirm("اطلاعات به این نسخه برگردانده شود؟")) return; try { await api(`/api/backups/${b.name}/restore`, { method: "POST" }); toast("بازگردانی شد"); setTimeout(() => location.reload(), 800); } catch (e: any) { toast(e.message, "error"); } }}>بازگردانی</button>}
+                  <button className="btn btn-sm" onClick={async () => { try { const r = await api(`/api/backups/${b.name}/verify`, { method: "POST" }); toast(r.ok ? "سالم است ✓" : "خراب است!", r.ok ? "ok" : "error"); } catch (e: any) { toast(e.message, "error"); } }}>بررسی سلامت</button>
+                  <button className="btn btn-sm" onClick={() => download(`/api/backups/${b.name}/download`, `${b.name}.hbk`).catch((e) => toast(e.message, "error"))}>دانلود</button>
+                  {user?.role === "owner" && <button className="btn btn-sm btn-danger" disabled={busy} onClick={async () => { if (!confirm("اطلاعات به این نسخه برگردانده شود؟")) return; setBusy(true); try { restored(await api(`/api/backups/${b.name}/restore`, { method: "POST" })); } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); } }}>بازگردانی</button>}
                 </td>
               </tr>
             ))}</tbody>
@@ -963,6 +1016,8 @@ function AIIntegration() {
 const TABLE_LABELS: Record<string, string> = {
   customers: "مشتریان", invoices: "فاکتورها", deposits: "بیعانه‌ها", payments: "دریافت‌ها", appointments: "نوبت‌ها", expenses: "هزینه‌ها",
   journal_entries: "اسناد حسابداری", bank_transactions: "تراکنش‌های بانک", inbound_receipts: "رسیدها", services: "خدمات",
+  products: "کالاها", purchases: "خریدها", suppliers: "فروشندگان", trade_docs: "فاکتورهای تیزپرداز", woo_orders: "سفارش‌های سایت",
+  capital_moves: "سرمایه (گذاشتن/برداشتن)", holdings: "طلا و ارز",
   payment_accounts: "کارتخوان و کارت‌ها", knowledge_items: "دانش آموخته‌شده", audit_logs: "رکوردهای ممیزی",
 };
 

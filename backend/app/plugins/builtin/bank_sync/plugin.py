@@ -119,6 +119,15 @@ def ingest_bank_sms(db: Session, text: str, sender: str | None = None, account_i
     if not p["amount"]:
         return {"ok": False, "reason": "amount not found"}
     account = db.get(PaymentAccount, account_id) if account_id else find_account_for_sms(db, p, sender)
+    if not p["reference"] and not p["datetime"]:
+        # no tracking number and no date in the SMS: the same text again within a day is the same SMS sent again
+        # (a forwarder retry or a replayed request), not new money
+        same = db.scalar(select(BankTransaction).where(
+            BankTransaction.source == "bank_sms", BankTransaction.description == text[:500],
+            BankTransaction.payment_account_id == account.id if account else BankTransaction.payment_account_id.is_(None),
+            BankTransaction.created_at >= datetime.now() - timedelta(hours=24)).limit(1))
+        if same is not None:
+            return {"ok": True, "transaction_id": same.id, "created": False, "status": same.status, "parsed": p}
     when = datetime.fromisoformat(p["datetime"]) if p["datetime"] else datetime.now()
     ext = p["reference"] or f"sms-{when:%Y%m%d%H%M}-{p['amount']}-{p['direction']}"
     tx, created = matching.import_bank_transaction(

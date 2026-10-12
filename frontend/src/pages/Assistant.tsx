@@ -1,10 +1,18 @@
-import { Bot, Send, Sparkles, Wrench } from "lucide-react";
+import { Bot, Check, Send, Sparkles, Wrench } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Card, PageHeader, Spinner } from "../components/ui";
 import { api } from "../lib/api";
-import { useApi } from "../lib/hooks";
+import { money } from "../lib/format";
+import { useApi, useAuth, useToast } from "../lib/hooks";
 
-type Msg = { role: "user" | "assistant"; content: string; tools?: any[] };
+// confirm: a change the assistant proposed; it is done only when the user presses the button
+type Call = { tool: string; input?: Record<string, any>; ok?: boolean | null; confirm?: boolean; busy?: boolean; done?: boolean; error?: string };
+type Msg = { role: "user" | "assistant"; content: string; tools?: Call[] };
+const ACTIONS: Record<string, string> = { create_customer: "ساخت مشتری", register_deposit: "ثبت بیعانه", teach_service_alias: "یاد دادن نام دیگر یک خدمت" };
+const ARGS: Record<string, string> = {
+  full_name: "نام", mobile: "موبایل", instagram: "اینستاگرام", customer_id: "شماره مشتری", amount_rial: "مبلغ",
+  payment_account_id: "شماره حساب دریافت", service_id: "شماره خدمت", reference: "شماره پیگیری", note: "توضیح", alias: "نام دیگر",
+};
 const SUGGEST = [
   "فروش این ماه را با ماه قبل مقایسه کن و دلیل تغییرات را بگو",
   "کدام لاین سودآورتر است و چه پیشنهادی برای رشد داری؟",
@@ -15,9 +23,12 @@ const SUGGEST = [
 ];
 
 export default function Assistant() {
+  const { user } = useAuth();
+  const toast = useToast();
+  const key = `hesabdar.chat.${user?.id ?? 0}`; // each user's own chat: the next person never sees the previous one's
   const [msgs, setMsgs] = useState<Msg[]>(() => {
     try {
-      return JSON.parse(sessionStorage.getItem("hesabdar.chat") || "[]");
+      return JSON.parse(sessionStorage.getItem(key) || "[]");
     } catch {
       return [];
     }
@@ -30,11 +41,29 @@ export default function Assistant() {
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth" });
     try {
-      sessionStorage.setItem("hesabdar.chat", JSON.stringify(msgs.slice(-40)));
+      sessionStorage.setItem(key, JSON.stringify(msgs.slice(-40)));
     } catch {
       /* ignore */
     }
-  }, [msgs]);
+  }, [msgs, key]);
+
+  const patchCall = (mi: number, ti: number, patch: Partial<Call>) =>
+    setMsgs((ms) => ms.map((m, i) => (i !== mi ? m : { ...m, tools: m.tools?.map((t, k) => (k !== ti ? t : { ...t, ...patch })) })));
+
+  async function confirmCall(mi: number, ti: number) {
+    const t = msgs[mi]?.tools?.[ti];
+    if (!t || t.busy || t.done) return;
+    patchCall(mi, ti, { busy: true, error: undefined });
+    try {
+      const r = await api(`/api/ai/tools/${t.tool}`, { body: { arguments: t.input ?? {} } });
+      if (r && typeof r === "object" && r.error) throw new Error(String(r.error));
+      patchCall(mi, ti, { busy: false, done: true });
+      toast("انجام شد");
+    } catch (e: any) {
+      patchCall(mi, ti, { busy: false, error: e.message });
+      toast(`انجام نشد: ${e.message}`, "error");
+    }
+  }
 
   async function send(q: string) {
     if (!q.trim() || busy) return;
@@ -72,11 +101,30 @@ export default function Assistant() {
               <div className={`max-w-[85%] rounded-3xl px-4 py-3 text-sm leading-7 ${m.role === "user" ? "bg-gradient-to-l from-pink-500 to-violet-600 text-white" : ""}`}
                 style={m.role === "assistant" ? { background: "var(--surface-solid)", border: "1px solid var(--border)" } : {}}>
                 <div className="whitespace-pre-wrap">{m.content}</div>
-                {m.tools && m.tools.length > 0 && (
+                {m.tools && m.tools.some((t) => !t.confirm) && (
                   <div className="muted mt-2 flex flex-wrap gap-1 text-[11px]">
-                    {m.tools.map((t, k) => <span key={k} className="badge bg-violet-500/10"><Wrench size={10} />{t.tool}</span>)}
+                    {m.tools.map((t, k) => !t.confirm && <span key={k} className="badge bg-violet-500/10"><Wrench size={10} />{t.tool}</span>)}
                   </div>
                 )}
+                {m.tools?.map((t, k) => t.confirm && (
+                  <div key={k} className="mt-2 rounded-2xl border border-amber-400 bg-amber-500/10 p-3 text-xs leading-6">
+                    <div className="font-bold">پیشنهاد دستیار: {ACTIONS[t.tool] ?? t.tool}</div>
+                    {Object.entries(t.input ?? {}).map(([a, v]) => (
+                      <div key={a}><span className="muted">{ARGS[a] ?? a}: </span>{a === "amount_rial" ? money(Number(v)) : String(v)}</div>
+                    ))}
+                    {t.done ? (
+                      <div className="mt-1 flex items-center gap-1 font-bold text-emerald-600"><Check size={14} />انجام شد</div>
+                    ) : (
+                      <>
+                        <p className="muted mt-1">تا دکمه را نزنید هیچ چیزی ثبت نمی‌شود. اگر درست نیست، دکمه را نزنید.</p>
+                        {t.error && <p className="mt-1 text-rose-600">انجام نشد: {t.error}</p>}
+                        <button className="btn btn-primary btn-sm mt-1" disabled={t.busy} onClick={() => confirmCall(i, k)}>
+                          {t.busy ? <Spinner /> : <Check size={14} />}تأیید و انجام
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
           ))}

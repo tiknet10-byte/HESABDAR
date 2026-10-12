@@ -60,9 +60,10 @@ def save_sku_map(body: SkuIn, db: Session = Depends(get_db), user=Depends(requir
 
 
 @router.post("/preview")
-async def preview(file: UploadFile = File(...), kind: str = Form(...), unit: str = Form("toman"), sku_text: str = Form(""),
-                  db: Session = Depends(get_db), _=Depends(require("settings"))):
-    data = await file.read()
+def preview(file: UploadFile = File(...), kind: str = Form(...), unit: str = Form("toman"), sku_text: str = Form(""),
+            db: Session = Depends(get_db), _=Depends(require("settings"))):
+    # a plain (not async) handler runs in a worker thread: reading a big file never freezes the program for the others
+    data = file.file.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
         raise HTTPException(400, "حجم فایل بیش از ۲۵ مگابایت است")
     try:
@@ -107,10 +108,10 @@ class CommitIn(BaseModel):
     choices: dict[str, int | str] = {}  # customers: row -> customer id | "new" | "skip"; products: row -> "p:id" | "s:id" | "new" | "skip"
     balances: bool = True  # customers: bring the debit / credit balances over as opening balances
     at: datetime | None = None  # date of the balances / stock
-    account_id: int | None = None  # customers' credit balances are kept as open deposits on this account
+    account_id: int | None = None  # customers' credit balances are kept as customer credits (اعتبار) on this account
     product_map: dict[str, int | str] = {}  # journal: unknown product name -> product id | "skip"
     customer_map: dict[str, int | str] = {}  # journal: unknown customer -> customer id | "new" | "skip"
-    credit_as: dict[str, str] = {}  # customers: row -> "deposit" (customer's prepaid credit) | "payable" (we owe this seller)
+    credit_as: dict[str, str] = {}  # customers: row -> "deposit" (the customer's credit, اعتبار) | "payable" (we owe this seller)
 
 
 @router.post("/{bid}/commit")
@@ -143,7 +144,7 @@ def undo(bid: int, db: Session = Depends(get_db), user=Depends(require("settings
     b = _batch(db, bid)
     try:
         result = tp.undo(db, b)
-    except ImportProblem as exc:
+    except (ImportProblem, ValueError) as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
     audit(db, "tizpardaz.undo", "import_batch", b.id, result, user=user)

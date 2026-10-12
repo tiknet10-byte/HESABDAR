@@ -33,8 +33,12 @@ function range(p: string, from: string, to: string): [string, string] {
   return ["", today];
 }
 
+/** A text cell Excel would run as a formula (a website buyer named "=HYPERLINK(...)") gets a leading ' and stays
+ * plain text. Numbers are left alone (a negative amount starts with "-"). */
+const csvText = (c: string | number | null | undefined) => (typeof c === "string" && /^[=+\-@\t\r]/.test(c) ? `'${c}` : c);
+
 function csv(name: string, header: string[], rows: (string | number)[][]) {
-  const body = [header, ...rows].map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+  const body = [header, ...rows].map((r) => r.map((c) => `"${String(csvText(c) ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
   const url = URL.createObjectURL(new Blob(["﻿" + body], { type: "text/csv;charset=utf-8" }));
   const a = document.createElement("a");
   a.href = url;
@@ -167,7 +171,7 @@ function StaffDetail({ id, start, end }: { id: number; start: string; end: strin
         <div className="mb-2 flex items-center justify-between">
           <span className="font-bold">ریز خدمات ({num(data.records_total)})</span>
           <button className="btn btn-sm" onClick={() => csv(`درآمد-${data.staff}.csv`, ["تاریخ", "مشتری", "کد مشتری", "خدمت", "مبلغ (تومان)", "منبع"],
-            data.records.map((r: any) => [formatJ(r.at, false), r.customer, r.code ?? "", r.service, toman(r.amount), r.source === "old" ? "سیستم قبلی" : (r.ref ?? "")]))}><Download size={14} />اکسل این صفحه</button>
+            data.records.map((r: any) => [formatJ(r.at, false), r.customer, r.code ?? "", r.service, toman(r.amount), r.source === "old" ? "سیستم قبلی" : r.returned ? `برگشت ${r.ref ?? ""}` : (r.ref ?? "")]))}><Download size={14} />اکسل این صفحه</button>
         </div>
         <div className="max-h-80 overflow-auto rounded-2xl border" style={{ borderColor: "var(--border)" }}>
           <table className="table text-xs">
@@ -177,8 +181,9 @@ function StaffDetail({ id, start, end }: { id: number; start: string; end: strin
                 <td className="num">{formatJ(r.at, false)}</td>
                 <td>{r.customer} {r.code && <span className="num muted">({r.code})</span>}</td>
                 <td>{r.service}</td>
-                <td className="num font-semibold">{money(r.amount)}</td>
-                <td>{r.source === "old" ? <span className="badge bg-sky-500/10 text-sky-600">سیستم قبلی</span> : <span className="num muted">{r.ref}</span>}</td>
+                <td className={`num font-semibold ${r.amount < 0 ? "text-rose-600" : ""}`}>{money(r.amount)}</td>
+                <td>{r.source === "old" ? <span className="badge bg-sky-500/10 text-sky-600">سیستم قبلی</span> : <span className="num muted">{r.ref}</span>}
+                  {r.returned && <span className="badge mr-1 bg-rose-500/10 text-rose-600" title="این فاکتور بعداً برگشت خورد؛ در روز برگشت کم شده">برگشتی</span>}</td>
               </tr>
             ))}</tbody>
           </table>
@@ -233,13 +238,13 @@ export default function RevenueReport() {
             {SOURCES.map((s) => <option key={s.v} value={s.v}>منبع: {s.l}</option>)}
           </select>
         </div>
-        <div className="muted mt-2 text-xs">مبالغ = کل مبلغ خدمات (بدون کسر سهم پرسنل). فیش‌های منتقل‌شده از نرم‌افزار قبلی هم حساب می‌شوند. ماه‌ها شمسی‌اند.</div>
+        <div className="muted mt-2 text-xs">مبالغ = کل مبلغ خدمات (بدون کسر سهم پرسنل). فیش‌های منتقل‌شده از نرم‌افزار قبلی هم حساب می‌شوند. فاکتوری که بعداً برگشت خورده، در ماه خودش حساب و در روز برگشت کم می‌شود (مثل دفاتر). ماه‌ها شمسی‌اند.</div>
       </Card>
 
-      {!data ? <Loading /> : t.count === 0 ? <Card><Empty text="در این بازه درآمدی ثبت نشده است" /></Card> : (
+      {!data ? <Loading /> : !data.months.length ? <Card><Empty text="در این بازه درآمدی ثبت نشده است" /></Card> : (
         <>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <Stat label="کل درآمد" value={compactMoney(t.revenue)} hint={`${num(t.count)} خدمت`} tone="pink" />
+            <Stat label="کل درآمد" value={compactMoney(t.revenue)} hint={`${num(t.count)} خدمت${t.returns ? ` · منهای ${compactMoney(t.returns)} برگشتی` : ""}`} tone="pink" />
             <Stat label="میانگین ماهانه" value={compactMoney(monthsN ? t.revenue / monthsN : 0)} hint={`${num(monthsN)} ماه`} tone="violet" />
             <Stat label="میانگین هر خدمت" value={compactMoney(t.count ? t.revenue / t.count : 0)} tone="emerald" />
             <Stat label="از سیستم قبلی / این سیستم" value={`${compactMoney(t.old)} / ${compactMoney(t.new)}`} tone="sky" />

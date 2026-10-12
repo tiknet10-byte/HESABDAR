@@ -186,6 +186,16 @@ def create_app() -> FastAPI:
         response.headers.setdefault("Permissions-Policy", "camera=(self), microphone=()")
         return response
 
+    from .core.security import host_allowed
+
+    @app.middleware("http")
+    async def host_check(request: Request, call_next):  # noqa: ANN001, ANN202
+        # added last = runs first: a web page whose own domain was pointed at this PC (DNS rebinding) gets nothing
+        if not host_allowed(request.headers.get("host")):
+            return JSONResponse(status_code=400, content={"detail": "این برنامه را با آدرس 127.0.0.1 یا localhost یا آدرس IP رایانه باز کنید. "
+                                                                    "(برای نام دیگر: HESABDAR_ALLOWED_HOSTS)"})
+        return await call_next(request)
+
     for r in (auth.router, catalog.router, customers.router, finance.router, legacy.router, products.router, system.router, tizpardaz.router,
               woo_api.router, capital_api.router):
         app.include_router(r)
@@ -199,8 +209,13 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(Exception)
     async def unexpected(request: Request, exc: Exception):  # noqa: ANN202
-        log.exception("unhandled error on %s %s", request.method, request.url.path)
-        return JSONResponse(status_code=500, content={"detail": f"خطای داخلی ({type(exc).__name__}): {exc}"})
+        # the details (SQL, values) go only to the log file; the screen shows a short code to find them there
+        import secrets
+
+        code = secrets.token_hex(3)
+        log.error("unhandled error [%s] on %s %s", code, request.method, request.url.path, exc_info=exc)
+        return JSONResponse(status_code=500, content={"detail": f"خطای پیش‌بینی‌نشده‌ای رخ داد (کد {code}). دوباره امتحان کنید؛ "
+                                                                "اگر تکرار شد، این کد را به پشتیبانی بگویید."})
 
     @app.exception_handler(ValueError)
     async def value_error(_: Request, exc: ValueError):  # noqa: ANN202

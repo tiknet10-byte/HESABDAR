@@ -20,7 +20,7 @@ import logging
 import re
 import threading
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from urllib.parse import urlparse
 
@@ -29,13 +29,31 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..core.security import decrypt_secret, encrypt_secret
-from ..models import Customer, Invoice, PaymentAccount, Product, WooLog, WooOrder, WooOutbox, WooProduct, local_now
+from ..models import Customer, Invoice, Payment, PaymentAccount, Product, WooLog, WooOrder, WooOutbox, WooProduct, local_now
 from . import accounting, inventory, routing, settings_store
 from .customer_merge import person_key
 from .textutil import normalize_mobile
 from .woo_queue import CFG_KEY
 
 log = logging.getLogger("hesabdar.woo")
+
+
+class _HideKeys(logging.Filter):
+    """httpx logs every request address; on hosts that need the key in the address (auth "query") the Consumer
+    key / secret would land in the log file. They are hidden, the rest of the line is kept."""
+    _re = re.compile(r"(consumer_(?:key|secret)=)[^&\s\"']+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001 - a log line that can't be built is left to logging itself
+            return True
+        if "consumer_" in msg:
+            record.msg, record.args = self._re.sub(r"\1***", msg), ()
+        return True
+
+
+logging.getLogger("httpx").addFilter(_HideKeys())
 
 STATE_KEY = "woo.state"
 MASK = "••••••••"
@@ -49,6 +67,8 @@ DEAD = {"cancelled", "refunded", "failed", "trash"}
 SOURCE = "woocommerce"
 CATALOG_EVERY = timedelta(hours=6)
 MAX_ATTEMPTS = 20
+PER_PAGE = 100  # the most WooCommerce gives in one page
+SENT_META = "_hesabdar_sent"  # on a website product: the queued stock changes ("first-last" ids) it has already got
 
 _lock = threading.Lock()
 _transport: httpx.BaseTransport | None = None  # tests plug a fake website in here
@@ -107,9 +127,17 @@ def save_config(db: Session, body: dict) -> dict:
         cfg["key"] = body["key"].strip()
     if body.get("secret") and body["secret"] != MASK:
         cfg["secret"] = body["secret"].strip()
-    cfg["interval"] = max(1, min(int(cfg.get("interval") or 5), 1440))
-    if cfg.get("start"):
-        cfg["start"] = date.fromisoformat(str(cfg["start"])[:10]).isoformat()
+    try:
+        cfg["interval"] = max(1, min(int(cfg.get("interval") or 5), 1440))
+        if cfg.get("start"):
+            cfg["start"] = date.fromisoformat(str(cfg["start"])[:10]).isoformat()
+        cfg["account_id"] = int(cfg["account_id"]) if cfg.get("account_id") else None
+        cfg["method_accounts"] = {str(k): int(v) for k, v in (cfg.get("method_accounts") or {}).items() if v}
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise WooError("یکی از تنظیمات سایت درست نیست (هر چند دقیقه، تاریخ شروع یا حساب دریافت)؛ دوباره انتخاب کنید") from exc
+    for aid in [cfg["account_id"], *cfg["method_accounts"].values()]:
+        if aid and db.get(PaymentAccount, aid) is None:
+            raise WooError("حساب دریافتِ انتخاب‌شده برای سفارش‌های سایت پیدا نشد؛ دوباره انتخاب کنید")
     if cfg["enabled"] and not cfg.get("start"):
         raise WooError("تاریخ شروع ثبت سفارش‌های سایت را مشخص کنید")
     if cfg["enabled"] and not (cfg["url"] and cfg["key"] and cfg["secret"]):
@@ -189,14 +217,22 @@ class Client:
             return len(data) if isinstance(data, list) else 0
 
     def all(self, path: str, **params) -> list:  # noqa: ANN003
-        out, page = [], 1
-        while True:
-            data, headers = self.request("GET", path, {**params, "per_page": 100, "page": page})
-            out.extend(data or [])
-            pages = int(headers.get("x-wp-totalpages") or 0)
-            if not data or len(data) < 100 or (pages and page >= pages) or page >= 500:
-                return out
-            page += 1
+        """Every page of a list. A list that changes size while it is read (e.g. an order deleted) shifts its pages
+        and a row could be skipped: it is then read again from the first page."""
+        for attempt in range(3):
+            out, page, total = [], 1, None
+            while True:
+                data, headers = self.request("GET", path, {**params, "per_page": PER_PAGE, "page": page})
+                if page == 1:
+                    total = headers.get("x-wp-total")
+                elif headers.get("x-wp-total") != total and attempt < 2:
+                    break
+                out.extend(data or [])
+                pages = int(headers.get("x-wp-totalpages") or 0)
+                if not data or len(data) < PER_PAGE or (pages and page >= pages) or page >= 500:
+                    return out
+                page += 1
+        return out
 
 
 def factor(currency: str | None, cfg: dict | None = None) -> int:
@@ -221,6 +257,24 @@ def _dt(value: object) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "")[:19])
     except ValueError:
         return None
+
+
+def _when(x: dict, field: str) -> datetime | None:
+    """A date of the website in this computer's (the clinic's) time. WooCommerce gives each date in the website's
+    own time zone and in GMT; the website may be set to another zone (WordPress starts with UTC), so GMT is used."""
+    gmt = _dt(x.get(f"{field}_gmt"))
+    if gmt is None:
+        return _dt(x.get(field))
+    return gmt.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+
+
+def _paid_at(o: dict) -> datetime | None:
+    """When the money of an order was received. Cash on delivery: when the order is completed (WooCommerce marks it
+    paid as soon as it is placed, but the courier brings the money later)."""
+    done = _when(o, "date_completed") if o.get("status") == "completed" else None
+    if o.get("payment_method") == "cod":
+        return done
+    return _when(o, "date_paid") or done
 
 
 def test_connection(db: Session) -> dict:
@@ -283,10 +337,13 @@ def refresh_catalog(db: Session, c: Client, cfg: dict) -> dict:
     by_sku = {}
     for p in db.scalars(select(Product).where(Product.sku.is_not(None)).order_by(Product.is_active, Product.id)):
         by_sku[p.sku.strip().lower()] = p  # active products win (they come last)
+    hand = {int(k): v for k, v in (state(db).get("links") or {}).items()}
     linked = prices = 0
     for wp in db.scalars(select(WooProduct)):
         p = by_sku.get(wp.sku.lower()) if wp.sku else None
-        if p is not None:
+        if wp.id in hand and db.get(Product, hand[wp.id]) is not None:
+            wp.product_id = hand[wp.id]  # linked by hand (e.g. the SKU is written differently): kept
+        elif p is not None:
             wp.product_id = p.id
         elif wp.sku:
             wp.product_id = None  # a SKU that is not here (any more)
@@ -303,6 +360,19 @@ def refresh_catalog(db: Session, c: Client, cfg: dict) -> dict:
     return {"site_products": len(seen), "linked": linked, "prices_updated": prices}
 
 
+def link_product(db: Session, wp: WooProduct, p: Product | None) -> None:
+    """Link a website product to a product here by hand (or unlink it); kept when the website is read again."""
+    wp.product_id = p.id if p else None
+    st = state(db)
+    links = dict(st.get("links") or {})  # a new dict, so the change is saved
+    if p is not None:
+        links[str(wp.id)] = p.id
+    else:
+        links.pop(str(wp.id), None)
+    st["links"] = links
+    _save_state(db, st)
+
+
 def _path(wp: WooProduct) -> str:
     return f"/products/{wp.parent_id}/variations/{wp.id}" if wp.parent_id else f"/products/{wp.id}"
 
@@ -311,19 +381,37 @@ def _site_of(db: Session, product_id: int) -> WooProduct | None:
     return db.scalar(select(WooProduct).where(WooProduct.product_id == product_id).order_by(WooProduct.parent_id.is_not(None), WooProduct.id))
 
 
+def _sent(site_product: dict) -> tuple[int, int] | None:
+    """The queued changes ("first-last" ids) a website product has already got (written with each change)."""
+    for m in site_product.get("meta_data") or []:
+        if m.get("key") == SENT_META:
+            try:
+                first, last = (int(x) for x in str(m.get("value")).split("-"))
+            except ValueError:
+                return None
+            return first, last
+    return None
+
+
 def push_stock(db: Session, c: Client, cfg: dict) -> dict:
     """Send the queued stock changes. A stock count (set) makes the website's quantity equal to the stock here;
-    other changes add / take the same quantity on the website."""
+    other changes add / take the same quantity on the website. Each change reaches the website once: the website's
+    product keeps which changes it got, so a change whose answer was lost (timeout) is not added again."""
     out = defaultdict(int)
-    pending = list(db.scalars(select(WooOutbox).where(WooOutbox.status == "pending").order_by(WooOutbox.id)))
-    groups: dict[int, list[WooOutbox]] = defaultdict(list)
-    for e in pending:
-        groups[e.product_id].append(e)
+    pids = list(dict.fromkeys(db.scalars(select(WooOutbox.product_id).where(WooOutbox.status == "pending").order_by(WooOutbox.id))))
     refreshed = False
-    for pid, entries in groups.items():
-        p = db.get(Product, pid)
-        wp = _site_of(db, pid)
-        if wp is None and not refreshed:
+    for pid in pids:
+        # the stock here and the changes waiting for the website, read in ONE statement: a sale saved meanwhile is in
+        # both or in neither (a stock count sends this stock, so the changes sent with it must be exactly those in it)
+        waiting = select(func.max(WooOutbox.id)).where(WooOutbox.product_id == pid, WooOutbox.status == "pending").scalar_subquery()
+        row = db.execute(select(Product.stock_qty, waiting).where(Product.id == pid)).one_or_none()
+        stock, last = row if row else (0, None)
+        entries = list(db.scalars(select(WooOutbox).where(WooOutbox.product_id == pid, WooOutbox.status == "pending",
+                                                          WooOutbox.id <= (last or 0)).order_by(WooOutbox.id)))
+        if not entries:
+            continue
+        wp = _site_of(db, pid) if row else None
+        if wp is None and row and not refreshed:
             refresh_catalog(db, c, cfg)
             refreshed = True
             wp = _site_of(db, pid)
@@ -336,10 +424,19 @@ def push_stock(db: Session, c: Client, cfg: dict) -> dict:
             continue
         try:
             current = c.get(_path(wp))
+            sent = _sent(current)
+            got = [e for e in entries if sent and sent[0] <= e.id <= sent[1]]
+            for e in got:  # sent last time; only the website's answer was lost
+                e.status, e.error, e.done_at = "done", "", now
+            out["sent"] += len(got)
+            entries = [e for e in entries if e not in got]
             before = current.get("stock_quantity")
+            if not entries:
+                db.commit()
+                continue
             if any(e.kind == "set" for e in entries):
-                target = max(0, p.stock_qty)
-                c.put(_path(wp), {"manage_stock": True, "stock_quantity": target})
+                target = max(0, int(stock or 0))
+                body = {"manage_stock": True, "stock_quantity": target}
             elif current.get("manage_stock") is not True:
                 for e in entries:
                     e.status, e.error, e.done_at = "skipped", "مدیریت موجودی این کالا در سایت خاموش است", now
@@ -348,10 +445,13 @@ def push_stock(db: Session, c: Client, cfg: dict) -> dict:
                 continue
             else:
                 target = max(0, int(before or 0) + sum(e.qty for e in entries))
-                c.put(_path(wp), {"stock_quantity": target})
+                body = {"stock_quantity": target}
+            for e in entries:
+                e.result = f"{before if before is not None else '—'} → {target}"
+            c.put(_path(wp), {**body, "meta_data": [{"key": SENT_META, "value": f"{entries[0].id}-{entries[-1].id}"}]})
             wp.stock_qty, wp.manage_stock = target, True
             for e in entries:
-                e.status, e.error, e.done_at, e.result = "done", "", now, f"{before if before is not None else '—'} → {target}"
+                e.status, e.error, e.done_at = "done", "", now
             out["sent"] += len(entries)
         except WooError as exc:
             for e in entries:
@@ -435,6 +535,7 @@ def _product(db: Session, li: dict, unit: int) -> Product:
         wp = wp or WooProduct(id=vid, parent_id=int(li["product_id"]) if li.get("variation_id") else None, sku=sku, name=(li.get("name") or "")[:200])
         wp.product_id = p.id
         db.add(wp)
+        db.flush()  # the same product on another line of the order finds this link (not a second one)
     return p
 
 
@@ -512,10 +613,33 @@ def plan(o: dict, refunds: list[dict], f: int) -> dict:
     return {"lines": lines, "extras": extras, "discount": discount, "target": target, "refunded": refunded, "fp": fp}
 
 
+def _give_back(db: Session, wo: WooOrder, customer: Customer, pa: PaymentAccount, refunds: list[dict], received_at: datetime,
+               num: object, f: int, cap: int | None = None) -> int:
+    """Money given back on the website: received with the order, paid back on the refund's own day, on the account
+    it came in on; each refund once (wo.refund_ids). cap: at most this much in all. Returns the amount given back."""
+    now = local_now()
+    done, total = set(wo.refund_ids or []), 0
+    for r in sorted(refunds, key=lambda r: int(r["id"])):
+        if int(r["id"]) in done:
+            continue
+        done.add(int(r["id"]))
+        amount = abs(rial(r.get("amount") if r.get("amount") is not None else r.get("total"), f))
+        if cap is not None:
+            amount = min(amount, cap - total)
+        if amount <= 0:
+            continue
+        dep = accounting.record_deposit(db, customer=customer, amount=amount, payment_account=pa, received_at=received_at,
+                                        source=SOURCE, notes=f"مبلغ برگشتی سفارش سایت #{num}")
+        accounting.close_deposit(db, dep, "refund", pa, at=min(max(_when(r, "date_created") or now, received_at), now))
+        total += amount
+    wo.refund_ids = sorted(done)
+    return total
+
+
 def _book(db: Session, wo: WooOrder, o: dict, pl: dict, refunds: list[dict], f: int, cfg: dict) -> Invoice | None:
     now = local_now()
-    created = min(_dt(o.get("date_created")) or now, now)
-    paid_at = _dt(o.get("date_paid")) or (_dt(o.get("date_completed")) if o.get("status") == "completed" else None)
+    created = min(_when(o, "date_created") or now, now)
+    paid_at = _paid_at(o)
     paid_at = min(paid_at, now) if paid_at else None
     customer = _customer(db, o)
     method = o.get("payment_method_title") or o.get("payment_method") or ""
@@ -538,16 +662,7 @@ def _book(db: Session, wo: WooOrder, o: dict, pl: dict, refunds: list[dict], f: 
         accounting.record_payment(db, payment_account=pa, amount=inv.total, invoice=inv, reference=f"سفارش سایت #{num}",
                                   paid_at=max(paid_at, created), source=SOURCE)
         # money given back on the website: received with the order, paid back on the refund's day
-        done = set(wo.refund_ids or [])
-        for r in refunds:
-            amount = abs(rial(r.get("amount") if r.get("amount") is not None else r.get("total"), f))
-            if int(r["id"]) in done or amount <= 0:
-                continue
-            dep = accounting.record_deposit(db, customer=customer, amount=amount, payment_account=pa, received_at=max(paid_at, created),
-                                            source=SOURCE, notes=f"مبلغ برگشتی سفارش سایت #{num}")
-            accounting.close_deposit(db, dep, "refund", pa, at=min(_dt(r.get("date_created")) or now, now))
-            done.add(int(r["id"]))
-        wo.refund_ids = sorted(done)
+        _give_back(db, wo, customer, pa, refunds, max(paid_at, created), num, f)
     else:
         wo.refund_ids = sorted(set(wo.refund_ids or []) | {int(r["id"]) for r in refunds})
     wo.invoice_id, wo.state, wo.paid, wo.fp = inv.id, "booked", paid, pl["fp"]

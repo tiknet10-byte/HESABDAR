@@ -39,7 +39,8 @@ from .textutil import normalize_mobile, normalize_text, parse_amount, to_en_digi
 
 KINDS = {"customers": "مشتریان", "history": "سوابق خدمات انجام‌شده", "deposits": "بیعانه‌های نوبت‌های آینده"}
 IMPORT_NOTE = "انتقال از نرم‌افزار قبلی"
-MAX_ROWS = 50_000
+MAX_ROWS = 50_000  # filled rows of a file (title and header included); a bigger file is refused, never cut
+MAX_COLS = 200  # columns read from an Excel sheet (real exports have far fewer)
 
 # column titles seen in Persian salon software exports (e.g. «چهره») -> field
 SYNONYMS: dict[str, list[str]] = {
@@ -122,6 +123,48 @@ class ImportProblem(ValueError):
     pass
 
 
+def _too_many() -> ImportProblem:
+    n = f"{MAX_ROWS:,}".translate(str.maketrans("0123456789,", "۰۱۲۳۴۵۶۷۸۹٬"))
+    return ImportProblem(f"این فایل بیش از {n} ردیف دارد و یک‌جا خوانده نمی‌شود. از نرم‌افزار قبلی برای بازهٔ کوتاه‌تر "
+                         "(مثلاً هر سال جدا) خروجی بگیرید و فایل‌ها را یکی‌یکی وارد کنید.")
+
+
+def _filled(rows) -> list[list[object]]:  # noqa: ANN001
+    """The non-empty rows, stopping (with a clear message) as soon as there are more than MAX_ROWS - nothing is cut."""
+    out: list[list[object]] = []
+    for r in rows:
+        if any(c not in (None, "") for c in r):
+            if len(out) >= MAX_ROWS:
+                raise _too_many()
+            out.append(r)
+    return out
+
+
+def _cells(r) -> list[object]:  # noqa: ANN001
+    """An Excel row: at most MAX_COLS cells, without the empty ones at its end."""
+    r = list(r[:MAX_COLS])
+    while r and r[-1] in (None, ""):
+        r.pop()
+    return r
+
+
+def _decode(data: bytes) -> str:
+    """Text of a CSV / TXT export: UTF-16 (Excel «Unicode Text») is recognised first - cp1256 accepts any bytes."""
+    head = data[:4000]
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        encodings: tuple[str, ...] = ("utf-16",)
+    elif b"\x00" in head:  # UTF-16 without its mark: digits, tabs and line ends carry a zero byte
+        encodings = ("utf-16-le",) if head[1::2].count(0) >= head[::2].count(0) else ("utf-16-be",)
+    else:
+        encodings = ("utf-8-sig", "cp1256")
+    for enc in encodings:
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise ImportProblem("فایل قابل خواندن نیست؛ فایل Excel (.xlsx) یا CSV بفرستید")
+
+
 def _key(text: object) -> str:
     """Comparable form of a header / name: Persian letters unified, no spaces or half-spaces."""
     return re.sub(r"[\s\-_‌.:]+", "", normalize_text(str(text or "")))
@@ -147,13 +190,20 @@ def read_table(filename: str, data: bytes) -> list[list[object]]:
             raise ImportProblem("کتابخانه خواندن اکسل نصب نیست؛ update.bat را اجرا کنید") from exc
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         best: list[list[object]] = []
-        for ws in wb.worksheets:  # the sheet with the most filled rows
-            rows = [list(r) for r in ws.iter_rows(values_only=True) if any(c not in (None, "") for c in r)]
-            if len(rows) > len(best):
-                best = rows
-        wb.close()
-        return best[:MAX_ROWS + 20]
+        try:
+            for ws in wb.worksheets:  # the sheet with the most filled rows
+                # the size a sheet declares can be wrong (or huge, e.g. A1:XFD1048576): read only the cells really there
+                ws.reset_dimensions()
+                rows = _filled(_cells(r) for r in ws.iter_rows(values_only=True))
+                if len(rows) > len(best):
+                    best = rows
+        finally:
+            wb.close()
+        width = max((len(r) for r in best), default=0)
+        return [r + [None] * (width - len(r)) for r in best]  # every row as wide as the table
     head = data[:2048].lstrip().lower()
+    if b"\x00" in head[:200]:  # UTF-16 text: look at its letters
+        head = head.replace(b"\x00", b"")
     if head.startswith((b"<", b"\xef\xbb\xbf<")) or b"<table" in head or b"<html" in head:
         return _html_table(data)  # some programs save an HTML table with an .xls name
     if name.endswith(".xls") or data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
@@ -180,21 +230,16 @@ def read_table(filename: str, data: bytes) -> list[list[object]]:
                             pass
                     vals.append(v)
                 if any(v not in (None, "") for v in vals):
+                    if len(rows) >= MAX_ROWS:
+                        raise _too_many()
                     rows.append(vals)
             if len(rows) > len(best):
                 best = rows
-        return best[:MAX_ROWS + 20]
-    for enc in ("utf-8-sig", "cp1256", "utf-16"):
-        try:
-            text = data.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        raise ImportProblem("فایل قابل خواندن نیست؛ فایل Excel (.xlsx) یا CSV بفرستید")
+        return best
+    text = _decode(data)
     sample = text[:4000]
     delim = max([",", ";", "\t", "|"], key=sample.count)
-    return [r for r in csv.reader(io.StringIO(text), delimiter=delim) if any(c.strip() for c in r)][:MAX_ROWS + 20]
+    return _filled(r for r in csv.reader(io.StringIO(text), delimiter=delim) if any(c.strip() for c in r))
 
 
 def detect_mapping(header: list[object], kind: str | None = None) -> dict[str, int]:
@@ -271,7 +316,9 @@ def _html_table(data: bytes) -> list[list[object]]:
     p.feed(text)
     if not p.rows:
         raise ImportProblem("جدولی در فایل پیدا نشد")
-    return p.rows[:MAX_ROWS + 20]
+    if len(p.rows) > MAX_ROWS:
+        raise _too_many()
+    return p.rows
 
 
 # ------------------------------------------------------------------ values
@@ -394,6 +441,8 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
     if not rows:
         raise ImportProblem("فایل خالی است")
     hi = _header_row(rows, kind)
+    if len(rows) - hi - 1 > MAX_ROWS:
+        raise _too_many()
     header = [_text(h) for h in rows[hi]]
     mapping = {k: int(v) for k, v in (mapping or detect_mapping(rows[hi], kind)).items() if v is not None and int(v) >= 0}
     if "line" not in mapping:
@@ -416,7 +465,7 @@ def parse_rows(db: Session, rows: list[list[object]], kind: str, unit: str, mapp
     skipped = {"settled": 0, "refunded": 0}
     receipt = ""  # grouped reports: a «شماره پذیرش: ...» line above the services of each receipt
     seen: dict[str, int] = {}
-    for n, r in enumerate(rows[hi + 1: hi + 1 + MAX_ROWS], start=hi + 2):
+    for n, r in enumerate(rows[hi + 1:], start=hi + 2):
         line_text = to_en_digits(" ".join(_text(c) for c in r if c not in (None, "")))
         group = re.search(r"(?:شماره\s*پذیرش|شماره\s*فیش|شماره\s*فاکتور)\s*[:：]?\s*(\d{3,})", line_text)
         if group and not _text(get(r, "service")) and not _text(get(r, "name")):
@@ -628,10 +677,23 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
     file_codes = [int(r["code"]) for r in batch.rows if str(r.get("code") or "").isdigit()]
     auto_code = [max(int(accounting.next_customer_code(db)), max(file_codes, default=0) + 1)]
     moved: list[Customer] = []
+    # such an automatic code is the number the old software gives its NEXT customer: a later file can bring it for
+    # someone else, so a customer holding a code made up here is matched by that code only if name / mobile agree
+    auto: dict[str, str] = {}  # customer id -> code given automatically (and not confirmed by the old software since)
+    for b in db.scalars(select(ImportBatch).where(ImportBatch.kind.like("legacy_%"), ImportBatch.status.in_(("committed", "undone")))
+                        .order_by(ImportBatch.id)):
+        auto.update((b.summary or {}).get("auto_codes", {}))
+        for cid in (b.summary or {}).get("confirmed_codes", []):
+            auto.pop(cid, None)
+    auto_new: dict[str, str] = {}
+    confirmed: list[str] = []
 
     def new_code() -> str:
         auto_code[0] += 1
         return str(auto_code[0] - 1)
+
+    def is_auto(c: Customer) -> bool:
+        return c.legacy_code is not None and auto.get(str(c.id)) == c.legacy_code
 
     def same_person(c: Customer, row: dict) -> bool:
         if row["mobile"] and c.mobile == row["mobile"]:
@@ -664,16 +726,20 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
                 merged_code = c is not None
             else:
                 merged_code = False
-            if c is not None and not merged_code and c.source != "import" and not same_person(c, row):
-                # that code was given automatically in this system to someone else: the old code wins, theirs moves
-                c.legacy_code = None
-                moved.append(c)
-                db.flush()
-                counts["codes_moved"] = counts.get("codes_moved", 0) + 1
-                c = None
+            if c is not None and not merged_code and (c.source != "import" or is_auto(c)):
+                if not same_person(c, row):
+                    # that code was given automatically in this system to someone else: the old code wins, theirs moves
+                    c.legacy_code = None
+                    moved.append(c)
+                    db.flush()
+                    counts["codes_moved"] = counts.get("codes_moved", 0) + 1
+                    c = None
+                elif is_auto(c):  # the old software has this same person under that number: it is a real code now
+                    auto.pop(str(c.id), None)
+                    confirmed.append(str(c.id))
             if c is None and row["mobile"]:  # same person already entered by hand in this system: give them the old code
                 m = accounting.find_customer(db, row["mobile"])
-                if m is not None and m.source != "import" and same_person(m, row):
+                if m is not None and (m.source != "import" or is_auto(m)) and same_person(m, row):
                     c = m
                     if m.mobile == row["mobile"]:
                         c.legacy_code = code
@@ -689,6 +755,8 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
                          mobile_issue=issue, mobile_raw=raw, source="import", legacy_code=code or new_code())
             db.add(c)
             db.flush()
+            if not code:
+                auto_new[str(c.id)] = c.legacy_code
             created["customers"].append(c.id)
             counts["customers_new"] += 1
             if issue in ("invalid", "duplicate"):
@@ -731,11 +799,13 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
         if account is None:
             raise ImportProblem("ابتدا در تنظیمات یک حساب دریافت (کارتخوان/کارت/صندوق) تعریف کنید")
 
-    # records already brought over by an earlier (not undone) import of the same kind
+    # records already brought over by an earlier import of the same kind (of an undone one: the records it kept, e.g.
+    # a deposit already used on an invoice - bringing it again would hold the same money twice)
     done_fps: set[str] = set()
-    for b in db.scalars(select(ImportBatch).where(ImportBatch.kind == batch.kind, ImportBatch.status == "committed")):
-        done_fps.update((b.summary or {}).get("fps", []))
+    for b in db.scalars(select(ImportBatch).where(ImportBatch.kind == batch.kind, ImportBatch.status.in_(("committed", "undone")))):
+        done_fps.update((b.summary or {}).get("fps" if b.status == "committed" else "kept_fps", []))
     fps: list[str] = []
+    fp_rec: list[int] = []  # history / deposits: the record each fp made (fp_rec[i] for fps[i]), so undo knows what it kept
 
     for row in batch.rows:
         if row.get("errors"):
@@ -760,6 +830,7 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
             db.add(a)
             db.flush()
             created["appointments"].append(a.id)
+            fp_rec.append(a.id)
             counts["appointments"] += 1
         elif kind == "deposits":
             received = datetime.fromisoformat(row["date"]) if row.get("date") else now
@@ -792,14 +863,17 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
                                line_id=svc.line_id if svc else row.get("line_id"), staff_id=dep.staff_id),
             ], "deposit", dep.id, at=received)
             created["deposits"].append(dep.id)
+            fp_rec.append(dep.id)
             counts["deposits"] += 1
     for c in moved:  # customers whose automatic code was taken by an imported one get a fresh code
         c.legacy_code = new_code()
+        auto_new[str(c.id)] = c.legacy_code
     batch.status = "committed"
     # the parsed file is not needed any more (undo uses "created", re-import checks use "fps"): keep only the problem
     # lines for reference, so big imports don't bloat the database
     batch.rows = [r for r in batch.rows if r.get("errors") or r.get("warnings")][:1000]
-    batch.summary = {**batch.summary, "created": created, "result": counts, "fps": fps, "committed_at": now.isoformat(timespec="minutes")}
+    batch.summary = {**batch.summary, "created": created, "result": counts, "fps": fps, "fp_rec": fp_rec, "auto_codes": auto_new,
+                     "confirmed_codes": confirmed, "committed_at": now.isoformat(timespec="minutes")}
     return counts
 
 
@@ -818,14 +892,21 @@ def undo(db: Session, batch: ImportBatch) -> dict:
     if batch.status != "committed":
         raise ImportProblem("فقط فایل‌های ثبت‌شده قابل برگشت هستند")
     created = (batch.summary or {}).get("created", {})
+    kind = batch.kind.removeprefix("legacy_")
     kept = {"deposits": 0, "appointments": 0, "customers": 0, "services": 0}
     removed = {"deposits": 0, "appointments": 0, "customers": 0, "services": 0}
+    kept_ids: set[int] = set()  # the records of the file's rows that stay (deposits / receipts)
     for did in created.get("deposits", []):
         d = db.get(Deposit, did)
         if d is None:
             continue
-        if d.status != "held":  # already used on an invoice / refunded: leave it
+        # already used on an invoice (also one voided since: it is open again, but its settlement entry stays in
+        # the books), refunded or forfeited: leave it with all its entries
+        used = d.status != "held" or db.scalar(select(func.count(JournalEntry.id)).where(
+            JournalEntry.ref_type == "deposit_apply", JournalEntry.ref_id == did))
+        if used:
             kept["deposits"] += 1
+            kept_ids.add(did)
             continue
         for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "deposit", JournalEntry.ref_id == did)):
             db.delete(e)
@@ -838,6 +919,8 @@ def undo(db: Session, batch: ImportBatch) -> dict:
             continue
         if a.invoice_id or db.scalar(select(func.count(Deposit.id)).where(Deposit.appointment_id == aid)):
             kept["appointments"] += 1
+            if kind == "history":
+                kept_ids.add(aid)
             continue
         db.delete(a)
         removed["appointments"] += 1
@@ -863,6 +946,9 @@ def undo(db: Session, batch: ImportBatch) -> dict:
             continue
         unused.append(c)
     removed["customers"] = accounting.delete_customers(db, unused)
+    s = batch.summary or {}
+    # rows whose record stays are still "brought over": importing the file again must skip them
+    kept_fps = [fp for fp, rid in zip(s.get("fps", []), s.get("fp_rec", [])) if rid in kept_ids]
     batch.status = "undone"
-    batch.summary = {**batch.summary, "undo": {"removed": removed, "kept": kept}}
+    batch.summary = {**s, "undo": {"removed": removed, "kept": kept}, "kept_fps": kept_fps}
     return {"removed": removed, "kept": kept}

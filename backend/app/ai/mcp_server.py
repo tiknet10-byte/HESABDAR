@@ -7,7 +7,8 @@ Usage (Claude Desktop / Claude Code config):
   {"mcpServers": {"hesabdar": {"command": "<path>/backend/.venv/bin/python",
                                "args": ["-m", "app.ai.mcp_server", "--user", "ai"],
                                "cwd": "<path>/backend"}}}
-The --user must be an active user (create one with role "ai_agent" for least privilege).
+The --user must be an active user. Create one with role "ai_agent": it reads data and reports and may add customers
+and deposits, but cannot move money (refunds, expenses, payouts, opening balances), change settings or void invoices.
 """
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ def serve(username: str) -> None:
     manager.discover()
     manager.sync_state()
     with SessionLocal() as db:
-        user = db.scalar(select(User).where(User.username == username, User.is_active.is_(True)))
+        user = db.scalar(select(User).where(User.username == username.strip().lower(), User.is_active.is_(True)))
         if user is None:
             sys.stderr.write(f"user {username!r} not found or inactive\n")
             sys.exit(1)
@@ -63,6 +64,8 @@ def serve(username: str) -> None:
                 with SessionLocal() as db:
                     u = db.get(User, user.id)
                     try:
+                        if u is None or not u.is_active:  # deactivated since the server started
+                            raise PermissionError(f"user {username!r} is no longer active")
                         out = invoke(db, u, params["name"], params.get("arguments") or {})
                         result = {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]}
                     except Exception as exc:

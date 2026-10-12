@@ -31,7 +31,7 @@ export const AuthContext = createContext<AuthCtx>({ user: null, setUser: () => {
 export const useAuth = () => useContext(AuthContext);
 
 const PERMS: Record<string, string[]> = {
-  finance: ["owner", "admin", "accountant", "ai_agent"],
+  finance: ["owner", "admin", "accountant"],
   reports: ["owner", "admin", "accountant", "ai_agent"],
   settings: ["owner", "admin"],
   void: ["owner", "admin"],

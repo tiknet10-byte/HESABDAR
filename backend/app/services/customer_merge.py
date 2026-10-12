@@ -2,7 +2,7 @@
 
 Two people can share a name - the mobile tells them apart - so the system never merges on its own: it shows
 the candidates and the user decides. Merging moves every record of the duplicate (invoices, payments,
-deposits, appointments, waiting list, the ledger lines that make up its balance, messages, receipts) to the
+deposits, appointments, waiting list, the ledger lines that make up its balance, messages, receipts, loyalty points) to the
 customer that is kept, and keeps the duplicate's mobile and customer code as extra ones, so searching by the
 old number or code - and future imports from the previous software - still find the person.
 """
@@ -61,6 +61,52 @@ def _pair(a: int, b: int) -> str:
 
 def not_same_pairs(db: Session) -> set[str]:
     return set(db.scalars(select(KnowledgeItem.key).where(KnowledgeItem.kind == "customer_not_same")))
+
+
+def _points(db: Session, cid: int) -> KnowledgeItem | None:
+    """Loyalty points of a customer (plugin «باشگاه مشتریان»), kept under the customer's id."""
+    return db.scalar(select(KnowledgeItem).where(KnowledgeItem.kind == "loyalty", KnowledgeItem.key == str(cid)))
+
+
+def _move_knowledge(db: Session, keep_id: int, drop_id: int) -> None:
+    """What is remembered by customer id follows the merge: the loyalty points add up, and «not the same person»
+    answers about the removed record now hold for the kept one (the removed id may be given to a new customer)."""
+    pts = _points(db, drop_id)
+    if pts is not None:
+        mine = _points(db, keep_id)
+        if mine is None:
+            pts.key = str(keep_id)
+        else:
+            total = int((mine.value or {}).get("points", 0)) + int((pts.value or {}).get("points", 0))
+            mine.value = {**(mine.value or {}), "points": total}  # a new dict, so the change is saved
+            db.delete(pts)
+    known = not_same_pairs(db)
+    for item in list(db.scalars(select(KnowledgeItem).where(KnowledgeItem.kind == "customer_not_same"))):
+        ids = [int(x) for x in item.key.split("-")]
+        if drop_id not in ids:
+            continue
+        other = ids[0] if ids[1] == drop_id else ids[1]
+        if other == keep_id or _pair(keep_id, other) in known:
+            db.delete(item)  # said "different" and then merged anyway, or already known for the kept one
+        else:
+            item.key = _pair(keep_id, other)
+            known.add(item.key)
+    db.flush()
+
+
+def forget(db: Session, ids: list[int]) -> int:
+    """Customers being deleted: drop what is remembered by their id (loyalty points, «not the same person» answers),
+    so a new customer that gets the same id later does not inherit it."""
+    if not ids:
+        return 0
+    keys = {str(i) for i in ids}
+    n = 0
+    for item in list(db.scalars(select(KnowledgeItem).where(KnowledgeItem.kind.in_(("loyalty", "customer_not_same"))))):
+        if (item.key in keys) if item.kind == "loyalty" else bool(keys & set(item.key.split("-"))):
+            db.delete(item)
+            n += 1
+    db.flush()
+    return n
 
 
 def mark_different(db: Session, ids: list[int], user=None) -> int:  # noqa: ANN001
@@ -158,6 +204,7 @@ def merge(db: Session, keep: Customer, drop: Customer, user=None) -> dict:  # no
     for m in LINKED:
         res = db.execute(update(m).where(m.customer_id == drop.id).values(customer_id=keep.id))
         moved[m.__tablename__] = res.rowcount or 0
+    _move_knowledge(db, keep.id, drop.id)
     # numbers and codes: the kept record gets the other's as extra ones (or as its own when it has none)
     mobiles = [x for x in [drop.mobile, *(drop.other_mobiles or [])] if x]
     codes = [x for x in [drop.legacy_code, *(drop.other_codes or [])] if x]

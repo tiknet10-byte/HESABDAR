@@ -2,6 +2,7 @@
 
   python manage.py run [--host 0.0.0.0] [--port 8000] [--open]   start the server (local mode)
   python manage.py create-user <username> <role> [--password ...]  add a user (owner/admin/accountant/receptionist/staff/ai_agent)
+  python manage.py unlock <username>                                open an account closed after too many wrong passwords
   python manage.py demo                                             fill the database with realistic demo data
   python manage.py backup                                           create an encrypted backup now
   python manage.py restore <name>                                   restore a backup by name
@@ -29,6 +30,8 @@ def main() -> None:
     u.add_argument("role")
     u.add_argument("--password")
     u.add_argument("--full-name", default="")
+    ul = sub.add_parser("unlock")
+    ul.add_argument("username")
     sub.add_parser("demo")
     sub.add_parser("backup")
     rs = sub.add_parser("restore")
@@ -63,12 +66,29 @@ def main() -> None:
         from app.models import User
         if a.role not in ROLES:
             sys.exit(f"role must be one of {ROLES}")
+        name = a.username.strip().lower()  # same as the web page: trimmed, small letters
+        if not name:
+            sys.exit("username is empty")
         pw = a.password or getpass.getpass("password: ")
         validate_password_strength(pw)
         with SessionLocal() as db:
-            db.add(User(username=a.username.lower(), full_name=a.full_name, role=a.role, password_hash=hash_password(pw)))
+            from sqlalchemy import select
+            if db.scalar(select(User).where(User.username == name)):
+                sys.exit(f"user {name!r} already exists")
+            db.add(User(username=name, full_name=a.full_name, role=a.role, password_hash=hash_password(pw)))
             db.commit()
         print("user created")
+    elif a.cmd == "unlock":
+        from sqlalchemy import select
+
+        from app.models import User
+        with SessionLocal() as db:
+            user = db.scalar(select(User).where(User.username == a.username.strip().lower()))
+            if user is None:
+                sys.exit(f"user {a.username!r} not found")
+            user.failed_logins, user.locked_until = 0, None
+            db.commit()
+        print("user unlocked")
     elif a.cmd == "demo":
         from app.seed import seed_demo
         with SessionLocal() as db:

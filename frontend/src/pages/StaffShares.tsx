@@ -48,9 +48,11 @@ export default function StaffShares() {
       {!data ? <Loading /> : (
         <>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <Stat label="درآمد خدمات" value={cmoney(t.revenue)} tone="pink" />
+            <Stat label="درآمد خدمات" value={cmoney(t.revenue)} tone="pink" hint="فقط خدمات؛ فروش محصولات جداست"
+              help="جمع خدمات انجام‌شده در این بازه (بعد از تخفیف). فروش محصولات پرسنل و سهم ندارد و در «گزارش‌ها ← فروش محصولات» است. خدمتی که بعداً برگشت خورده، در روز برگشت کم می‌شود." />
             <Stat label="سهم پرسنل" value={cmoney(t.staff_share)} tone="amber" />
-            <Stat label="سهم سالن (مدیریت)" value={cmoney(t.salon_share)} tone="emerald" />
+            <Stat label="سهم سالن (مدیریت)" value={cmoney(t.salon_share)} tone="emerald"
+              hint={t.forfeits ? `به‌علاوهٔ ${cmoney(t.forfeits)} بیعانهٔ سوخت‌شده` : undefined} />
             <Stat label="مانده بدهی به پرسنل" value={cmoney(t.balance)} hint={`پرداخت‌شده در دوره: ${cmoney(t.paid)}`} tone="sky" />
           </div>
           <Card title="به تفکیک پرسنل" pad={false}>
@@ -60,7 +62,7 @@ export default function StaffShares() {
                   <thead><tr><th>پرسنل</th><th>لاین</th><th>درصد</th><th>تعداد خدمت</th><th>درآمد</th><th>سهم پرسنل</th><th>سهم سالن</th><th>پرداخت در دوره</th><th>مانده</th><th></th></tr></thead>
                   <tbody>{data.staff.map((r: any) => (
                     <tr key={r.staff_id ?? 0} className={r.staff_id ? "" : "text-amber-700 dark:text-amber-300"}>
-                      <td className="font-semibold">{r.name}</td><td className="muted">{r.line ?? "—"}</td><td className="num">{num(r.percent)}٪</td>
+                      <td className="font-semibold">{r.name}{r.active === false && <span className="badge mr-2 bg-slate-500/15 text-[10px] text-slate-500" title="این پرسنل غیرفعال شده ولی هنوز با او حساب داریم">غیرفعال</span>}</td><td className="muted">{r.line ?? "—"}</td><td className="num">{num(r.percent)}٪</td>
                       <td className="num">{num(r.services)}</td><td className="num">{money(r.revenue)}</td>
                       <td className="num font-semibold text-amber-600">{money(r.staff_share)}</td><td className="num font-semibold text-emerald-600">{money(r.salon_share)}</td>
                       <td className="num">{money(r.paid)}</td><td className="num font-bold">{money(r.balance)}</td>
@@ -75,13 +77,15 @@ export default function StaffShares() {
           <Card title="به تفکیک لاین" pad={false}>
             <div className="overflow-x-auto">
               <table className="table">
-                <thead><tr><th>لاین</th><th>تعداد خدمت</th><th>درآمد</th><th>سهم پرسنل</th><th>سهم سالن</th></tr></thead>
+                <thead><tr><th>لاین</th><th>تعداد خدمت</th><th>درآمد</th><th>سهم پرسنل</th><th>سهم سالن</th><th>بیعانهٔ سوخت‌شده</th></tr></thead>
                 <tbody>{data.lines.map((r: any) => (
                   <tr key={r.line_id ?? 0}><td className="font-semibold">{r.name}</td><td className="num">{num(r.services)}</td><td className="num">{money(r.revenue)}</td>
-                    <td className="num text-amber-600">{money(r.staff_share)}</td><td className="num font-semibold text-emerald-600">{money(r.salon_share)}</td></tr>
+                    <td className="num text-amber-600">{money(r.staff_share)}</td><td className="num font-semibold text-emerald-600">{money(r.salon_share)}</td>
+                    <td className="num text-rose-600">{r.forfeits ? money(r.forfeits) : "—"}</td></tr>
                 ))}</tbody>
               </table>
             </div>
+            <p className="muted px-5 py-3 text-xs">بیعانهٔ مشتری‌ای که نیامد، درآمد همان لاین است و همه‌اش سهم سالن است (پرسنل از آن سهمی ندارد).</p>
           </Card>
         </>
       )}

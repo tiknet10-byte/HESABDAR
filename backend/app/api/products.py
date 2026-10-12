@@ -10,6 +10,7 @@ from sqlalchemy import Integer, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
+from ..core.security import has_permission
 from ..models import (
     Customer,
     Invoice,
@@ -56,19 +57,29 @@ class ProductIn(BaseModel):
     is_active: bool = True
 
 
-def _p(p: Product) -> dict:
+def _costs(user) -> bool:  # noqa: ANN001
+    """Purchase prices, cost of goods, margins and what is owed to sellers: only for those who see the reports
+    (owner, admin, accountant) - not the receptionist or staff."""
+    return user is not None and has_permission(user.role, "reports")
+
+
+COST_FIELDS = ("stock_value", "unit_cost", "last_purchase_cost", "margin", "margin_pct")
+
+
+def _p(p: Product, costs: bool = False) -> dict:
     margin = (p.sale_price - (p.unit_cost or 0)) if p.unit_cost is not None else None
-    return {"id": p.id, "code": p.code, "sku": p.sku, "name": p.name, "brand": p.brand, "category": p.category, "unit": p.unit,
-            "sale_price": p.sale_price, "online_price": p.online_price, "reorder_level": p.reorder_level, "notes": p.notes,
-            "is_active": p.is_active, "stock_qty": p.stock_qty, "stock_value": p.stock_value, "unit_cost": p.unit_cost,
-            "last_purchase_cost": p.last_purchase_cost, "margin": margin,
-            # last selling prices: filled in on the next invoice (in person / website)
-            "last_sale_price": p.last_sale_price, "last_sale_at": p.last_sale_at.isoformat(timespec="minutes") if p.last_sale_at else None,
-            "last_online_price": p.last_online_price,
-            "last_online_at": p.last_online_at.isoformat(timespec="minutes") if p.last_online_at else None,
-            "price_in_person": inventory.suggested_price(p), "price_online": inventory.suggested_price(p, "online"),
-            "margin_pct": round(margin / p.sale_price * 100, 1) if margin is not None and p.sale_price else None,
-            "low": p.is_active and p.stock_qty <= p.reorder_level}
+    out = {"id": p.id, "code": p.code, "sku": p.sku, "name": p.name, "brand": p.brand, "category": p.category, "unit": p.unit,
+           "sale_price": p.sale_price, "online_price": p.online_price, "reorder_level": p.reorder_level, "notes": p.notes,
+           "is_active": p.is_active, "stock_qty": p.stock_qty, "stock_value": p.stock_value, "unit_cost": p.unit_cost,
+           "last_purchase_cost": p.last_purchase_cost, "margin": margin,
+           # last selling prices: filled in on the next invoice (in person / website)
+           "last_sale_price": p.last_sale_price, "last_sale_at": p.last_sale_at.isoformat(timespec="minutes") if p.last_sale_at else None,
+           "last_online_price": p.last_online_price,
+           "last_online_at": p.last_online_at.isoformat(timespec="minutes") if p.last_online_at else None,
+           "price_in_person": inventory.suggested_price(p), "price_online": inventory.suggested_price(p, "online"),
+           "margin_pct": round(margin / p.sale_price * 100, 1) if margin is not None and p.sale_price else None,
+           "low": p.is_active and p.stock_qty <= p.reorder_level}
+    return out if costs else {**out, **dict.fromkeys(COST_FIELDS)}
 
 
 def _check(db: Session, body: ProductIn, pid: int | None = None) -> tuple[str, str | None]:
@@ -91,7 +102,7 @@ def _check(db: Session, body: ProductIn, pid: int | None = None) -> tuple[str, s
 
 # ------------------------------------------------------------------ catalog
 @router.get("/products")
-def products(q: str = "", all: bool = False, low: bool = False, db: Session = Depends(get_db), _=Depends(require("read"))):  # noqa: A002
+def products(q: str = "", all: bool = False, low: bool = False, db: Session = Depends(get_db), user=Depends(require("read"))):  # noqa: A002
     stmt = select(Product).order_by(func.cast(Product.code, Integer), Product.id)
     if not all:
         stmt = stmt.where(Product.is_active.is_(True))
@@ -99,19 +110,24 @@ def products(q: str = "", all: bool = False, low: bool = False, db: Session = De
         code = to_en_digits(q).strip()
         stmt = stmt.where(or_(fa_like(Product.name, q), Product.code == code, func.lower(Product.sku).like(f"%{code.lower()}%"),
                               fa_like(Product.brand, q), fa_like(Product.category, q)))
-    rows = [_p(p) for p in db.scalars(stmt.limit(2000))]
+    costs = _costs(user)
+    rows = [_p(p, costs) for p in db.scalars(stmt.limit(2000))]
     return [r for r in rows if r["low"]] if low else rows
 
 
 @router.get("/products/summary")
-def products_summary(db: Session = Depends(get_db), _=Depends(require("read"))):
-    """Inventory value, low stock, what is owed to suppliers - for the products page header."""
-    act = select(Product).where(Product.is_active.is_(True))
-    items = list(db.scalars(act))
+def products_summary(db: Session = Depends(get_db), user=Depends(require("read"))):
+    """Inventory value, low stock, what is owed to suppliers - for the products page header. The value is that of
+    every product, archived ones too (their goods are still in the books), so it equals the ledger's inventory."""
+    every = list(db.scalars(select(Product)))
+    items = [p for p in every if p.is_active]
     owed = db.scalar(select(func.coalesce(func.sum(Purchase.total - Purchase.paid), 0)).where(Purchase.status.in_(("open", "partial")))) or 0
-    return {"count": len(items), "stock_value": sum(p.stock_value for p in items), "units": sum(max(0, p.stock_qty) for p in items),
+    costs = _costs(user)
+    return {"count": len(items), "stock_value": sum(p.stock_value for p in every) if costs else None,
+            "units": sum(max(0, p.stock_qty) for p in every),
             "low": sum(1 for p in items if p.stock_qty <= p.reorder_level), "negative": sum(1 for p in items if p.stock_qty < 0),
-            "owed_to_suppliers": int(owed), "method": inventory.method(db), "method_label": inventory.METHODS[inventory.method(db)]}
+            "owed_to_suppliers": int(owed) if costs else None, "method": inventory.method(db),
+            "method_label": inventory.METHODS[inventory.method(db)]}
 
 
 @router.post("/products")
@@ -122,7 +138,7 @@ def create_product(body: ProductIn, db: Session = Depends(get_db), user=Depends(
     db.flush()
     audit(db, "product.create", "product", p.id, body.model_dump(), user=user)
     db.commit()
-    return _p(p)
+    return _p(p, _costs(user))
 
 
 @router.put("/products/{pid}")
@@ -138,15 +154,15 @@ def update_product(pid: int, body: ProductIn, db: Session = Depends(get_db), use
     p.name, p.code, p.sku = body.name.strip(), code, sku
     audit(db, "product.update", "product", p.id, body.model_dump(), user=user)
     db.commit()
-    return _p(p)
+    return _p(p, _costs(user))
 
 
 @router.delete("/products/{pid}")
 def delete_product(pid: int, db: Session = Depends(get_db), user=Depends(require("finance"))):
-    """Never-used products are deleted; products with history are archived (hidden, kept in the books)."""
+    """Never-used products are deleted; products with history (stock card, sales, purchases - even voided -, imported
+    history, a website link) are archived (hidden, kept in the books)."""
     p = db.get(Product, pid) or _404("محصول")
-    used = db.scalar(select(func.count(StockMove.id)).where(StockMove.product_id == pid)) or \
-        db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.product_id == pid))
+    used = inventory.product_in_use(db, pid)
     if used:
         p.is_active = False
     else:
@@ -157,9 +173,11 @@ def delete_product(pid: int, db: Session = Depends(get_db), user=Depends(require
 
 
 @router.get("/products/{pid}")
-def product_detail(pid: int, db: Session = Depends(get_db), _=Depends(require("read"))):
-    """The product with its stock card (kardex): every move with the running quantity and value."""
+def product_detail(pid: int, db: Session = Depends(get_db), user=Depends(require("read"))):
+    """The product with its stock card (kardex): every move with the running quantity and value (the value and
+    costs only for those who see the reports)."""
     p = db.get(Product, pid) or _404("محصول")
+    costs = _costs(user)
     moves = list(db.scalars(select(StockMove).where(StockMove.product_id == pid).order_by(StockMove.at, StockMove.id)))
     inv_of = {}
     item_ids = [m.invoice_item_id for m in moves if m.invoice_item_id]
@@ -173,21 +191,24 @@ def product_detail(pid: int, db: Session = Depends(get_db), _=Depends(require("r
         qty += m.qty
         value += m.cost if m.qty > 0 else -m.cost
         ref = inv_of.get(m.invoice_item_id)
-        card.append({"id": m.id, "at": m.at.isoformat(timespec="minutes"), "kind": m.kind, "label": inventory.MOVE_LABELS.get(m.kind, m.kind),
-                     "qty": m.qty, "cost": m.cost, "unit_cost": m.cost // abs(m.qty) if m.qty else 0, "estimated": m.estimated,
-                     "balance_qty": qty, "balance_value": value, "note": m.note,
-                     "invoice": ref[0] if ref else None, "invoice_id": ref[1] if ref else None})
+        row = {"id": m.id, "at": m.at.isoformat(timespec="minutes"), "kind": m.kind, "label": inventory.MOVE_LABELS.get(m.kind, m.kind),
+               "qty": m.qty, "cost": m.cost, "unit_cost": m.cost // abs(m.qty) if m.qty else 0, "estimated": m.estimated,
+               "balance_qty": qty, "balance_value": value, "note": m.note,
+               "invoice": ref[0] if ref else None, "invoice_id": ref[1] if ref else None}
+        card.append(row if costs else {**row, "cost": None, "unit_cost": None, "balance_value": None})
     hist = []
     names: dict[int, str] = {}
     for h in db.scalars(select(TradeHistory).where(TradeHistory.product_id == pid).order_by(TradeHistory.at.desc(), TradeHistory.id.desc()).limit(300)):
         if h.customer_id and h.customer_id not in names:
             c = db.get(Customer, h.customer_id)
             names[h.customer_id] = c.full_name if c else ""
+        bought = h.kind.startswith("purchase")  # a purchase's price is a cost
         hist.append({"at": h.at.isoformat(timespec="minutes"), "kind": h.kind, "source": h.source, "doc_no": h.doc_no, "party": h.party,
                      "doc_id": h.doc_id,
                      "customer_id": h.customer_id, "customer": names.get(h.customer_id) if h.customer_id else None,
-                     "qty": h.qty, "unit_price": h.unit_price, "amount": h.amount, "cost": h.cost})
-    return {**_p(p), "moves": card[::-1], "history": hist}
+                     "qty": h.qty, "unit_price": h.unit_price if costs or not bought else None,
+                     "amount": h.amount if costs or not bought else None, "cost": h.cost if costs else None})
+    return {**_p(p, costs), "moves": card[::-1], "history": hist}
 
 
 class OpeningIn(BaseModel):
@@ -205,7 +226,7 @@ def product_opening(pid: int, body: OpeningIn, db: Session = Depends(get_db), us
         db.rollback()
         _err(exc)
     db.commit()
-    return _p(p)
+    return _p(p, _costs(user))
 
 
 class CountIn(BaseModel):
@@ -223,7 +244,7 @@ def product_count(pid: int, body: CountIn, db: Session = Depends(get_db), user=D
         db.rollback()
         _err(exc)
     db.commit()
-    return {**_p(p), "difference": m.qty if m else 0, "difference_cost": m.cost if m else 0}
+    return {**_p(p, _costs(user)), "difference": m.qty if m else 0, "difference_cost": m.cost if m else 0}
 
 
 # ------------------------------------------------------------------ settings
@@ -257,14 +278,30 @@ class SupplierIn(BaseModel):
     notes: str = ""
 
 
-def _sup(s: Supplier, owed: int = 0, bought: int = 0, history: tuple[int, int] = (0, 0), person: Customer | None = None) -> dict:
-    return {"id": s.id, "name": s.name, "mobile": s.mobile, "notes": s.notes, "owed": int(owed or 0), "bought": int(bought or 0),
-            "history_total": int(history[0] or 0), "history_count": int(history[1] or 0), "customer_id": s.customer_id,
-            "customer": person.full_name if person else None, "customer_code": person.legacy_code if person else None}
+def _sup(s: Supplier, owed: int = 0, bought: int = 0, history: tuple[int, int] = (0, 0), person: Customer | None = None,
+         costs: bool = False) -> dict:
+    out = {"id": s.id, "name": s.name, "mobile": s.mobile, "notes": s.notes, "owed": int(owed or 0), "bought": int(bought or 0),
+           "history_total": int(history[0] or 0), "history_count": int(history[1] or 0), "customer_id": s.customer_id,
+           "customer": person.full_name if person else None, "customer_code": person.legacy_code if person else None}
+    return out if costs else {**out, "owed": None, "bought": None, "history_total": None}
+
+
+def _doc(d: dict, costs: bool) -> dict:
+    """An invoice brought over (Tizpardaz): a purchase's prices and a sale's cost / profit only with the reports."""
+    if costs:
+        return d
+    if not d["kind"].startswith("purchase"):
+        return {**d, "items": [{**i, "cost": None, "profit": None} for i in d["items"]]} if "items" in d else d
+    money = ("items_total", "total", "paid", "discount", "additions")
+    out = {**d, **dict.fromkeys(money)}
+    if "items" in d:
+        out["items"] = [{**i, "unit_price": None, "amount": None, "cost": None, "profit": None} for i in d["items"]]
+        out["extras"] = []
+    return out
 
 
 @router.get("/suppliers")
-def suppliers(db: Session = Depends(get_db), _=Depends(require("read"))):
+def suppliers(db: Session = Depends(get_db), user=Depends(require("read"))):
     """Sellers: what we owe them, what was bought from them here and in the previous software (Tizpardaz)."""
     owed = dict(db.execute(select(Purchase.supplier_id, func.sum(Purchase.total - Purchase.paid))
                            .where(Purchase.status.in_(("open", "partial"))).group_by(Purchase.supplier_id)).all())
@@ -274,7 +311,8 @@ def suppliers(db: Session = Depends(get_db), _=Depends(require("read"))):
     hist = {sid: (t, n) for sid, t, n in db.execute(select(TradeDoc.supplier_id, func.sum(signed), func.count(TradeDoc.id))
                                                       .where(TradeDoc.kind.in_(("purchase", "purchase_return"))).group_by(TradeDoc.supplier_id))}
     people = {c.id: c for c in db.scalars(select(Customer).where(Customer.id.in_(select(Supplier.customer_id))))}
-    return [_sup(s, owed.get(s.id), bought.get(s.id), hist.get(s.id, (0, 0)), people.get(s.customer_id))
+    costs = _costs(user)
+    return [_sup(s, owed.get(s.id), bought.get(s.id), hist.get(s.id, (0, 0)), people.get(s.customer_id), costs)
             for s in db.scalars(select(Supplier).order_by(Supplier.name))]
 
 
@@ -287,7 +325,7 @@ def create_supplier(body: SupplierIn, db: Session = Depends(get_db), user=Depend
     s.notes = body.notes or s.notes
     audit(db, "supplier.create", "supplier", s.id, body.model_dump(), user=user)
     db.commit()
-    return _sup(s, person=db.get(Customer, s.customer_id) if s.customer_id else None)
+    return _sup(s, person=db.get(Customer, s.customer_id) if s.customer_id else None, costs=_costs(user))
 
 
 class SupplierEditIn(SupplierIn):
@@ -307,27 +345,28 @@ def update_supplier(sid: int, body: SupplierEditIn, db: Session = Depends(get_db
         d.customer_id = body.customer_id or d.customer_id
     audit(db, "supplier.update", "supplier", s.id, body.model_dump(), user=user)
     db.commit()
-    return supplier_detail(sid, db)
+    return supplier_detail(sid, db, user)
 
 
 @router.get("/suppliers/{sid}")
-def supplier_detail(sid: int, db: Session = Depends(get_db), _=Depends(require("read"))):
+def supplier_detail(sid: int, db: Session = Depends(get_db), user=Depends(require("read"))):
     """A seller's account: purchases here (with what is still owed) and purchase invoices of the previous software."""
     s = db.get(Supplier, sid) or _404("تأمین‌کننده")
+    costs = _costs(user)
     purchases = list(db.scalars(select(Purchase).where(Purchase.supplier_id == sid).order_by(Purchase.at.desc(), Purchase.id.desc())))
     docs = list(db.scalars(select(TradeDoc).where(TradeDoc.supplier_id == sid).order_by(TradeDoc.at.desc(), TradeDoc.id.desc())))
     owed = sum(p.total - p.paid for p in purchases if p.status in ("open", "partial"))
     bought = sum(p.total for p in purchases if p.status != "void" and p.subtotal > 0)
     hist = sum(-d.total if d.kind == "purchase_return" else d.total for d in docs if d.kind.startswith("purchase"))
     person = db.get(Customer, s.customer_id) if s.customer_id else None
-    return {**_sup(s, owed, bought, (hist, len(docs)), person), "purchases": [_pur(p, db) for p in purchases],
-            "docs": [tizpardaz.doc_out(db, d) for d in docs]}
+    return {**_sup(s, owed, bought, (hist, len(docs)), person, costs), "purchases": [_pur(p, db, costs=costs) for p in purchases],
+            "docs": [_doc(tizpardaz.doc_out(db, d), costs) for d in docs]}
 
 
 # ------------------------------------------------------------------ invoices brought over (Tizpardaz)
 @router.get("/trade-docs")
 def trade_docs(kind: str = "", customer_id: int | None = None, supplier_id: int | None = None, q: str = "", limit: int = 300,
-               db: Session = Depends(get_db), _=Depends(require("read"))):
+               db: Session = Depends(get_db), user=Depends(require("read"))):
     """Sale / purchase invoices brought over from the previous software (kind: sale | purchase)."""
     stmt = select(TradeDoc).order_by(TradeDoc.at.desc(), TradeDoc.id.desc())
     if kind in ("sale", "purchase"):
@@ -343,12 +382,13 @@ def trade_docs(kind: str = "", customer_id: int | None = None, supplier_id: int 
                               TradeDoc.supplier_id.in_(select(Supplier.id).where(fa_like(Supplier.name, q)))))
     docs = list(db.scalars(stmt.limit(min(max(limit, 1), 2000))))
     people = {c.id: c for c in db.scalars(select(Customer).where(Customer.id.in_({d.customer_id for d in docs if d.customer_id} or {-1})))}
-    return [tizpardaz.doc_out(db, d, people=people) for d in docs]
+    costs = _costs(user)
+    return [_doc(tizpardaz.doc_out(db, d, people=people), costs) for d in docs]
 
 
 @router.get("/trade-docs/{did}")
-def trade_doc(did: int, db: Session = Depends(get_db), _=Depends(require("read"))):
-    return tizpardaz.doc_out(db, db.get(TradeDoc, did) or _404("فاکتور"), full=True)
+def trade_doc(did: int, db: Session = Depends(get_db), user=Depends(require("read"))):
+    return _doc(tizpardaz.doc_out(db, db.get(TradeDoc, did) or _404("فاکتور"), full=True), _costs(user))
 
 
 class PurchaseItemIn(BaseModel):
@@ -374,7 +414,11 @@ class PurchaseIn(BaseModel):
     payments: list[PurchasePayIn] = []
 
 
-def _pur(p: Purchase, db: Session, full: bool = False) -> dict:
+PURCHASE_MONEY = ("subtotal", "discount", "shipping", "total", "paid", "due")
+
+
+def _pur(p: Purchase, db: Session, full: bool = False, costs: bool = False) -> dict:
+    """A purchase; without `costs` (staff, receptionist) its prices, totals and payments are left out."""
     sup = db.get(Supplier, p.supplier_id) if p.supplier_id else None
     out = {"id": p.id, "number": p.number, "supplier_id": p.supplier_id, "supplier": sup.name if sup else None, "supplier_ref": p.supplier_ref,
            "at": p.at.isoformat(timespec="minutes"), "subtotal": p.subtotal, "discount": p.discount, "shipping": p.shipping,
@@ -387,12 +431,17 @@ def _pur(p: Purchase, db: Session, full: bool = False) -> dict:
                          "unit_price": i.unit_price, "cost": i.cost, "unit_cost": i.cost // i.quantity if i.quantity else 0} for i in p.items]
         out["payments"] = [{"id": s.id, "amount": s.amount, "account": accounts.get(s.payment_account_id), "paid_at": s.paid_at.isoformat(timespec="minutes")}
                            for s in db.scalars(select(SupplierPayment).where(SupplierPayment.purchase_id == p.id).order_by(SupplierPayment.id))]
+    if not costs:
+        out.update(dict.fromkeys(PURCHASE_MONEY))
+        if full:
+            out["items"] = [{**i, "unit_price": None, "cost": None, "unit_cost": None} for i in out["items"]]
+            out["payments"] = []
     return out
 
 
 @router.get("/purchases")
 def purchases(status: str = "", supplier_id: int | None = None, start: date | None = None, end: date | None = None,
-              db: Session = Depends(get_db), _=Depends(require("read"))):
+              db: Session = Depends(get_db), user=Depends(require("read"))):
     q = select(Purchase).order_by(Purchase.at.desc(), Purchase.id.desc()).limit(500)
     if status == "unpaid":
         q = q.where(Purchase.status.in_(("open", "partial")))
@@ -404,7 +453,8 @@ def purchases(status: str = "", supplier_id: int | None = None, start: date | No
         q = q.where(Purchase.at >= datetime.combine(start, datetime.min.time()))
     if end:
         q = q.where(Purchase.at <= datetime.combine(end, datetime.max.time()))
-    return [_pur(p, db) for p in db.scalars(q)]
+    costs = _costs(user)
+    return [_pur(p, db, costs=costs) for p in db.scalars(q)]
 
 
 @router.post("/purchases")
@@ -420,12 +470,12 @@ def create_purchase(body: PurchaseIn, db: Session = Depends(get_db), user=Depend
         db.rollback()
         _err(exc)
     db.commit()
-    return _pur(pur, db, full=True)
+    return _pur(pur, db, full=True, costs=_costs(user))
 
 
 @router.get("/purchases/{pid}")
-def purchase_detail(pid: int, db: Session = Depends(get_db), _=Depends(require("read"))):
-    return _pur(db.get(Purchase, pid) or _404("خرید"), db, full=True)
+def purchase_detail(pid: int, db: Session = Depends(get_db), user=Depends(require("read"))):
+    return _pur(db.get(Purchase, pid) or _404("خرید"), db, full=True, costs=_costs(user))
 
 
 class PayIn(BaseModel):
@@ -443,15 +493,19 @@ def pay_purchase(pid: int, body: PayIn, db: Session = Depends(get_db), user=Depe
         db.rollback()
         _err(exc)
     db.commit()
-    return _pur(pur, db, full=True)
+    return _pur(pur, db, full=True, costs=_costs(user))
 
 
 @router.post("/purchases/{pid}/void")
 def void_purchase(pid: int, reason: str = "", db: Session = Depends(get_db), user=Depends(require("void"))):
     pur = db.get(Purchase, pid) or _404("خرید")
-    inventory.void_purchase(db, pur, reason, user=user)
+    try:
+        inventory.void_purchase(db, pur, reason, user=user)
+    except AccountingError as exc:
+        db.rollback()
+        _err(exc)
     db.commit()
-    return _pur(pur, db, full=True)
+    return _pur(pur, db, full=True, costs=_costs(user))
 
 
 # ------------------------------------------------------------------ profit report
@@ -518,20 +572,21 @@ def product_profit(db: Session, start: date | None = None, end: date | None = No
                 expenses += h.amount
                 continue
             sign = -1 if h.kind == "sale_return" else 1
+            amt = h.net_amount if h.net_amount is not None else h.amount  # after its invoice's discount
             p = products.get(h.product_id) if h.product_id else None
             r = per.setdefault(h.product_id or 0, {"id": h.product_id, "code": p.code if p else None, "sku": p.sku if p else None,
                                                    "name": p.name if p else "کالای نامشخص (سوابق)", "qty": 0, "revenue": 0, "cogs": 0,
                                                    "profit": 0, "online": 0, "estimated": False})
             if h.product_id is None:  # which product it was is not known, so neither is its cost
                 r["unknown_cost"] = True
-                tot["unknown_cost"] = tot.get("unknown_cost", 0) + sign * h.amount
+                tot["unknown_cost"] = tot.get("unknown_cost", 0) + sign * amt
             r["history"] = r.get("history", 0) + sign * h.qty
             for bucket in (r, tot, months.setdefault(_jm(h.at), {"key": _jm(h.at), "qty": 0, "revenue": 0, "cogs": 0, "profit": 0}),
                            chans.setdefault("history", {"channel": "history", "qty": 0, "revenue": 0, "cogs": 0, "profit": 0})):
                 bucket["qty"] += sign * h.qty
-                bucket["revenue"] += sign * h.amount
+                bucket["revenue"] += sign * amt
                 bucket["cogs"] += sign * (h.cost or 0)
-                bucket["profit"] += sign * (h.amount - (h.cost or 0))
+                bucket["profit"] += sign * (amt - (h.cost or 0))
     tot["expenses"] = expenses
     tot["net"] = tot["profit"] - expenses
 

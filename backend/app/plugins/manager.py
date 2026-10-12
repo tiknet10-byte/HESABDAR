@@ -57,8 +57,9 @@ class PluginManager:
         with SessionLocal() as db:
             for name, plugin in self.plugins.items():
                 st = db.get(PluginState, name)
-                if st is None:
-                    st = PluginState(name=name, enabled=plugin.status != "concept", config=dict(plugin.default_config))
+                if st is None:  # first start with this plugin (a saved on/off choice is kept as it is)
+                    st = PluginState(name=name, enabled=plugin.status != "concept" and plugin.enabled_by_default,
+                                     config=dict(plugin.default_config))
                     db.add(st)
                 plugin.ctx.config = {**plugin.default_config, **(st.config or {})}
                 self.enabled[name] = st.enabled
@@ -86,7 +87,7 @@ class PluginManager:
     def set_config(self, name: str, config: dict) -> dict:
         plugin = self.plugins[name]
         with SessionLocal() as db:
-            st = db.get(PluginState, name) or PluginState(name=name, enabled=True)
+            st = db.get(PluginState, name) or PluginState(name=name, enabled=bool(self.enabled.get(name)))  # saving settings never turns it on
             st.config = config
             db.merge(st)
             db.commit()
@@ -112,7 +113,13 @@ class PluginManager:
     def jobs(self):  # noqa: ANN201
         for name, plugin in self.plugins.items():
             for interval, fn in plugin.jobs():
-                yield name, interval, fn
+                yield name, interval, self._only_enabled(name, fn)
+
+    def _only_enabled(self, name: str, fn):  # noqa: ANN001, ANN202
+        def run() -> None:  # a turned-off plugin does no periodic work either
+            if self.enabled.get(name):
+                fn()
+        return run
 
     def list(self) -> list[dict]:
         return [{**p.info(), "enabled": self.enabled.get(n, False), "config": p.ctx.config} for n, p in self.plugins.items()]

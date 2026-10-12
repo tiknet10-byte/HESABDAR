@@ -69,9 +69,14 @@ function ProductFile({ id, onChange }: { id: number; onChange: () => void }) {
   const [qty, setQty] = useState(0);
   const [unitCost, setUnitCost] = useState(0);
   const [at, setAt] = useState(toLocalIso(new Date()));
+  const [atPicked, setAtPicked] = useState(false); // count: a date was chosen (else it is "now")
   if (!p) return <Loading />;
   const done = () => { reload(); onChange(); setStep(""); };
   const finance = can(user, "finance");
+  const costs = can(user, "reports"); // purchase costs, values and margins: owner, admin, accountant
+  // a count dated in the past is compared with the stock of that moment (the moves are newest first)
+  const system = step === "count" && atPicked ? (p.moves.find((m: any) => m.at <= at)?.balance_qty ?? 0) : p.stock_qty;
+  const later = step === "count" && atPicked && p.moves.some((m: any) => m.at > at);
 
   async function post(path: string, body: any, msg: (r: any) => string) {
     try {
@@ -92,15 +97,17 @@ function ProductFile({ id, onChange }: { id: number; onChange: () => void }) {
         </div>
         {finance && <div className="flex flex-wrap gap-1.5">
           <button className="btn btn-sm" onClick={() => setStep("edit")}><Pencil size={14} />ویرایش</button>
-          <button className="btn btn-sm" onClick={() => { setQty(0); setUnitCost(p.last_purchase_cost ?? 0); setStep("opening"); }}><PackagePlus size={14} />موجودی اول دوره</button>
-          <button className="btn btn-sm" onClick={() => { setQty(Math.max(0, p.stock_qty)); setStep("count"); }}><ClipboardCheck size={14} />شمارش انبار</button>
+          <button className="btn btn-sm" onClick={() => { setQty(0); setUnitCost(p.last_purchase_cost ?? 0); setAtPicked(false); setAt(toLocalIso(new Date())); setStep("opening"); }}><PackagePlus size={14} />موجودی اول دوره</button>
+          <button className="btn btn-sm" onClick={() => { setQty(Math.max(0, p.stock_qty)); setAtPicked(false); setAt(toLocalIso(new Date())); setStep("count"); }}><ClipboardCheck size={14} />شمارش انبار</button>
         </div>}
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <div className={`rounded-2xl p-3 ${p.stock_qty < 0 ? "bg-rose-500/10" : p.low ? "bg-amber-500/10" : "bg-sky-500/10"}`}><div className="muted text-xs">موجودی</div><div className="num font-bold">{num(p.stock_qty)} {p.unit}</div></div>
-        <div className="rounded-2xl bg-violet-500/10 p-3"><div className="muted text-xs">ارزش موجودی</div><div className="num font-bold">{money(p.stock_value)}</div></div>
-        <div className="rounded-2xl bg-emerald-500/10 p-3"><div className="muted text-xs">بهای تمام‌شدهٔ هر واحد</div><div className="num font-bold">{p.unit_cost != null ? money(p.unit_cost) : "—"}</div></div>
-        <div className="rounded-2xl bg-pink-500/10 p-3"><div className="muted text-xs">سود هر واحد (حضوری)</div><div className="num font-bold">{p.margin != null ? money(p.margin) : "—"}</div><div className="muted text-[11px]">{pct(p.margin_pct)}</div></div>
+        {costs && <>
+          <div className="rounded-2xl bg-violet-500/10 p-3"><div className="muted text-xs">ارزش موجودی</div><div className="num font-bold">{money(p.stock_value)}</div></div>
+          <div className="rounded-2xl bg-emerald-500/10 p-3"><div className="muted text-xs">بهای تمام‌شدهٔ هر واحد</div><div className="num font-bold">{p.unit_cost != null ? money(p.unit_cost) : "—"}</div></div>
+          <div className="rounded-2xl bg-pink-500/10 p-3"><div className="muted text-xs">سود هر واحد (حضوری)</div><div className="num font-bold">{p.margin != null ? money(p.margin) : "—"}</div><div className="muted text-[11px]">{pct(p.margin_pct)}</div></div>
+        </>}
       </div>
       {p.stock_qty < 0 && <div className="flex items-start gap-2 rounded-xl bg-rose-500/10 p-2.5 text-xs text-rose-700 dark:text-rose-300"><AlertTriangle size={15} className="shrink-0" />بیشتر از موجودی فروخته شده. خرید یا «موجودی اول دوره» را ثبت کنید؛ بهای واقعی فروش‌ها خودکار اصلاح می‌شود.</div>}
 
@@ -110,13 +117,14 @@ function ProductFile({ id, onChange }: { id: number; onChange: () => void }) {
           <div className="grid gap-3 sm:grid-cols-3">
             <Field label={step === "opening" ? "تعداد" : "تعداد شمرده‌شده"}><input type="number" min={0} className="input num" value={qty} onChange={(e) => setQty(Number(e.target.value))} /></Field>
             {step === "opening" && <Field label="بهای خرید هر واحد"><MoneyInput value={unitCost} onChange={setUnitCost} /></Field>}
-            <Field label="تاریخ"><JalaliPicker pastOnly value={at} onChange={(v) => setAt(v || toLocalIso(new Date()))} /></Field>
+            <Field label="تاریخ"><JalaliPicker pastOnly value={at} onChange={(v) => { setAt(v || toLocalIso(new Date())); setAtPicked(!!v); }} /></Field>
           </div>
-          {step === "count" && <div className="muted text-xs">موجودی سیستم: {num(p.stock_qty)}؛ اختلاف به‌عنوان {qty < p.stock_qty ? "کسری انبار (هزینه)" : qty > p.stock_qty ? "اضافهٔ انبار" : "—"} ثبت می‌شود.</div>}
+          {step === "count" && <div className="muted text-xs">موجودی سیستم{atPicked ? " در همان تاریخ" : ""}: {num(system)}؛ اختلاف به‌عنوان {qty < system ? "کسری انبار (هزینه)" : qty > system ? "اضافهٔ انبار" : "—"} ثبت می‌شود.</div>}
+          {later && <div className="flex items-start gap-2 rounded-xl bg-amber-500/10 p-2.5 text-xs text-amber-800 dark:text-amber-200"><AlertTriangle size={15} className="shrink-0" />تاریخ شمارش قبل از آخرین گردش این کالاست: تعداد شمرده‌شده با موجودی همان روز مقایسه می‌شود و خرید و فروش‌های بعد از آن روی آن حساب می‌شوند. اگر همین امروز شمرده‌اید، تاریخ را امروز بگذارید.</div>}
           <div className="flex gap-2">
             <button className="btn btn-primary" onClick={() => step === "opening"
               ? post("opening", { qty, unit_cost: unitCost, at }, () => "موجودی اول دوره ثبت شد")
-              : post("count", { counted: qty, at }, (r) => r.difference ? `اختلاف ${faDigits(r.difference)} ${p.unit} به ارزش ${money(r.difference_cost)} ثبت شد` : "موجودی درست بود")}>ثبت</button>
+              : post("count", { counted: qty, at: atPicked ? at : null }, (r) => r.difference ? `اختلاف ${faDigits(r.difference)} ${p.unit}${costs ? ` به ارزش ${money(r.difference_cost)}` : ""} ثبت شد` : "موجودی درست بود")}>ثبت</button>
             <button className="btn" onClick={() => setStep("")}>انصراف</button>
           </div>
         </div>
@@ -127,23 +135,23 @@ function ProductFile({ id, onChange }: { id: number; onChange: () => void }) {
         {!p.moves.length ? <Empty text="هنوز گردشی ندارد؛ خرید یا موجودی اول دوره ثبت کنید" /> : (
           <div className="max-h-80 overflow-y-auto">
             <table className="table text-xs [&_td]:px-2 [&_th]:px-2">
-              <thead><tr><th>تاریخ</th><th>نوع</th><th>تعداد</th><th>بهای واحد</th><th>بهای کل</th><th>مانده</th><th>ارزش مانده</th></tr></thead>
+              <thead><tr><th>تاریخ</th><th>نوع</th><th>تعداد</th>{costs && <><th>بهای واحد</th><th>بهای کل</th></>}<th>مانده</th>{costs && <th>ارزش مانده</th>}</tr></thead>
               <tbody>{p.moves.map((m: any) => (
                 <tr key={m.id}>
                   <td className="num whitespace-nowrap">{formatJ(m.at)}</td>
                   <td>{m.label}{m.invoice && <span className="num muted"> · {m.invoice}</span>}{m.estimated && <span className="badge mr-1 bg-amber-500/15 text-amber-700" title="کالا قبل از ثبت خرید فروخته شده؛ با ثبت خرید اصلاح می‌شود">تخمینی</span>}</td>
                   <td className={`num ${m.qty < 0 ? "text-rose-600" : "text-emerald-600"}`}>{m.qty > 0 ? "+" : ""}{num(m.qty)}</td>
-                  <td className="num">{money(m.unit_cost, false)}</td>
-                  <td className="num">{money(m.cost, false)}</td>
+                  {costs && <><td className="num">{money(m.unit_cost, false)}</td>
+                  <td className="num">{money(m.cost, false)}</td></>}
                   <td className="num">{num(m.balance_qty)}</td>
-                  <td className="num">{money(m.balance_value, false)}</td>
+                  {costs && <td className="num">{money(m.balance_value, false)}</td>}
                 </tr>
               ))}</tbody>
             </table>
           </div>
         )}
       </div>
-      {p.history?.length > 0 && <TradeHistoryList rows={p.history} />}
+      {p.history?.length > 0 && <TradeHistoryList rows={p.history} costs={costs} />}
       {finance && p.is_active && (
         <button className="btn btn-sm text-rose-600" onClick={async () => {
           if (!confirm(`«${p.name}» حذف شود؟ (اگر گردش دارد بایگانی می‌شود)`)) return;
@@ -160,7 +168,7 @@ const H_KINDS: Record<string, string> = { sale: "فروش", sale_return: "برگ
 const H_SOURCE: Record<string, string> = { tizpardaz: "تیزپرداز", chehreh: "چهره" };
 
 /** Sales and purchases of this product brought over from Tizpardaz / Chehreh (history only: stock came over as a count). */
-function TradeHistoryList({ rows }: { rows: any[] }) {
+function TradeHistoryList({ rows, costs }: { rows: any[]; costs: boolean }) {
   const [doc, setDoc] = useState<number | null>(null);
   const sales = rows.filter((h) => h.kind === "sale" || h.kind === "sale_return");
   const sign = (h: any) => (h.kind === "sale_return" ? -1 : 1);
@@ -170,10 +178,10 @@ function TradeHistoryList({ rows }: { rows: any[] }) {
   return (
     <details open={!rows.length || rows.length < 30}>
       <summary className="mb-1 cursor-pointer font-bold">سوابق خرید و فروش در نرم‌افزار قبلی ({num(rows.length)})</summary>
-      <div className="muted mb-2 text-xs">فروش: {num(qty)} عدد · {money(revenue)} · سود ناخالص {money(revenue - cost)}. این‌ها فقط سابقه‌اند؛ موجودی بالا همان موجودی نهایی تیزپرداز است.</div>
+      <div className="muted mb-2 text-xs">فروش: {num(qty)} عدد · {money(revenue)}{costs && ` · سود ناخالص ${money(revenue - cost)}`}. این‌ها فقط سابقه‌اند؛ موجودی بالا همان موجودی نهایی تیزپرداز است.</div>
       <div className="max-h-72 overflow-y-auto">
         <table className="table text-xs [&_td]:px-2 [&_th]:px-2">
-          <thead><tr><th>تاریخ</th><th>نوع</th><th>طرف حساب</th><th>تعداد</th><th>مبلغ</th><th>سود</th></tr></thead>
+          <thead><tr><th>تاریخ</th><th>نوع</th><th>طرف حساب</th><th>تعداد</th><th>مبلغ</th>{costs && <th>سود</th>}</tr></thead>
           <tbody>{rows.map((h: any, k: number) => (
             <tr key={k} className={h.doc_id ? "cursor-pointer hover:bg-violet-500/10" : ""} title={h.doc_id ? "دیدن فاکتور" : undefined}
               onClick={() => h.doc_id && setDoc(h.doc_id)}>
@@ -181,8 +189,8 @@ function TradeHistoryList({ rows }: { rows: any[] }) {
               <td>{H_KINDS[h.kind] ?? h.kind}<span className="muted"> · {H_SOURCE[h.source] ?? h.source}{h.doc_no ? ` · سند ${h.doc_no}` : ""}</span></td>
               <td>{h.customer ?? h.party ?? ""}</td>
               <td className="num">{num(h.qty)}</td>
-              <td className="num">{money(h.amount, false)}</td>
-              <td className="num">{h.kind === "sale" || h.kind === "sale_return" ? money(sign(h) * (h.amount - (h.cost ?? 0)), false) : ""}</td>
+              <td className="num">{h.amount != null ? money(h.amount, false) : "—"}</td>
+              {costs && <td className="num">{h.kind === "sale" || h.kind === "sale_return" ? money(sign(h) * (h.amount - (h.cost ?? 0)), false) : ""}</td>}
             </tr>
           ))}</tbody>
         </table>
@@ -200,6 +208,7 @@ function ProductList({ onChanged }: { onChanged: () => void }) {
   const [view, setView] = useState<number | null>(null);
   const [create, setCreate] = useState(false);
   const refresh = () => { reload(); onChanged(); };
+  const costs = can(user, "reports");
   return (
     <Card pad={false} title="محصولات" actions={can(user, "finance") && <button className="btn btn-sm btn-primary" onClick={() => setCreate(true)}><Plus size={14} />محصول جدید</button>}>
       <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
@@ -209,17 +218,17 @@ function ProductList({ onChanged }: { onChanged: () => void }) {
       {!data ? <Loading /> : !data.length ? <Empty icon={<Package size={28} />} text={q ? "محصولی پیدا نشد" : "هنوز محصولی تعریف نشده؛ «محصول جدید» را بزنید"} /> : (
         <div className="mt-3 overflow-x-auto">
           <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
-            <thead><tr><th>کد</th><th>محصول</th><th>SKU</th><th>موجودی</th><th>بهای تمام‌شده</th><th>قیمت حضوری</th><th>قیمت آنلاین</th><th>سود هر واحد</th></tr></thead>
+            <thead><tr><th>کد</th><th>محصول</th><th>SKU</th><th>موجودی</th>{costs && <th>بهای تمام‌شده</th>}<th>قیمت حضوری</th><th>قیمت آنلاین</th>{costs && <th>سود هر واحد</th>}</tr></thead>
             <tbody>{data.map((p) => (
               <tr key={p.id} className={`cursor-pointer ${p.is_active ? "" : "opacity-60"}`} onClick={() => setView(p.id)}>
                 <td className="num font-bold text-sky-600">{p.code}</td>
                 <td><div className="font-semibold">{p.name}</div><div className="muted text-xs">{[p.brand, p.category].filter(Boolean).join(" · ")}</div></td>
                 <td className="num text-xs" dir="ltr">{p.sku ?? "—"}</td>
                 <td><span className={`num badge ${p.stock_qty < 0 ? "bg-rose-500/15 text-rose-600" : p.low ? "bg-amber-500/15 text-amber-700" : "bg-sky-500/10 text-sky-700 dark:text-sky-300"}`}>{num(p.stock_qty)} {p.unit}</span></td>
-                <td className="num">{p.unit_cost != null ? money(p.unit_cost, false) : "—"}</td>
+                {costs && <td className="num">{p.unit_cost != null ? money(p.unit_cost, false) : "—"}</td>}
                 <td className="num">{money(p.sale_price, false)}{p.last_sale_price && p.last_sale_price !== p.sale_price ? <div className="muted text-[10px]">آخرین فروش: {money(p.last_sale_price, false)}</div> : null}</td>
                 <td className="num">{p.online_price ? money(p.online_price, false) : <span className="muted">همان</span>}{p.last_online_price && p.last_online_price !== p.online_price ? <div className="muted text-[10px]">آخرین فروش سایت: {money(p.last_online_price, false)}</div> : null}</td>
-                <td className="num">{p.margin != null ? <>{money(p.margin, false)} <span className="muted text-xs">({pct(p.margin_pct)})</span></> : "—"}</td>
+                {costs && <td className="num">{p.margin != null ? <>{money(p.margin, false)} <span className="muted text-xs">({pct(p.margin_pct)})</span></> : "—"}</td>}
               </tr>
             ))}</tbody>
           </table>
@@ -346,6 +355,7 @@ export function PurchaseView({ id, onChange }: { id: number; onChange: () => voi
   const [amount, setAmount] = useState(0);
   if (!p) return <Loading />;
   const done = () => { reload(); onChange(); };
+  const costs = can(user, "reports"); // purchase prices and what we owe: owner, admin, accountant
   return (
     <div className="space-y-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -354,19 +364,21 @@ export function PurchaseView({ id, onChange }: { id: number; onChange: () => voi
       </div>
       {!p.items.length && <div className="rounded-xl bg-sky-500/10 p-3 text-xs">ماندهٔ اول دوره: مبلغی که از قبل (مثلاً در تیزپرداز) به این فروشنده بدهکار بودیم. کالایی ندارد و مثل بقیهٔ خریدها پرداخت می‌شود.{p.notes && <div className="muted mt-1">{p.notes}</div>}</div>}
       {p.items.length > 0 && <table className="table text-xs [&_td]:px-2 [&_th]:px-2">
-        <thead><tr><th>کالا</th><th>تعداد</th><th>قیمت خرید</th><th>بهای تمام‌شدهٔ واحد</th><th>جمع</th></tr></thead>
+        <thead><tr><th>کالا</th><th>تعداد</th>{costs && <><th>قیمت خرید</th><th>بهای تمام‌شدهٔ واحد</th><th>جمع</th></>}</tr></thead>
         <tbody>{p.items.map((i: any, k: number) => (
-          <tr key={k}><td><span className="num muted">{i.code}</span> {i.product}</td><td className="num">{num(i.quantity)}</td><td className="num">{money(i.unit_price, false)}</td><td className="num">{money(i.unit_cost, false)}</td><td className="num">{money(i.cost, false)}</td></tr>
+          <tr key={k}><td><span className="num muted">{i.code}</span> {i.product}</td><td className="num">{num(i.quantity)}</td>
+            {costs && <><td className="num">{money(i.unit_price, false)}</td><td className="num">{money(i.unit_cost, false)}</td><td className="num">{money(i.cost, false)}</td></>}</tr>
         ))}</tbody>
       </table>}
-      {(p.discount > 0 || p.shipping > 0) && <div className="muted flex flex-wrap gap-4 text-xs"><span>جمع اقلام: <span className="num">{money(p.subtotal)}</span></span>
+      {!costs && <div className="muted text-xs">مبلغ‌های خرید فقط برای مدیر و حسابدار نمایش داده می‌شود.</div>}
+      {costs && (p.discount > 0 || p.shipping > 0) && <div className="muted flex flex-wrap gap-4 text-xs"><span>جمع اقلام: <span className="num">{money(p.subtotal)}</span></span>
         {p.discount > 0 && <span>تخفیف: <span className="num">{money(p.discount)}</span></span>}{p.shipping > 0 && <span>حمل: <span className="num">{money(p.shipping)}</span></span>}</div>}
-      <div className="rounded-xl p-3" style={{ background: "var(--surface)" }}>
+      {costs && <div className="rounded-xl p-3" style={{ background: "var(--surface)" }}>
         <div className="flex justify-between"><span className="muted">جمع خرید</span><b className="num">{money(p.total)}</b></div>
         <div className="flex justify-between"><span className="muted">پرداخت‌شده</span><span className="num">{money(p.paid)}</span></div>
         {p.due > 0 && <div className="flex justify-between font-bold text-amber-600"><span>مانده بدهی به تأمین‌کننده</span><span className="num">{money(p.due)}</span></div>}
         {p.payments.map((x: any) => <div key={x.id} className="muted flex justify-between text-xs"><span>{x.amount < 0 ? "برگشت · " : ""}{x.account} · {formatJ(x.paid_at)}</span><span className="num">{money(x.amount)}</span></div>)}
-      </div>
+      </div>}
       {p.status !== "void" && p.due > 0 && can(user, "finance") && (
         <div className="grid grid-cols-12 gap-2">
           <select className="input col-span-6" value={acc || accounts[0]?.id} onChange={(e) => setAcc(Number(e.target.value))}>
@@ -401,6 +413,7 @@ function Purchases({ onChanged }: { onChanged: () => void }) {
   const [doc, setDoc] = useState<number | null>(null);
   const [sup, setSup] = useState<number | null>(null);
   const refresh = () => { reload(); onChanged(); };
+  const costs = can(user, "reports"); // amounts of purchases and what we owe: owner, admin, accountant
   const shownSups = (sups.data ?? []).filter((x) => !q || x.name.includes(q) || (x.customer ?? "").includes(q));
   return (
     <Card pad={false} title="خرید از تأمین‌کننده" actions={can(user, "finance") && <button className="btn btn-sm btn-primary" onClick={() => setCreate(true)}><Truck size={14} />خرید جدید</button>}>
@@ -412,14 +425,14 @@ function Purchases({ onChanged }: { onChanged: () => void }) {
       {status === "suppliers" ? (!sups.data ? <Loading /> : !shownSups.length ? <Empty icon={<Truck size={28} />} text="تأمین‌کننده‌ای نیست" /> : (
         <div className="mt-3 overflow-x-auto">
           <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
-            <thead><tr><th>تأمین‌کننده</th><th>پروندهٔ شخص</th><th>خرید در این سیستم</th><th>خرید در تیزپرداز</th><th>بدهی ما به او</th></tr></thead>
+            <thead><tr><th>تأمین‌کننده</th><th>پروندهٔ شخص</th>{costs && <th>خرید در این سیستم</th>}<th>خرید در تیزپرداز</th>{costs && <th>بدهی ما به او</th>}</tr></thead>
             <tbody>{shownSups.map((x) => (
               <tr key={x.id} className="cursor-pointer" onClick={() => setSup(x.id)}>
                 <td className="font-semibold">{x.name}{x.mobile && <div className="num muted text-xs" dir="ltr">{x.mobile}</div>}</td>
                 <td className="text-xs">{x.customer ? <>{x.customer}{x.customer_code && <span className="num muted"> · کد {x.customer_code}</span>}</> : <span className="muted">وصل نیست</span>}</td>
-                <td className="num">{x.bought ? money(x.bought, false) : "—"}</td>
-                <td className="num">{x.history_count ? <>{money(x.history_total, false)}<div className="muted text-[10px]">{num(x.history_count)} فاکتور</div></> : "—"}</td>
-                <td className={`num ${x.owed > 0 ? "font-bold text-amber-600" : ""}`}>{x.owed > 0 ? money(x.owed, false) : "—"}</td>
+                {costs && <td className="num">{x.bought ? money(x.bought, false) : "—"}</td>}
+                <td className="num">{x.history_count ? <>{costs && money(x.history_total, false)}<div className="muted text-[10px]">{num(x.history_count)} فاکتور</div></> : "—"}</td>
+                {costs && <td className={`num ${x.owed > 0 ? "font-bold text-amber-600" : ""}`}>{x.owed > 0 ? money(x.owed, false) : "—"}</td>}
               </tr>
             ))}</tbody>
           </table>
@@ -427,12 +440,13 @@ function Purchases({ onChanged }: { onChanged: () => void }) {
       )) : status === "history" ? (!hist ? <Loading /> : !hist.length ? <Empty icon={<Truck size={28} />} text="فاکتور خریدی از تیزپرداز منتقل نشده" /> : (
         <div className="mt-3 overflow-x-auto">
           <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
-            <thead><tr><th>فاکتور</th><th>تاریخ</th><th>فروشنده</th><th>جمع کالاها</th><th>تخفیف</th><th>مبلغ فاکتور</th></tr></thead>
+            <thead><tr><th>فاکتور</th><th>تاریخ</th><th>فروشنده</th>{costs && <><th>جمع کالاها</th><th>تخفیف</th><th>مبلغ فاکتور</th></>}</tr></thead>
             <tbody>{hist.map((d) => (
               <tr key={d.id} className="cursor-pointer" onClick={() => setDoc(d.id)}>
                 <td className="font-bold">{d.kind_label} <span className="num">{d.doc_no}</span></td><td className="num">{formatJ(d.at, false)}</td>
-                <td>{d.person || d.party || "—"}</td><td className="num">{money(d.items_total, false)}</td>
-                <td className="num">{d.discount ? money(d.discount, false) : "—"}</td><td className="num font-semibold">{money(d.total, false)}</td>
+                <td>{d.person || d.party || "—"}</td>
+                {costs && <><td className="num">{money(d.items_total, false)}</td>
+                <td className="num">{d.discount ? money(d.discount, false) : "—"}</td><td className="num font-semibold">{money(d.total, false)}</td></>}
               </tr>
             ))}</tbody>
           </table>
@@ -440,12 +454,13 @@ function Purchases({ onChanged }: { onChanged: () => void }) {
       )) : !data ? <Loading /> : !data.length ? <Empty icon={<Truck size={28} />} text="خریدی ثبت نشده" /> : (
         <div className="mt-3 overflow-x-auto">
           <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
-            <thead><tr><th>شماره</th><th>تاریخ</th><th>تأمین‌کننده</th><th>اقلام</th><th>جمع</th><th>پرداخت‌شده</th><th>مانده</th><th></th></tr></thead>
+            <thead><tr><th>شماره</th><th>تاریخ</th><th>تأمین‌کننده</th><th>اقلام</th>{costs && <><th>جمع</th><th>پرداخت‌شده</th><th>مانده</th></>}<th></th></tr></thead>
             <tbody>{data.map((p) => (
               <tr key={p.id} className={`cursor-pointer ${p.status === "void" ? "opacity-50" : ""}`} onClick={() => setView(p.id)}>
                 <td className="num font-bold">{p.items_count ? p.number : <span className="text-xs">مانده اول دوره</span>}</td><td className="num">{formatJ(p.at, false)}</td><td>{p.supplier ?? "—"}</td>
-                <td className="num">{num(p.items_count)}</td><td className="num">{money(p.total, false)}</td><td className="num">{money(p.paid, false)}</td>
-                <td className={`num ${p.due > 0 ? "font-bold text-amber-600" : ""}`}>{p.due > 0 ? money(p.due, false) : "—"}</td>
+                <td className="num">{num(p.items_count)}</td>
+                {costs && <><td className="num">{money(p.total, false)}</td><td className="num">{money(p.paid, false)}</td>
+                <td className={`num ${p.due > 0 ? "font-bold text-amber-600" : ""}`}>{p.due > 0 ? money(p.due, false) : "—"}</td></>}
                 <td><Badge status={p.status === "open" ? "issued" : p.status} /></td>
               </tr>
             ))}</tbody>
@@ -538,14 +553,17 @@ export default function Products() {
   const [refresh, setRefresh] = useState(0);
   const sum = useApi<any>("/api/products/summary", [refresh]).data;
   const { user } = useAuth();
+  const costs = can(user, "reports");
   return (
     <div className="space-y-5">
       <PageHeader title="محصولات" subtitle="فروش حضوری و آنلاین محصولات، موجودی، خرید از تأمین‌کننده و سود هر محصول" icon={<Package size={22} />} />
       {sum && (
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <Stat label="ارزش موجودی انبار" value={cmoney(sum.stock_value)} hint={`${num(sum.units)} عدد · ${num(sum.count)} محصول`} tone="sky" />
+          {costs
+            ? <Stat label="ارزش موجودی انبار" value={cmoney(sum.stock_value)} hint={`${num(sum.units)} عدد · ${num(sum.count)} محصول`} tone="sky" />
+            : <Stat label="موجودی انبار" value={`${num(sum.units)} عدد`} hint={`${num(sum.count)} محصول`} tone="sky" />}
           <Stat label="کم‌موجودی" value={num(sum.low)} hint={sum.negative ? `${num(sum.negative)} محصول منفی` : "به حداقل رسیده‌اند"} tone={sum.low ? "amber" : "emerald"} />
-          <Stat label="بدهی به تأمین‌کنندگان" value={cmoney(sum.owed_to_suppliers)} tone="pink" />
+          {costs && <Stat label="بدهی به تأمین‌کنندگان" value={cmoney(sum.owed_to_suppliers)} tone="pink" />}
           <Stat label="روش محاسبهٔ بهای تمام‌شده" value={<span className="text-base">{sum.method_label}</span>} />
         </div>
       )}

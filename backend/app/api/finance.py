@@ -674,8 +674,9 @@ INVOICE_SORTS = {"date_desc", "date_asc", "total_desc", "total_asc", "due_desc",
 @router.get("/invoices/search")
 def invoices_search(q: str = "", status: str = "", sort: str = "date_desc", start: date | None = None, end: date | None = None,
                     line_id: int | None = None, staff_id: int | None = None, account_id: int | None = None,
-                    limit: int = 50, offset: int = 0, db: Session = Depends(get_db), _=Depends(require("read"))):
-    """Sales page: search by invoice number / customer code / name / mobile / service, filters, sorting, paging, totals."""
+                    limit: int = 50, offset: int = 0, db: Session = Depends(get_db), user=Depends(require("read"))):
+    """Sales page: search by invoice number / customer code / name / mobile / service, filters, sorting, paging, totals.
+    Without 'reports' (reception, staff): counts only for the sales of a period - no takings of the day, week or month."""
     from sqlalchemy.orm import selectinload
 
     stmt = select(Invoice, Customer.full_name, Customer.legacy_code, Customer.mobile).join(Customer, Customer.id == Invoice.customer_id)
@@ -720,8 +721,12 @@ def invoices_search(q: str = "", status: str = "", sort: str = "date_desc", star
                                     .where(Invoice.issued_at >= since, Invoice.status != "void")).one()
     unpaid = db.execute(select(func.count(Invoice.id), func.coalesce(func.sum(Invoice.total - Invoice.paid), 0))
                         .where(Invoice.status.in_(("issued", "partial")))).one()
+    stats = {k: [v[0], int(v[1])] for k, v in {"today": sums(day), "week": sums(week), "month": sums(month), "unpaid": unpaid}.items()}
+    if not has_permission(user.role, "reports"):  # sales of a period are a report; unpaid balances are reception's follow-up
+        stats = {k: [n, None if k != "unpaid" else s] for k, (n, s) in stats.items()}
+        return {"total": count_all, "valid": total, "amount": None, "paid": None, "due": None, "items": items, "stats": stats}
     return {"total": count_all, "valid": total, "amount": int(amount), "paid": int(paid), "due": int(amount) - int(paid), "items": items,
-            "stats": {k: [v[0], int(v[1])] for k, v in {"today": sums(day), "week": sums(week), "month": sums(month), "unpaid": unpaid}.items()}}
+            "stats": stats}
 
 
 @router.post("/invoices/preview")

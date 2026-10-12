@@ -8,7 +8,16 @@
 * **Tamper-evident audit log**: every write is recorded with a SHA-256 hash chained to the previous record;
   *Settings → Security* verifies the chain.
 * Card numbers are never stored in full (first 6 + last 4 only). Plugin secrets are masked in API responses.
-* Webhooks are HMAC-signed; security headers (nosniff, frame deny, referrer policy) on every response.
+* Webhooks are signed, and an unsigned call is refused (401):
+  * bank-SMS and SMS forwarders: `X-Hesabdar-Signature` = HMAC-SHA256 of the raw body with `HESABDAR_WEBHOOK_SECRET`;
+    a bank SMS with no tracking number and no date that arrives again within a day is the same SMS (no new money);
+  * WhatsApp / Instagram: Meta's `X-Hub-Signature-256` checked with the **App Secret** entered in the receipts plugin
+    settings; while it is empty these two webhooks accept nothing.
+* The customer-receipts plugin (`messaging_receipts`) is **off on a new install**; the owner turns it on after setting it up.
+  A receipt sent by a customer books a deposit by itself only when the bank shows the same amount **and tracking number**;
+  a match on amount and time alone waits for a person to press «ثبت». Instagram pictures are downloaded only from
+  Meta's servers (https, at most 8 MB); a saved receipt file never takes its name from the message.
+* Security headers (nosniff, frame deny, referrer policy) on every response.
 * In production the app refuses to start without `HESABDAR_SECRET_KEY`. Always deploy behind HTTPS.
 * SQLite runs in WAL mode with `synchronous=FULL` and foreign keys on (crash-safe).
 

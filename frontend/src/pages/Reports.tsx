@@ -55,8 +55,19 @@ function Overview() {
       {!d ? <Loading /> : (
         <>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <Stat label="فروش" value={compactMoney(d.revenue)} hint={`${num(d.invoice_count)} فاکتور`} tone="pink" />
-            <Stat label="سود خالص" value={compactMoney(d.net_profit)} hint={`هزینه ${compactMoney(d.expenses)}`} tone="emerald" />
+            <Stat label="فروش" value={compactMoney(d.revenue)} tone="pink"
+              hint={`${num(d.invoice_count)} فاکتور${d.returns ? ` · منهای ${compactMoney(d.returns)} برگشتی` : ""}`}
+              help={<div className="space-y-1">
+                <div>جمع فاکتورهای این بازه (بعد از تخفیف). فاکتوری که به‌اشتباه صادر و «لغو» شده اصلاً حساب نمی‌شود.</div>
+                <div>فاکتوری که بعداً برگشت خورده (پول پس داده شده)، در روز خودش فروش است و در روز برگشت کم می‌شود؛ مثل دفاتر.</div>
+                {d.returns > 0 && <div className="num">فروش {compactMoney(d.gross_sales)} − برگشتی {compactMoney(d.returns)} ({num(d.returns_count)} فاکتور)</div>}
+              </div>} />
+            <Stat label="سود خالص" value={compactMoney(d.net_profit)} tone="emerald"
+              hint={d.forfeited ? `شامل ${compactMoney(d.forfeited)} بیعانهٔ سوخت‌شده` : `هزینه‌ها ${compactMoney(d.expenses)}`}
+              help={d.profit?.rows?.length ? <div className="space-y-1">
+                <div>از روی دفاتر: همهٔ درآمدها منهای همهٔ هزینه‌های این بازه.</div>
+                {d.profit.rows.map((r: any) => <div key={r.key} className="flex justify-between gap-3"><span>{r.label}</span><span className="num">{compactMoney(r.value)}</span></div>)}
+              </div> : undefined} />
             <Stat label="میانگین هر فاکتور" value={compactMoney(d.avg_ticket)} hint={`تخفیف‌ها ${compactMoney(d.discounts)}`} />
             <Stat label="عدم مراجعه" value={`${num(Math.round(d.appointments.no_show_rate * 100))}٪`} hint={`${num(d.appointments.total)} نوبت`} tone="amber" />
           </div>

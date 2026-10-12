@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     max_failed_logins: int = 5
     lockout_minutes: int = 15
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    # names (besides localhost and IP addresses) the program may be opened with, comma separated, e.g.
+    # "salon-pc,hesabdar.example.com" (a server behind a domain); "*" turns the check off
+    allowed_hosts: str = ""
 
     # Webhooks from messaging gateways (SMS forwarder, WhatsApp, Instagram) are signed with this
     webhook_secret: str = ""

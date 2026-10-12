@@ -29,7 +29,7 @@ def _batch(db: Session, bid: int) -> ImportBatch:
 def _out(b: ImportBatch, rows: bool = True) -> dict:
     s = b.summary or {}
     out = {"id": b.id, "file_name": b.file_name, "status": b.status, "created_at": b.created_at.isoformat(timespec="minutes"),
-           **{k: v for k, v in s.items() if k not in ("created", "fps")}}
+           **{k: v for k, v in s.items() if k not in ("created", "fps", "fp_rec", "kept_fps", "auto_codes", "confirmed_codes")}}
     if rows:
         bad = [r for r in b.rows if r.get("errors")]
         warn = [r for r in b.rows if not r.get("errors") and r.get("warnings")]
@@ -55,9 +55,10 @@ def template(kind: str, _=Depends(require("settings"))):
 
 
 @router.post("/preview")
-async def preview(file: UploadFile = File(...), kind: str = Form(...), unit: str = Form("rial"), mapping: str = Form(""),
-                  db: Session = Depends(get_db), user=Depends(require("settings"))):
-    data = await file.read()
+def preview(file: UploadFile = File(...), kind: str = Form(...), unit: str = Form("rial"), mapping: str = Form(""),
+            db: Session = Depends(get_db), user=Depends(require("settings"))):
+    # a plain (not async) handler runs in a worker thread: reading a big file never freezes the program for the others
+    data = file.file.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
         raise HTTPException(400, "حجم فایل بیش از ۲۵ مگابایت است؛ آن را در چند فایل جدا کنید")
     try:

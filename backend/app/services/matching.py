@@ -4,7 +4,9 @@ Flow
   1. A customer sends a receipt (SMS / WhatsApp / Instagram / manual upload) -> InboundReceipt
   2. Bank data arrives (bank API, statement import, or the bank's SMS on the salon phone) -> BankTransaction
   3. `reconcile_receipt` looks for a bank transaction with the same amount, time window,
-     reference and card digits. On a match the deposit is registered for that customer.
+     reference and card digits. The deposit is registered for that customer by itself only when
+     the bank shows the same tracking number too; a match on amount + time alone (anyone can send
+     a receipt for a common amount) waits as 'matched' until a person presses «ثبت».
      If the bank shows a different amount for the same reference, or nothing shows up
      within the grace period, an alert is raised (possible fake / edited receipt).
 """
@@ -20,6 +22,18 @@ from ..models import BankTransaction, Customer, Deposit, InboundReceipt, Payment
 from . import accounting, learning, settings_store
 from .audit import audit, raise_alert
 from .textutil import toman
+
+STRONG_MATCH = 0.9  # amount + time + the same tracking number: safe to register without a person
+
+
+def _weak_holder(db: Session, tx: BankTransaction) -> InboundReceipt | None:
+    """The receipt that holds this bank transaction on amount + time alone (not registered yet), if any."""
+    if tx.status != "matched" or tx.matched_type != "receipt":
+        return None
+    other = db.get(InboundReceipt, tx.matched_id) if tx.matched_id else None
+    if other is not None and not other.deposit_id and (other.confidence or 0) < STRONG_MATCH:
+        return other
+    return None
 
 
 def _receipt_time(r: InboundReceipt) -> datetime:
@@ -44,10 +58,14 @@ def find_bank_match(db: Session, r: InboundReceipt) -> tuple[BankTransaction | N
         if same_ref and same_ref.amount != r.amount:
             return same_ref, -1.0, f"شماره پیگیری یکسان اما مبلغ بانک {toman(same_ref.amount)} است"
 
-    candidates = db.scalars(select(BankTransaction).where(
-        BankTransaction.direction == "in", BankTransaction.amount == r.amount, BankTransaction.status == "unmatched",
-        BankTransaction.occurred_at >= when - window, BankTransaction.occurred_at <= when + window,
-    )).all()
+    in_window = (BankTransaction.direction == "in", BankTransaction.amount == r.amount,
+                 BankTransaction.occurred_at >= when - window, BankTransaction.occurred_at <= when + window)
+    candidates = list(db.scalars(select(BankTransaction).where(BankTransaction.status == "unmatched", *in_window)))
+    if p.get("reference"):
+        # a transaction another receipt holds on amount + time alone goes to the receipt with its tracking number
+        candidates += [tx for tx in db.scalars(select(BankTransaction).where(
+            BankTransaction.reference == p["reference"], BankTransaction.matched_type == "receipt",
+            BankTransaction.matched_id != r.id, *in_window)) if _weak_holder(db, tx)]
     best, best_score = None, 0.0
     for tx in candidates:
         score = 0.5  # amount + time window
@@ -68,6 +86,8 @@ def register_receipt(db: Session, r: InboundReceipt, customer: Customer, payment
                      tx: BankTransaction | None = None, service_id: int | None = None, user=None) -> Deposit:
     if r.deposit_id:
         return db.get(Deposit, r.deposit_id)
+    if tx is not None and tx.status == "matched" and not (tx.matched_type == "receipt" and tx.matched_id == r.id):
+        raise accounting.AccountingError("این واریز بانکی قبلاً برای مورد دیگری ثبت شده است")
     pa = payment_account or (db.get(PaymentAccount, tx.payment_account_id) if tx and tx.payment_account_id else None)
     if pa is None:
         pa = db.scalar(select(PaymentAccount).where(PaymentAccount.kind.in_(["card", "bank"]), PaymentAccount.is_active.is_(True)))
@@ -94,7 +114,24 @@ def register_receipt(db: Session, r: InboundReceipt, customer: Customer, payment
     return dep
 
 
+def _auto_register(db: Session, r: InboundReceipt, tx: BankTransaction | None, user=None) -> None:
+    """Register a receipt the engine matched; a problem (no bank account, a wrong date) leaves it for a person."""
+    try:
+        register_receipt(db, r, db.get(Customer, r.customer_id), tx=tx, user=user)
+    except accounting.AccountingError as exc:
+        r.note = f"خودکار ثبت نشد: {exc}"
+
+
 def reconcile_receipt(db: Session, r: InboundReceipt, user=None) -> InboundReceipt:
+    if r.deposit_id or r.status == "rejected":
+        return r  # already registered / rejected: nothing to look for
+    held = db.get(BankTransaction, r.bank_transaction_id) if r.bank_transaction_id else None
+    if held is not None and held.matched_type == "receipt" and held.matched_id == r.id:
+        # already matched to its bank transaction (e.g. before the customer told us their name): keep that match
+        if r.customer_id and (r.confidence or 0) >= STRONG_MATCH:
+            _auto_register(db, r, held, user)
+        audit(db, "receipt.reconcile", "receipt", r.id, {"status": r.status, "confidence": r.confidence}, user=user, actor="matcher")
+        return r
     tx, conf, note = find_bank_match(db, r)
     r.confidence = conf
     r.note = note
@@ -104,18 +141,26 @@ def reconcile_receipt(db: Session, r: InboundReceipt, user=None) -> InboundRecei
                     level="danger", ref_type="receipt", ref_id=r.id)
         bus.emit("receipt.mismatch", {"receipt_id": r.id, "note": note}, db=db)
     elif tx is not None and conf >= 0.5:
+        other = _weak_holder(db, tx)  # held by another receipt on amount + time only: this one has the tracking number
+        if other is not None:
+            other.status, other.bank_transaction_id = "pending", None
+            other.note = "واریز بانکی آن به رسیدی با همان شماره پیگیری داده شد"
         r.status = "matched"
         r.bank_transaction_id = tx.id
         tx.status, tx.matched_type, tx.matched_id = "matched", "receipt", r.id
-        if r.customer_id:
-            register_receipt(db, r, db.get(Customer, r.customer_id), tx=tx, user=user)
+        if conf < STRONG_MATCH:
+            # amount + time only: anyone could send such a receipt, so a person confirms it («ثبت»)
+            r.note = f"{note}؛ شماره پیگیری با بانک نخواند - پس از بررسی «ثبت» را بزنید"
+        elif r.customer_id:
+            _auto_register(db, r, tx, user)
+        if other is not None:
+            reconcile_receipt(db, other, user=user)  # it may still find its own transaction
     else:
         require_bank = settings_store.get(db, "matching.require_bank_confirmation", True)
+        r.status = "pending"
         if not require_bank and r.customer_id and r.amount:
-            register_receipt(db, r, db.get(Customer, r.customer_id), user=user)
             r.note = "ثبت بدون تأیید بانک (تنظیمات)"
-        else:
-            r.status = "pending"
+            _auto_register(db, r, None, user)
     audit(db, "receipt.reconcile", "receipt", r.id, {"status": r.status, "confidence": conf}, user=user, actor="matcher")
     return r
 
@@ -139,7 +184,13 @@ def on_bank_transaction(db: Session, tx: BankTransaction) -> None:
     """Called after a bank transaction is imported: try pending receipts, then manual entries."""
     if tx.direction != "in" or tx.status != "unmatched":
         return
-    for r in db.scalars(select(InboundReceipt).where(InboundReceipt.status == "pending", InboundReceipt.amount == tx.amount)):
+    pending = list(db.scalars(select(InboundReceipt).where(InboundReceipt.status == "pending", InboundReceipt.amount == tx.amount)
+                              .order_by(InboundReceipt.id)))
+    # the receipt with this transaction's tracking number first, then the oldest
+    pending.sort(key=lambda r: not (tx.reference and (r.parsed or {}).get("reference") == tx.reference))
+    for r in pending:
+        if r.status != "pending":
+            continue  # taken care of a moment ago (a receipt that lost its transaction looks again by itself)
         reconcile_receipt(db, r)
         if tx.status == "matched" or r.bank_transaction_id == tx.id:
             return

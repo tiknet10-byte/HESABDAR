@@ -45,6 +45,7 @@ from ..models import (
     SupplierPayment,
     TradeDoc,
     TradeHistory,
+    User,
     WaitlistEntry,
     WooLog,
     WooOrder,
@@ -57,9 +58,14 @@ from ..models import (
 TRANSACTIONS = [WooOutbox, WooOrder, WooLog, StockMove, CapitalMove, HoldingMove, SupplierPayment, PurchaseItem, Purchase, TradeHistory, TradeDoc,
                 WaitlistEntry, InboundReceipt, BankTransaction, Payment, Deposit, Appointment, InvoiceItem, Invoice, Expense,
                 JournalLine, JournalEntry, Alert, ConversationMessage, ConversationState, ImportBatch]
+# kept by "transactions" and "customers", wiped by "factory" (then the defaults are seeded again); children first too
+CATALOG = [WooProduct, Product, Supplier, Holding, Service, Staff, PaymentAccount, ServiceLine, KnowledgeItem, LedgerAccount, Setting,
+           PluginState, AuditLog]
+KEPT = [User]  # logins are never wiped. Every table is in exactly one of TRANSACTIONS, [Customer], CATALOG, KEPT (tested)
 SCOPES = {
-    "transactions": "همه تراکنش‌ها (فاکتور، بیعانه، دریافت، هزینه، نوبت، رسید، اسناد) - مشتریان، خدمات و تنظیمات می‌مانند",
-    "customers": "تراکنش‌ها + همه مشتریان - خدمات، کارتخوان‌ها و تنظیمات می‌مانند",
+    "transactions": "همه تراکنش‌ها (فاکتور، بیعانه، دریافت، هزینه، نوبت، رسید، اسناد، خرید و موجودی کالا، سرمایه و طلا/ارز، "
+                    "سفارش‌های سایت و سوابق تیزپرداز) - مشتریان، خدمات، کالاها، فروشندگان و تنظیمات می‌مانند",
+    "customers": "تراکنش‌ها + همه مشتریان - خدمات، کالاها، فروشندگان، کارتخوان‌ها و تنظیمات می‌مانند",
     "factory": "بازگشت به تنظیمات کارخانه: همه داده‌ها پاک می‌شود (فقط کاربران می‌مانند)",
 }
 
@@ -81,18 +87,50 @@ def reset(db: Session, scope: str) -> dict:
                                       last_sale_at=None, last_online_price=None, last_online_at=None))
     # gold / dollars stay as names with nothing held (their moves were transactions)
     db.execute(update(Holding).values(qty_m=0, cost=0))
+    # (the website keeps its place: orders already read are not booked again, as the clinic's own past sales are gone too)
     if scope in ("customers", "factory"):
         db.execute(update(Supplier).values(customer_id=None))
         wipe(Customer)
+        # «not the same person» answers name customer ids, which the next customers would get again
+        wipe(KnowledgeItem, KnowledgeItem.kind == "customer_not_same")
     if scope == "factory":
-        for m in (WooProduct, Product, Supplier, Holding, Service, Staff, PaymentAccount, ServiceLine, KnowledgeItem, LedgerAccount, Setting,
-                  PluginState, AuditLog):
+        for m in CATALOG:
             wipe(m)
     db.flush()
     if scope == "factory":
         from ..seed import seed_base
+        from . import capital, inventory
         seed_base(db)
+        inventory.ensure_chart(db)  # the whole chart at once, as at start-up (inventory, payables, gold/currency...)
+        capital.ensure_chart(db)
+        _plugins_to_defaults(db)
     return counts
+
+
+def _plugins_to_defaults(db: Session) -> None:
+    """Factory reset: every plugin back to its default on/off and settings (bank tokens, messaging keys... are gone).
+    The running plugins follow once the reset is saved, not before (a failed reset changes nothing)."""
+    from sqlalchemy import event
+
+    from ..plugins.manager import manager
+
+    fresh = {}
+    for name, plugin in manager.plugins.items():
+        on = plugin.status != "concept" and plugin.enabled_by_default
+        db.add(PluginState(name=name, enabled=on, config=dict(plugin.default_config)))
+        fresh[name] = on
+
+    def apply(_session) -> None:  # noqa: ANN001
+        for name, on in fresh.items():
+            plugin = manager.plugins.get(name)
+            if plugin is None:
+                continue
+            plugin.ctx.config = dict(plugin.default_config)
+            was, manager.enabled[name] = manager.enabled.get(name), on
+            if bool(was) != on:
+                (plugin.on_enable if on else plugin.on_disable)()
+
+    event.listen(db, "after_commit", apply, once=True)
 
 
 def optimize() -> dict:
@@ -130,6 +168,7 @@ def stats(db: Session) -> dict:
     from sqlalchemy import func, select
 
     models = [Customer, Invoice, Deposit, Payment, Appointment, Expense, JournalEntry, BankTransaction, InboundReceipt,
+              Product, Purchase, Supplier, TradeDoc, WooOrder, CapitalMove, Holding,
               Service, PaymentAccount, KnowledgeItem, AuditLog]
     out = {m.__tablename__: db.scalar(select(func.count()).select_from(m)) or 0 for m in models}
     url = str(dbmod.engine.url)

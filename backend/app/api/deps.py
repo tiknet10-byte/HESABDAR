@@ -21,6 +21,8 @@ def current_user(creds: HTTPAuthorizationCredentials | None = Depends(bearer), d
     user = db.get(User, int(payload["sub"]))
     if user is None or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "کاربر غیرفعال است")
+    if int(payload.get("ver") or 0) != (user.token_version or 0):  # password changed or user deactivated since
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "ورود شما دیگر معتبر نیست؛ لطفاً دوباره وارد شوید")
     return user
 
 

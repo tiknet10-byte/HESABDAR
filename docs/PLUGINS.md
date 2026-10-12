@@ -20,6 +20,7 @@ class Plugin(BasePlugin):
     config_schema = {"type": "object", "properties": {
         "discount_percent": {"type": "integer", "title": "درصد تخفیف"}}}
     default_config = {"discount_percent": 10}
+    # enabled_by_default = False   # start turned off (e.g. it takes messages from outside); the owner turns it on
 
     def setup(self):
         # 1) REST endpoints -> /api/plugins/birthday_sms/...
@@ -54,12 +55,23 @@ class Plugin(BasePlugin):
 bank_transaction.imported, receipt.matched, receipt.mismatch, alert.created, backup.created`
 — use `"*"` to receive all of them.
 
+### On / off
+On the first start a plugin is turned on unless its `status` is `concept` or it sets `enabled_by_default = False`;
+after that the owner's choice (Settings → Plugins) is kept. A turned-off plugin answers no requests (404) and its
+periodic jobs do not run.
+
+### Webhooks
+A webhook has no login, so it must check a signature itself and refuse (401) without it: the bank-SMS / SMS
+forwarders sign with `X-Hesabdar-Signature`, Meta (WhatsApp / Instagram) with `X-Hub-Signature-256` and the App Secret
+from the plugin settings. Never fetch a URL taken from a webhook body unless its host is on a fixed allow-list, and
+never build a file name from it.
+
 ### Built-in plugins
 | name | purpose |
 |---|---|
 | `bank_sync` | bank API providers, bank SMS webhook, statement import |
-| `messaging_receipts` | SMS / WhatsApp / Instagram receipts, matching, chatbot |
-| `sales_book_ocr` | scan sales book / invoices, validation, commit |
+| `messaging_receipts` | SMS / WhatsApp / Instagram receipts, matching, chatbot (off until the owner turns it on) |
+| `sales_book_ocr` | scan sales book / invoices, validation, commit (no deposit is used by itself) |
 | `loyalty` | small example: loyalty points per purchase |
 
 New bank? Subclass `BankProvider` in `bank_sync/plugin.py` (or your own plugin) and implement `fetch(account, since)`.

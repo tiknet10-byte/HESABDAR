@@ -12,8 +12,11 @@ from datetime import datetime
 from .jalali import jalali_to_gregorian
 from .textutil import normalize_text, parse_amount, to_en_digits
 
+# a number: 3-digit groups with , or . between them (1,500,000) or plain digits (1500000); never spaces, so a date or
+# time written after it on the same line is not glued on, and not the start of a date / time (1403/05/12, 12:30)
+_NUM = r"[+\-]?(?:\d{1,3}(?:[,.]\d{3})+|\d{3,})(?![\d/:])"
 AMOUNT_PATTERNS = [
-    r"(?:مبلغ|واریز|انتقال|برداشت|خرید|مبلغ تراکنش|مبلغ انتقال)\s*[:：]?\s*([+\-]?[\d,.\s]{3,})\s*(ریال|تومان)?",
+    rf"(?:مبلغ|واریز|انتقال|برداشت|خرید|مبلغ تراکنش|مبلغ انتقال)\s*[:：]?\s*({_NUM})\s*(ریال|تومان)?",
     r"([+\-][\d,]{4,})\s*(ریال|تومان)?",
     r"([\d,]{5,})\s*(ریال|تومان)",
 ]
@@ -32,7 +35,8 @@ BANKS = ["ملت", "ملی", "صادرات", "تجارت", "سپه", "پاسار
 
 
 def parse_receipt(text: str) -> dict:
-    raw = to_en_digits(text or "")
+    # Persian thousands separator «٬» (and «،» typed between digit groups) -> ',' so ۱٬۵۰۰٬۰۰۰ reads as 1,500,000
+    raw = re.sub(r"(?<=\d)،(?=\d{3})", ",", to_en_digits(text or "").replace("٬", ","))
     norm = normalize_text(raw)
     result: dict = {"amount": None, "currency": "rial", "direction": None, "reference": None,
                     "card_last4": None, "card_mask": None, "datetime": None, "bank": None, "confidence": 0.0}

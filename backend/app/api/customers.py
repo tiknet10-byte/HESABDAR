@@ -50,8 +50,9 @@ def _activity():  # noqa: ANN202
     held = (select(Deposit.customer_id.label("cid"), func.sum(Deposit.amount).label("amt"))
             .where(Deposit.status == "held").group_by(Deposit.customer_id).subquery())
     # product purchases brought over from the product accounting software (Tizpardaz); its returns count negative
-    signed = case((TradeHistory.kind == "sale_return", -TradeHistory.amount), else_=TradeHistory.amount)
-    trade = (select(TradeHistory.customer_id.label("cid"), func.sum(signed).label("amt"),
+    net = func.coalesce(TradeHistory.net_amount, TradeHistory.amount)  # after its invoice's discount
+    signed = case((TradeHistory.kind == "sale_return", -net), else_=net)
+    trade =(select(TradeHistory.customer_id.label("cid"), func.sum(signed).label("amt"),
                     func.count(func.distinct(func.date(TradeHistory.at))).label("n"), func.max(TradeHistory.at).label("last"))
              .where(TradeHistory.kind.in_(("sale", "sale_return")), TradeHistory.customer_id.is_not(None))
              .group_by(TradeHistory.customer_id).subquery())

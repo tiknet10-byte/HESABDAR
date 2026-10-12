@@ -123,6 +123,15 @@ def replay(moves: list[StockMove], how: str) -> dict:
     pool = [0, 0]  # average / periodic: [qty, value]
     last_unit = 0
     by_id = {m.id: m for m in moves}
+    back: dict[int, list[int]] = defaultdict(lambda: [0, 0, 0])  # sale -> [units cancelled, covered units returned, their value]
+    # an invoice voided as a mistake never happened: its sale and the return at the very same time are left out
+    # (cost 0 both), so its goods don't come back as the newest layer and don't wait for (or take) a purchase
+    never = set()
+    for m in moves:
+        s = by_id.get(m.ref_move_id) if m.kind == "sale_return" else None
+        if s is not None and s.kind == "sale" and s.at == m.at and s.qty == -m.qty and s.id not in never:
+            never |= {s.id, m.id}
+    live = [m for m in moves if m.id not in never]
 
     def fill_pending(q: int, value: int) -> tuple[int, int]:
         """A new arrival first covers units already sold without stock, at its own cost."""
@@ -184,17 +193,37 @@ def replay(moves: list[StockMove], how: str) -> dict:
         v = sum(x[1] for x in layers) if how == "fifo" else pool[1]
         return v // q if q > 0 else last_unit
 
-    def engine_in_cost(m: StockMove) -> int:
+    def come_in(m: StockMove) -> None:
+        """A return comes back at what its sale cost. Units of that sale still waiting for stock are cancelled
+        first: they never left the stock, so they don't come back, and a later purchase doesn't cost them.
+        Found stock comes in at the current unit cost."""
+        q = m.qty
         if m.kind == "sale_return" and m.ref_move_id in by_id:
             sale = by_id[m.ref_move_id]
-            sold = -sale.qty
-            total = real[sale.id] + pend_units[sale.id] * last_unit  # what that sale cost (estimate for uncovered units)
-            return _part(total, m.qty, sold) if sold > 0 else 0
-        return stock_unit() * m.qty
+            c = min(q, pend_units[sale.id])
+            if c > 0:
+                pend_units[sale.id] -= c
+                left = c
+                for e in reversed(pending):
+                    if e[0] == sale.id and left > 0:
+                        t = min(e[1], left)
+                        e[1] -= t
+                        left -= t
+                pending[:] = [e for e in pending if e[1] > 0]
+            b = back[sale.id]
+            b[0] += c
+            covered = -sale.qty - pend_units[sale.id] - b[0] - b[1]  # units stock did cover, not returned yet
+            cost_in[m.id] = _part(real[sale.id] - b[2], q - c, covered) if q > c and covered > 0 else 0
+            b[1] += q - c
+            b[2] += cost_in[m.id]
+            add(q - c, cost_in[m.id])
+        else:
+            cost_in[m.id] = stock_unit() * q
+            add(q, cost_in[m.id])
 
     if how == "periodic":
         groups: dict[tuple[int, int], list[StockMove]] = defaultdict(list)
-        for m in moves:
+        for m in live:
             groups[_period(m.at)].append(m)
         for key in sorted(groups):
             ms = groups[key]
@@ -207,22 +236,22 @@ def replay(moves: list[StockMove], how: str) -> dict:
                     take(m.id, -m.qty)
             for m in ms:  # 3. returns and found stock come back at their own cost
                 if m.kind in ENGINE_IN:
-                    cost_in[m.id] = engine_in_cost(m)
-                    add(m.qty, cost_in[m.id])
+                    come_in(m)
     else:
-        for m in moves:
+        for m in live:
             if m.kind in FIXED_IN:
                 cost_in[m.id] = int(m.cost)
                 add(m.qty, int(m.cost))
             elif m.kind in OUT:
                 take(m.id, -m.qty)
             elif m.kind in ENGINE_IN:
-                cost_in[m.id] = engine_in_cost(m)
-                add(m.qty, cost_in[m.id])
+                come_in(m)
 
     costs: dict[int, tuple[int, bool]] = {}
     for m in moves:
-        if m.kind in OUT:
+        if m.id in never:
+            costs[m.id] = (0, False)
+        elif m.kind in OUT:
             est = pend_units[m.id] * last_unit
             costs[m.id] = (real[m.id] + est, pend_units[m.id] > 0)
         else:
@@ -230,8 +259,10 @@ def replay(moves: list[StockMove], how: str) -> dict:
     qty = sum(m.qty for m in moves)
     value = sum(x[1] for x in layers) if how == "fifo" else pool[1]
     in_stock = sum(x[0] for x in layers) if how == "fifo" else pool[0]
+    waiting = sum(k for _, k in pending)
+    # book value = ledger 1300: the stock's value minus the estimated cost of units sold before they were bought
     return {"costs": costs, "qty": qty, "value": value, "in_stock": in_stock, "last_unit": last_unit,
-            "unit": value // in_stock if in_stock > 0 else last_unit, "pending": sum(k for _, k in pending)}
+            "unit": value // in_stock if in_stock > 0 else last_unit, "pending": waiting, "book_value": value - waiting * last_unit}
 
 
 def _post_move(db: Session, m: StockMove, product: Product) -> None:
@@ -261,7 +292,7 @@ def recost(db: Session, product_id: int) -> dict:
         if cost != m.cost or est != m.estimated or (cost > 0) != (m.id in posted):
             m.cost, m.estimated = cost, est
             _post_move(db, m, p)
-    p.stock_qty, p.stock_value, p.unit_cost = r["qty"], r["value"], r["unit"] or p.unit_cost
+    p.stock_qty, p.stock_value, p.unit_cost = r["qty"], r["book_value"], r["unit"] or p.unit_cost  # stock_value == ledger 1300
     last_buy = db.scalar(select(StockMove).where(StockMove.product_id == product_id, StockMove.kind.in_(FIXED_IN))
                          .order_by(StockMove.at.desc(), StockMove.id.desc()).limit(1))
     p.last_purchase_cost = last_buy.cost // last_buy.qty if last_buy and last_buy.qty else p.last_purchase_cost
@@ -274,6 +305,19 @@ def recost_all(db: Session) -> int:
     for pid in ids:
         recost(db, pid)
     return len(ids)
+
+
+# 2: a voided invoice cancels its own units waiting for stock, a cancelled invoice never happened, value == ledger 1300
+ENGINE_VERSION = 2
+
+
+def recost_if_engine_changed(db: Session) -> int:
+    """At start: when the engine has changed, every product is worked out again once (costs, ledger, stock value)."""
+    if int(settings_store.get(db, "products.engine", 1) or 1) >= ENGINE_VERSION:
+        return 0
+    n = recost_all(db)
+    settings_store.set_value(db, "products.engine", ENGINE_VERSION)
+    return n
 
 
 def set_method(db: Session, how: str, user=None) -> int:  # noqa: ANN001
@@ -305,13 +349,22 @@ def opening_stock(db: Session, product: Product, qty: int, unit_cost: int, at: d
     return m
 
 
+def stock_at(db: Session, product_id: int, at: datetime | None = None) -> int:
+    """Quantity in stock at that moment (None = now, every move)."""
+    q = select(func.coalesce(func.sum(StockMove.qty), 0)).where(StockMove.product_id == product_id)
+    if at is not None:
+        q = q.where(StockMove.at <= at.replace(tzinfo=None))
+    return int(db.scalar(q) or 0)
+
+
 def count_stock(db: Session, product: Product, counted: int, at: datetime | None = None, note: str = "", user=None) -> StockMove | None:  # noqa: ANN001
-    """Physical count: the difference with the system becomes a shortage (cost by the method) or found stock."""
+    """Physical count: the difference with the system becomes a shortage (cost by the method) or found stock.
+    A count dated in the past is compared with the stock of that moment (moves after it come on top of it)."""
     if counted < 0:
         raise AccountingError("موجودی شمارش‌شده نمی‌تواند منفی باشد")
     ensure_not_future(at, "تاریخ شمارش")
     db.flush()
-    current = int(db.scalar(select(func.coalesce(func.sum(StockMove.qty), 0)).where(StockMove.product_id == product.id)) or 0)
+    current = stock_at(db, product.id, at)
     diff = counted - current
     if diff == 0:
         return None

@@ -141,7 +141,7 @@ CORE_TOOLS: list[AITool] = [
     AITool("reconciliation_status", "Counts of unmatched bank transactions and pending/mismatched receipts.",
            {**_OBJ, "properties": {}}, reconciliation_status),
     AITool("payment_accounts", "POS terminals, bank cards and accounts with current ledger balances.",
-           {**_OBJ, "properties": {}}, payment_accounts, "finance"),
+           {**_OBJ, "properties": {}}, payment_accounts, "reports"),  # reading balances; 'finance' is for moving money
     AITool("guess_service", "Guess which salon service a text (chat message) or deposit amount refers to, using learned knowledge.",
            {**_OBJ, "properties": {"text": {"type": "string"}, "amount": {"type": "integer"}, "customer_id": {"type": "integer"}}}, guess_service),
     AITool("create_customer", "Create a customer (or return the existing one with the same mobile/Instagram).",
@@ -154,8 +154,12 @@ CORE_TOOLS: list[AITool] = [
             "required": ["customer_id", "amount_rial", "payment_account_id"]}, register_deposit, "write"),
     AITool("teach_service_alias", "Teach the system another name customers use for a service (continuous learning).",
            {**_OBJ, "properties": {"service_id": {"type": "integer"}, "alias": {"type": "string"}}, "required": ["service_id", "alias"]},
-           teach_service_alias, "write"),
+           teach_service_alias, "settings"),  # changes how the system classifies services: like editing a service
 ]
+
+# tools that only read: the assistant runs them by itself; every other tool changes data and the user must confirm it
+# (the plugins' 'finance' tools only read too: unmatched bank transactions, sales-book pages waiting for review)
+READ_ONLY = {"read", "reports", "finance"}
 
 
 def all_tools() -> list[AITool]:

@@ -2,20 +2,27 @@
 
 It behaves like WooCommerce where it matters here: orders take goods out of the stock (processing / on-hold /
 completed), cancelling puts them back, refunds can restock, money is strings in the store currency, dates come
-as site-local and GMT, lists are paged with X-WP-Total / X-WP-TotalPages, `modified_after` filters orders.
+as site-local (the website's own time zone) and GMT, lists are paged with X-WP-Total / X-WP-TotalPages,
+`modified_after` filters orders, `orderby` / `order` sort them, products keep `meta_data`.
 """
 from __future__ import annotations
 
 import base64
 import json
 import re
-from datetime import datetime, timedelta
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs
 
 import httpx
 
-GMT = timedelta(hours=3, minutes=30)
+GMT = timedelta(hours=3, minutes=30)  # the website's own time zone (Tehran) by default
 TAKES_STOCK = {"processing", "on-hold", "completed"}
+
+
+def _utc(local: datetime) -> datetime:
+    """A time of this computer (naive local) in GMT."""
+    return local.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _s(v: float | int) -> str:
@@ -25,14 +32,20 @@ def _s(v: float | int) -> str:
 class FakeWoo:
     stores = 0  # each store gets its own ids (like different websites)
 
-    def __init__(self, currency: str = "IRT", key: str = "ck_test_1234567890", secret: str = "cs_test_1234567890") -> None:
+    def __init__(self, currency: str = "IRT", key: str = "ck_test_1234567890", secret: str = "cs_test_1234567890",
+                 site_offset: timedelta = GMT, header_auth: bool = True) -> None:
         self.currency, self.key, self.secret = currency, key, secret
+        self.offset = site_offset  # the website's time zone (GMT + offset)
+        self.header_auth = header_auth  # False: the host drops the Authorization header (key in the query only)
         self.products: dict[int, dict] = {}
         self.orders: dict[int, dict] = {}
         self.refunds: dict[int, list[dict]] = {}
         FakeWoo.stores += 1
         self.ids = 100_000 * FakeWoo.stores
         self.down = False
+        self.lose_put = 0  # the next N stock changes are saved, but their answer never arrives (timeout)
+        self.on_orders_page: Callable[[int], None] | None = None  # called before a page of orders is served
+        self.on_put: Callable[[int], None] | None = None  # called (with the product id) before a product is changed
         self.calls: list[tuple[str, str]] = []
 
     def _id(self) -> int:
@@ -48,7 +61,7 @@ class FakeWoo:
         pid = self._id()
         self.products[pid] = {"id": pid, "name": name, "sku": sku, "type": "simple", "status": "publish", "price": str(price),
                               "regular_price": str(price), "manage_stock": manage, "stock_quantity": stock if manage else None,
-                              "parent_id": 0, "attributes": []}
+                              "parent_id": 0, "attributes": [], "meta_data": []}
         return pid
 
     def add_variable(self, name: str, variations: list[tuple[str, str, int, int]]) -> tuple[int, list[int]]:
@@ -60,7 +73,7 @@ class FakeWoo:
             vid = self._id()
             self.products[vid] = {"id": vid, "name": name, "sku": sku, "type": "variation", "status": "publish", "price": str(price),
                                   "regular_price": str(price), "manage_stock": True, "stock_quantity": stock, "parent_id": pid,
-                                  "attributes": [{"name": "حجم", "option": option}]}
+                                  "attributes": [{"name": "حجم", "option": option}], "meta_data": []}
             vids.append(vid)
         return pid, vids
 
@@ -69,15 +82,22 @@ class FakeWoo:
         if p["manage_stock"]:
             p["stock_quantity"] = (p["stock_quantity"] or 0) + delta
 
-    def _touch(self, o: dict) -> None:
-        now = self.now()
-        o["date_modified"] = now.isoformat()
-        o["date_modified_gmt"] = (now - GMT).isoformat()
+    def _date(self, d: dict, field: str, local: datetime | None) -> None:
+        """A date as WooCommerce gives it: in the website's time zone, and in GMT (local = this computer's time)."""
+        if local is None:
+            d[field] = d[f"{field}_gmt"] = None
+            return
+        g = _utc(local)
+        d[field], d[f"{field}_gmt"] = (g + self.offset).isoformat(), g.isoformat()
+
+    def _touch(self, o: dict, at: datetime | None = None) -> None:
+        self._date(o, "date_modified", at or self.now())
 
     def add_order(self, items: list[tuple[int, int]], *, status: str = "processing", paid: bool = True, phone: str = "",
                   first: str = "", last: str = "", shipping: int = 0, coupon: int = 0, method: str = "zarinpal",
                   method_title: str = "درگاه زرین‌پال", created: datetime | None = None, customer_id: int = 0) -> dict:
-        """items: [(product or variation id, qty)] at the product's price; coupon: taken off the first line."""
+        """items: [(product or variation id, qty)] at the product's price; coupon: taken off the first line.
+        created: this computer's local time (the website shows it in its own time zone)."""
         oid = self._id()
         created = created or self.now() - timedelta(minutes=30)
         lines, total = [], 0
@@ -90,13 +110,14 @@ class FakeWoo:
             total += line_total
         total += shipping
         o = {"id": oid, "number": str(oid), "status": status, "currency": self.currency, "customer_id": customer_id,
-             "date_created": created.isoformat(), "date_created_gmt": (created - GMT).isoformat(),
-             "date_paid": (created + timedelta(minutes=2)).isoformat() if paid else None, "date_completed": None,
              "payment_method": method, "payment_method_title": method_title,
              "billing": {"first_name": first, "last_name": last, "phone": phone, "email": f"{oid}@example.com"},
              "shipping": {"first_name": first, "last_name": last, "phone": ""},
              "line_items": lines, "shipping_total": _s(shipping), "fee_lines": [], "discount_total": _s(coupon), "total_tax": "0.00",
              "total": _s(total), "refunds": []}
+        self._date(o, "date_created", created)
+        self._date(o, "date_paid", created + timedelta(minutes=2) if paid else None)
+        self._date(o, "date_completed", None)
         self._touch(o)
         self.orders[oid] = o
         self.refunds[oid] = []
@@ -112,13 +133,14 @@ class FakeWoo:
             for li in o["line_items"]:
                 self._stock(li["variation_id"] or li["product_id"], li["quantity"] if before in TAKES_STOCK else -li["quantity"])
         if paid and not o["date_paid"]:
-            o["date_paid"] = self.now().isoformat()
+            self._date(o, "date_paid", self.now())
         if status == "completed":
-            o["date_completed"] = self.now().isoformat()
+            self._date(o, "date_completed", self.now())
         self._touch(o)
 
-    def refund(self, oid: int, amount: int, items: list[tuple[int, int, int]] | None = None, restock: bool = True) -> None:
-        """items: [(order line id, qty, amount)]"""
+    def refund(self, oid: int, amount: int, items: list[tuple[int, int, int]] | None = None, restock: bool = True,
+               at: datetime | None = None) -> None:
+        """items: [(order line id, qty, amount)]; at: when it was given back (this computer's local time)"""
         o = self.orders[oid]
         rid = self._id()
         lines = []
@@ -128,7 +150,9 @@ class FakeWoo:
                           "total": _s(-amt), "subtotal": _s(-amt), "meta_data": [{"key": "_refunded_item_id", "value": str(line_id)}]})
             if restock:
                 self._stock(li["variation_id"] or li["product_id"], qty)
-        self.refunds[oid].append({"id": rid, "date_created": self.now().isoformat(), "amount": _s(amount), "reason": "", "line_items": lines})
+        r = {"id": rid, "amount": _s(amount), "reason": "", "line_items": lines}
+        self._date(r, "date_created", at or self.now())
+        self.refunds[oid].append(r)
         o["refunds"].append({"id": rid, "reason": "", "total": _s(-amount)})
         refunded = sum(float(r["amount"]) for r in self.refunds[oid])
         if refunded >= float(o["total"]):
@@ -140,7 +164,7 @@ class FakeWoo:
         if q.get("consumer_key") == self.key and q.get("consumer_secret") == self.secret:
             return True
         auth = request.headers.get("authorization", "")
-        if auth.startswith("Basic "):
+        if auth.startswith("Basic ") and self.header_auth:
             return base64.b64decode(auth[6:]).decode() == f"{self.key}:{self.secret}"
         return False
 
@@ -173,20 +197,32 @@ class FakeWoo:
             if p is None:
                 return httpx.Response(404, json={"message": "Invalid ID."})
             if request.method == "PUT":
+                if self.on_put:
+                    self.on_put(p["id"])
                 for k in ("manage_stock", "stock_quantity"):
                     if k in body:
                         p[k] = body[k]
+                for meta in body.get("meta_data") or []:  # like update_meta_data: a key is replaced, not repeated
+                    p["meta_data"] = [x for x in p.setdefault("meta_data", []) if x["key"] != meta["key"]] + \
+                        [{"id": self._id(), "key": meta["key"], "value": meta["value"]}]
+                if self.lose_put:  # saved on the website, but the answer is lost on the way
+                    self.lose_put -= 1
+                    raise httpx.ReadTimeout("timed out", request=request)
             return httpx.Response(200, json=p)
         if path == "/orders":
+            if self.on_orders_page:
+                self.on_orders_page(int(q.get("page", 1)))
             rows = list(self.orders.values())
             if q.get("modified_after"):
                 after = datetime.fromisoformat(q["modified_after"])
                 rows = [o for o in rows if datetime.fromisoformat(o["date_modified_gmt"]) > after]
-            rows.sort(key=lambda o: (o["date_modified_gmt"], o["id"]))
+            by = {"id": lambda o: o["id"], "modified": lambda o: (o["date_modified_gmt"], o["id"])}.get(
+                q.get("orderby", "date"), lambda o: (o["date_created_gmt"], o["id"]))
+            rows.sort(key=by, reverse=q.get("order", "desc") == "desc")
             return self._page(rows, q)
         m = re.fullmatch(r"/orders/(\d+)/refunds", path)
         if m:
-            return httpx.Response(200, json=self.refunds.get(int(m[1]), []))
+            return self._page(self.refunds.get(int(m[1]), []), q)
         return httpx.Response(404, json={"code": "rest_no_route", "message": "No route was found matching the URL and request method."})
 
     def transport(self) -> httpx.MockTransport:

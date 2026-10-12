@@ -45,6 +45,7 @@ class User(TimestampMixin, Base):
     failed_logins: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    token_version: Mapped[int | None] = mapped_column(Integer, nullable=True)  # +1 ends all logins (None == 0)
 
 
 class AuditLog(Base):
@@ -531,6 +532,8 @@ class TradeHistory(Base):
     cost: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # sales: cost of the goods (worked out on import)
     fp: Mapped[str] = mapped_column(String(160), default="", index=True)  # fingerprint: the same row is never imported twice
     doc_id: Mapped[int | None] = mapped_column(ForeignKey("trade_docs.id"), nullable=True, index=True)  # its invoice
+    # after its share of the invoice's discount / charges (what it really sold or cost for); None = amount
+    net_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class TradeDoc(Base):

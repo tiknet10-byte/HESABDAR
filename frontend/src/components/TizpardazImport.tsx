@@ -82,10 +82,15 @@ export default function TizpardazImport() {
   }
 
   async function undo(b: any) {
-    if (!window.confirm(`همه اطلاعاتی که با فایل «${b.file_name}» از تیزپرداز وارد شده برگردد؟`)) return;
+    if (!window.confirm(`همه اطلاعاتی که با فایل «${b.file_name}» از تیزپرداز وارد شده برگردد؟\nچیزی که بعد از آن استفاده شده (مثلاً بدهیِ دریافت‌شده، اعتبارِ مصرف‌شده یا کالای فروخته‌شده) دست نمی‌خورد.`)) return;
     try {
-      await api(`/api/import/tizpardaz/${b.id}/undo`, { method: "POST" });
-      toast("برگشت انجام شد");
+      const r = await api(`/api/import/tizpardaz/${b.id}/undo`, { method: "POST" });
+      const kept = [
+        [r.balances_kept, "بدهی که (بخشی از) آن دریافت شده"], [r.credits_kept, "اعتبار که مصرف شده"],
+        [r.moves_kept, "موجودی کالا که بعداً فروش یا گردش داشته"], [r.products_kept, "کالا که بعداً استفاده شده"],
+        [r.codes_kept, "کد کالا که حالا مال کالای دیگری است"],
+      ].filter(([n]) => n > 0).map(([n, l]) => `${faDigits(n)} ${l}`);
+      toast(kept.length ? `برگشت انجام شد. این‌ها چون بعداً استفاده شده‌اند ماندند: ${kept.join("، ")}` : "برگشت انجام شد");
       history.reload();
     } catch (e: any) {
       toast(e.message, "error");
@@ -98,7 +103,7 @@ export default function TizpardazImport() {
         <div className="space-y-2 text-sm leading-7">
           <p>از تیزپرداز گزارش‌ها را <b>Excel</b> بگیرید و <b>به همین ترتیب</b> وارد کنید. هر مرحله اول پیش‌نمایش نشان می‌دهد و تا «ثبت» را نزنید چیزی عوض نمی‌شود.</p>
           <ol className="list-inside list-decimal space-y-1 rounded-2xl bg-pink-500/5 p-3">
-            <li><b>مشتریان</b>: کد تیزپرداز با کد چهره فرق دارد، پس مشتری فقط با <b>نام و نام خانوادگی</b> پیدا می‌شود («تاجیک(ساناز)» = ساناز تاجیک). اگر چند نفر هم‌نام باشند، از شما می‌پرسد کدام است. بدهی مشتری «بدهی قبلی» و بستانکاری او «بیعانهٔ باز» می‌شود.</li>
+            <li><b>مشتریان</b>: کد تیزپرداز با کد چهره فرق دارد، پس مشتری فقط با <b>نام و نام خانوادگی</b> پیدا می‌شود («تاجیک(ساناز)» = ساناز تاجیک). اگر چند نفر هم‌نام باشند، از شما می‌پرسد کدام است. بدهی مشتری «بدهی قبلی» و بستانکاری او «اعتبار مشتری» می‌شود (در خرید بعدی خرج می‌شود و هیچ‌وقت سوخت نمی‌شود).</li>
             <li><b>کالاها</b>: ملاک، تیزپرداز است؛ کد کالا، نام، قیمت‌ها و <b>موجودی نهایی</b> همان می‌شود و SKU سایت از روی کد کالا وصل می‌شود. اگر کالایی قبلاً اینجا (یا در چهره به‌صورت «خدمت») بوده، می‌پرسد که یکی شود یا نه.</li>
             <li><b>دفتر روزنامه</b> (فروش، خرید، هزینه): فقط <b>سابقه</b> است و در گزارش سود محصولات، پروندهٔ کالا و پروندهٔ مشتری دیده می‌شود. چون مانده‌ها و موجودی در مرحلهٔ ۱ و ۲ آمده، <b>هیچ مبلغی دوباره حساب نمی‌شود</b>. نام مشتری از «شرح» خوانده می‌شود؛ اگر به جای نام، <b>کد حساب تیزپرداز</b> را در شرح بنویسید (مثلاً «… به 1024»)، مستقیم به همان مشتری وصل می‌شود.</li>
           </ol>
@@ -166,7 +171,7 @@ export default function TizpardazImport() {
 
 function resultText(kind: string, r: any): string {
   const n = (k: string) => faDigits(r[k] ?? 0);
-  if (kind === "customers") return `مشتری جدید ${n("new")} · وصل به موجود ${n("linked")} · بدهی ${n("debts")} · بستانکار ${n("credits")}${r.unresolved ? ` · هم‌نامِ انتخاب‌نشده ${n("unresolved")}` : ""}`;
+  if (kind === "customers") return `مشتری جدید ${n("new")} · وصل به موجود ${n("linked")} · بدهی ${n("debts")} · اعتبار ${n("credits")}${r.unresolved ? ` · هم‌نامِ انتخاب‌نشده ${n("unresolved")}` : ""}`;
   if (kind === "products") return `کالای جدید ${n("new")} · یکی‌شده ${n("combined")} · موجودی ${n("units")} عدد${r.chehreh_sales ? ` · ${n("chehreh_sales")} فروش چهره منتقل شد` : ""}`;
   return `فروش ${n("sale")} · خرید ${n("purchase")} · هزینه ${n("expense")}${r.duplicates ? ` · تکراری ${n("duplicates")}` : ""}`;
 }
@@ -177,9 +182,11 @@ function Done({ r }: { r: any }) {
       <div className="flex items-center gap-2 font-bold text-emerald-700 dark:text-emerald-300"><CheckCircle2 size={16} />انتقال انجام شد</div>
       <div>{resultText(r.kind, r)}</div>
       {r.kind === "customers" && (r.debt_amount > 0 || r.credit_amount > 0) && (
-        <div className="text-xs">جمع بدهی مشتریان: {money(r.debt_amount ?? 0)} · جمع بستانکاری (بیعانهٔ باز): {money(r.credit_amount ?? 0)}. بدهی را از پروندهٔ مشتری با «دریافت بدهی» بگیرید.</div>
+        <div className="text-xs">جمع بدهی مشتریان: {money(r.debt_amount ?? 0)} · جمع بستانکاری (اعتبار مشتری): {money(r.credit_amount ?? 0)}. بدهی را از پروندهٔ مشتری با «دریافت بدهی» بگیرید.</div>
       )}
       {r.kind === "customers" && r.balance_already > 0 && <div className="text-xs text-amber-700 dark:text-amber-300">مانده‌ی {faDigits(r.balance_already)} مشتری قبلاً منتقل شده بود و دوباره ثبت نشد.</div>}
+      {r.kind === "customers" && r.renamed > 0 && <div className="text-xs">{faDigits(r.renamed)} پروندهٔ موقت («مشتری تیزپرداز …» که از دفتر روزنامه ساخته شده بود) نام واقعی گرفت. اگر همان شخص پروندهٔ دیگری هم دارد، از «مشتریان تکراری» آن دو را یکی کنید.</div>}
+      {r.kind === "products" && r.opening_units > 0 && <div className="text-xs">موجودی {faDigits(r.opening_units)} عدد کالا با قیمت خرید تیزپرداز به‌عنوان «موجودی اول دوره» ثبت شد (سود یا زیان حساب نشد).</div>}
       {r.kind === "products" && r.codes_moved > 0 && <div className="text-xs">{faDigits(r.codes_moved)} کالایی که اینجا همان کد را داشت، کد جدید گرفت تا کد تیزپرداز حفظ شود.</div>}
       {r.kind === "journal" && r.without_product > 0 && <div className="text-xs text-amber-700 dark:text-amber-300">{faDigits(r.without_product)} ردیف بدون کالای مشخص ثبت شد (فقط در جمع کل گزارش).</div>}
     </div>
@@ -261,14 +268,22 @@ function CustomersPreview({ pv, accounts, busy, onCommit, onCancel }: PreviewPro
   const unresolved = rows.filter((r) => choiceOf(r) === "").length;
   const shown = rows.filter((r) => !filter || (filter === "balance" ? r.debit || r.credit : r.status === filter));
   const count = (st: string) => rows.filter((r) => r.status === st).length;
+  // one customer here chosen for several rows of the file: their balances are added up
+  const uses: Record<string, number> = {};
+  for (const r of rows) {
+    const v = choiceOf(r);
+    if (/^\d+$/.test(v)) uses[v] = (uses[v] ?? 0) + 1;
+  }
+  const shared = rows.filter((r) => (uses[choiceOf(r)] ?? 0) > 1).length;
 
   function submit() {
     const ch = Object.fromEntries(rows.map((r) => [r.row, choiceOf(r)]).filter(([, v]) => v !== "").map(([k, v]) => [k, /^\d+$/.test(v) ? Number(v) : v]));
     const parts = [`${faDigits(rows.length - unresolved)} مشتری از تیزپرداز ثبت شود؟`];
     if (balances) parts.push(`بدهی‌ها (${money(s.debit)}) و بستانکاری‌ها (${money(s.credit)}) هم به‌عنوان ماندهٔ اول دوره منتقل می‌شود.`);
     if (unresolved) parts.push(`⚠ ${faDigits(unresolved)} مشتری هم‌نام انتخاب نشده و فعلاً ثبت نمی‌شود.`);
+    if (balances && shared) parts.push(`⚠ ${faDigits(shared)} ردیف به یک مشتری مشترک وصل است؛ مانده‌های آن‌ها با هم جمع می‌شود.`);
     const payables = rows.filter((r) => r.credit > 0 && creditOf(r) === "payable");
-    if (balances && payables.length) parts.push(`بستانکاری ${faDigits(payables.length)} نفر «طلب فروشنده» (بدهی ما به او) ثبت می‌شود، نه بیعانه.`);
+    if (balances && payables.length) parts.push(`بستانکاری ${faDigits(payables.length)} نفر «طلب فروشنده» (بدهی ما به او) ثبت می‌شود، نه اعتبار مشتری.`);
     onCommit({ choices: ch, balances, at: at || null, account_id: accountId || null,
       credit_as: Object.fromEntries(rows.filter((r) => r.credit > 0).map((r) => [r.row, creditOf(r)])) }, parts.join("\n"));
   }
@@ -285,6 +300,7 @@ function CustomersPreview({ pv, accounts, busy, onCommit, onCancel }: PreviewPro
           <Stat label="جمع بستانکاری مشتریان" value={money(s.credit)} tone="emerald" />
         </div>
         {unresolved > 0 && <div className="rounded-2xl bg-amber-500/15 p-3 text-sm font-semibold text-amber-800 dark:text-amber-200">⚠ {faDigits(unresolved)} نام در این سیستم چند مشتری دارد. برای هر کدام بگویید کدام است (یا «مشتری جدید»).</div>}
+        {shared > 0 && <div className="rounded-2xl bg-amber-500/15 p-3 text-sm text-amber-800 dark:text-amber-200">⚠ {faDigits(shared)} ردیف از فایل به <b>یک مشتری مشترک</b> وصل شده‌اند (ردیف‌های زرد). مانده‌های آن‌ها با هم جمع می‌شود. اگر شخص دیگری است، برایش «مشتری جدید» را انتخاب کنید.</div>}
         <Chips value={filter} onChange={(v) => { setFilter(v); setPage(0); }} items={[
           { v: "", l: "همه", n: rows.length }, { v: "ambiguous", l: "هم‌نام", n: count("ambiguous") }, { v: "found", l: "پیدا شد", n: count("found") },
           { v: "new", l: "جدید", n: count("new") }, { v: "linked", l: "قبلاً وصل", n: count("linked") }, { v: "balance", l: "دارای مانده", n: rows.filter((r) => r.debit || r.credit).length },
@@ -299,14 +315,14 @@ function CustomersPreview({ pv, accounts, busy, onCommit, onCancel }: PreviewPro
                 const v = choiceOf(r);
                 const extra = picked[r.row];
                 return (
-                  <tr key={r.row} className={v === "" ? "bg-amber-500/10" : ""}>
+                  <tr key={r.row} className={v === "" || (uses[v] ?? 0) > 1 ? "bg-amber-500/10" : ""}>
                     <td className="num">{r.code}</td>
                     <td><div className="font-semibold">{r.name}</div>{r.raw !== r.name && <div className="muted text-[10px]">{r.raw}</div>}{r.mobile && <div className="num muted" dir="ltr">{r.mobile}</div>}</td>
                     <td className="num">{r.debit ? money(r.debit) : ""}</td>
                     <td className="num">{r.credit ? <>{money(r.credit)}
                       <select className="input mt-1 py-0.5 text-[11px]" value={creditOf(r)} onChange={(e) => setCreditAs({ ...creditAs, [r.row]: e.target.value })}
                         title="بستانکاری یعنی ما به این شخص بدهکاریم">
-                        <option value="deposit">بیعانهٔ مشتری (پیش‌پرداخت او)</option>
+                        <option value="deposit">اعتبار مشتری (پول او نزد ما)</option>
                         <option value="payable">طلب فروشنده (بدهی ما به او)</option>
                       </select>{r.seller && <div className="text-[10px] text-sky-600">فروشندهٔ ماست</div>}</> : ""}</td>
                     <td><span className={`badge ${C_STATUS[r.status]?.cls}`}>{C_STATUS[r.status]?.l}</span></td>
@@ -320,6 +336,7 @@ function CustomersPreview({ pv, accounts, busy, onCommit, onCancel }: PreviewPro
                         <option value="new">➕ مشتری جدید بساز</option>
                         <option value="skip">وارد نشود</option>
                       </select>
+                      {(uses[v] ?? 0) > 1 && <div className="text-[10px] text-amber-700 dark:text-amber-300">⚠ برای ردیف دیگری هم انتخاب شده؛ مانده‌ها جمع می‌شود</div>}
                       <FindCustomer onPick={(c) => { setPicked({ ...picked, [r.row]: c }); setChoices({ ...choices, [r.row]: String(c.id) }); }} />
                     </td>
                   </tr>
@@ -330,13 +347,13 @@ function CustomersPreview({ pv, accounts, busy, onCommit, onCancel }: PreviewPro
         </div>
         <Pager page={page} total={shown.length} onPage={setPage} />
         <div className="space-y-3 rounded-2xl p-3" style={{ background: "var(--surface)" }}>
-          <label className="flex items-center gap-2 text-sm font-semibold"><input type="checkbox" checked={balances} onChange={(e) => setBalances(e.target.checked)} />مانده‌ها هم منتقل شود (بدهی = بدهی قبلی مشتری، بستانکاری = بیعانهٔ باز او)</label>
+          <label className="flex items-center gap-2 text-sm font-semibold"><input type="checkbox" checked={balances} onChange={(e) => setBalances(e.target.checked)} />مانده‌ها هم منتقل شود (بدهی = بدهی قبلی مشتری، بستانکاری = اعتبار او)</label>
           {balances && (
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="تاریخ مانده‌ها" hint="معمولاً روز آخری که در تیزپرداز کار شده"><JalaliPicker pastOnly withTime={false} value={at} onChange={setAt} /></Field>
               <Field label="بستانکاری‌ها روی کدام حساب بماند؟" hint="پول قبلاً گرفته شده؛ به موجودی این حساب اضافه نمی‌شود">
                 <select className="input" value={accountId} onChange={(e) => setAccountId(Number(e.target.value))}>
-                  <option value={0}>حساب پیش‌فرض بیعانه</option>
+                  <option value={0}>حساب پیش‌فرض بیعانه و اعتبار</option>
                   {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                 </select>
               </Field>
@@ -566,7 +583,7 @@ function SellerCredits() {
   if (!data?.length) return null;
   const chosen = data.filter((x) => picked[x.deposit_id] ?? true);
   async function fix() {
-    if (!window.confirm(`بستانکاری ${faDigits(chosen.length)} فروشنده از «بیعانه» به «بدهی ما به فروشنده» منتقل شود؟`)) return;
+    if (!window.confirm(`بستانکاری ${faDigits(chosen.length)} فروشنده از «اعتبار مشتری» به «بدهی ما به فروشنده» منتقل شود؟`)) return;
     try {
       const r = await api("/api/import/tizpardaz/seller-credits", { body: { deposit_ids: chosen.map((x) => x.deposit_id) } });
       toast(`${faDigits(r.converted ?? 0)} مورد اصلاح شد (${money(r.amount ?? 0)})${r.skipped ? ` · ${faDigits(r.skipped)} مورد دست نخورد` : ""}`);
@@ -576,9 +593,9 @@ function SellerCredits() {
     }
   }
   return (
-    <Card title={<span className="flex items-center gap-2 text-rose-700 dark:text-rose-300">⚠ بستانکاری فروشندگان به‌اشتباه «بیعانه» ثبت شده</span>}>
+    <Card title={<span className="flex items-center gap-2 text-rose-700 dark:text-rose-300">⚠ بستانکاری فروشندگان به‌اشتباه «اعتبار مشتری» ثبت شده</span>}>
       <div className="space-y-3 text-sm">
-        <p className="leading-7">این اشخاص در دفتر روزنامهٔ تیزپرداز <b>فروشندهٔ ما</b> هستند (از آن‌ها خرید کرده‌ایم). ماندهٔ بستانکار آن‌ها یعنی <b>ما به آن‌ها بدهکاریم</b>، ولی هنگام ورود مشتریان به‌عنوان «بیعانهٔ مشتری» ثبت شده است. با اصلاح، این مبلغ «بدهی ما به فروشنده» می‌شود و از بخش خرید (یا پروندهٔ همان شخص) قابل پرداخت است.</p>
+        <p className="leading-7">این اشخاص در دفتر روزنامهٔ تیزپرداز <b>فروشندهٔ ما</b> هستند (از آن‌ها خرید کرده‌ایم). ماندهٔ بستانکار آن‌ها یعنی <b>ما به آن‌ها بدهکاریم</b>، ولی هنگام ورود مشتریان به‌عنوان «اعتبار مشتری» ثبت شده است. با اصلاح، این مبلغ «بدهی ما به فروشنده» می‌شود و از بخش خرید (یا پروندهٔ همان شخص) قابل پرداخت است.</p>
         <div className="space-y-1.5">
           {data.map((x) => (
             <label key={x.deposit_id} className="flex items-center justify-between gap-2 rounded-xl px-3 py-2" style={{ background: "var(--surface)" }}>

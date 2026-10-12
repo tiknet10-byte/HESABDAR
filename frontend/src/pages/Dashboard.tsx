@@ -98,16 +98,17 @@ function DayDetails({ initial }: { initial: "sales" | "money" | "customers" }) {
   const [tab, setTab] = useState(initial);
   const { data } = useApi<any>("/api/dashboard/day");
   if (!data) return <Loading />;
+  const hasMoney = Array.isArray(data.money); // reception / staff: no money part (it is for the manager)
   return (
     <div className="space-y-4 text-sm">
       <Tabs value={tab} onChange={setTab} items={[
-        { value: "sales", label: `فروش (${faDigits(data.invoice_count)})` },
-        { value: "money", label: `دریافت و پرداخت (${faDigits(data.money.length)})` },
-        { value: "customers", label: `مشتریان (${faDigits(data.customers.length)})` },
+        { value: "sales" as const, label: `فروش (${faDigits(data.invoice_count)})` },
+        ...(hasMoney ? [{ value: "money" as const, label: `دریافت و پرداخت (${faDigits(data.money.length)})` }] : []),
+        { value: "customers" as const, label: `مشتریان (${faDigits(data.customers.length)})` },
       ]} />
       {tab === "sales" && (data.invoices.length === 0 ? <div className="muted">امروز فاکتوری صادر نشده است.</div> : (
         <>
-          <div className="rounded-xl bg-pink-500/10 px-3 py-2 font-bold">جمع فروش امروز: <span className="num">{money(data.sales)}</span></div>
+          {data.sales != null && <div className="rounded-xl bg-pink-500/10 px-3 py-2 font-bold">جمع فروش امروز: <span className="num">{money(data.sales)}</span></div>}
           <div className="space-y-1.5">{data.invoices.map((i: any) => (
             <Link key={i.id} to={`/invoices?period=today`} className={`flex items-center justify-between gap-2 rounded-xl px-3 py-2 hover:bg-violet-500/5 ${i.status === "void" ? "opacity-50 line-through" : ""}`} style={{ background: "var(--surface)" }}>
               <span><span className="num ml-2 text-xs font-bold">{i.number}</span><b>{i.customer}</b><span className="muted text-xs"> · {i.items.join("، ")}</span></span>
@@ -116,7 +117,7 @@ function DayDetails({ initial }: { initial: "sales" | "money" | "customers" }) {
           ))}</div>
         </>
       ))}
-      {tab === "money" && (data.money.length === 0 ? <div className="muted">امروز پولی دریافت یا پرداخت نشده است.</div> : (
+      {tab === "money" && hasMoney && (data.money.length === 0 ?<div className="muted">امروز پولی دریافت یا پرداخت نشده است.</div> : (
         <>
           <MoneyByAccount rows={data.by_account} />
           <div className="rounded-xl bg-emerald-500/10 px-3 py-2">
@@ -217,15 +218,21 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title={`سلام ${user?.full_name || ""} 🌸`} subtitle="خلاصه وضعیت امروز و ۳۰ روز اخیر سالن" icon={<TrendingUp size={22} />}
+      <PageHeader title={`سلام ${user?.full_name || ""} 🌸`} subtitle={m ? "خلاصه وضعیت امروز و ۳۰ روز اخیر سالن" : "خلاصهٔ کارهای امروز سالن"} icon={<TrendingUp size={22} />}
         actions={<><Link to="/invoices?new=1" className="btn btn-primary"><Receipt size={16} />فاکتور جدید</Link><Link to="/deposits?new=1" className="btn"><HandCoins size={16} />ثبت بیعانه</Link></>} />
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <button className="text-right" onClick={() => setDetail("sales")}><Stat label="فروش امروز" value={cmoney(t.revenue)} hint={`${num(t.invoice_count)} فاکتور · برای جزئیات کلیک کنید`} icon={<Receipt size={20} />} tone="pink" /></button>
-        <button className="text-right" onClick={() => setDetail("money")}><Stat label="دریافتی امروز (خالص)" value={cmoney(t.cash_in)}
-          hint={t.cash_paid_back ? `دریافت ${compactMoney(t.cash_received)} · برگشت به مشتری ${compactMoney(t.cash_paid_back)}` : `از فاکتورها ${compactMoney(t.cash_in - t.deposits_received)} · بیعانه ${compactMoney(t.deposits_received)}`}
-          icon={<Banknote size={20} />} tone="emerald" /></button>
-        <Link to="/deposits"><Stat label="بیعانه‌های باز" value={cmoney(t.deposits_held)} hint={`${num(t.deposits_held_count)} مورد`} icon={<HandCoins size={20} />} tone="amber" /></Link>
+        {t.revenue != null ? <>
+          <button className="text-right" onClick={() => setDetail("sales")}><Stat label="فروش امروز" value={cmoney(t.revenue)} hint={`${num(t.invoice_count)} فاکتور · برای جزئیات کلیک کنید`} icon={<Receipt size={20} />} tone="pink" /></button>
+          <button className="text-right" onClick={() => setDetail("money")}><Stat label="دریافتی امروز (خالص)" value={cmoney(t.cash_in)}
+            hint={t.cash_paid_back ? `دریافت ${compactMoney(t.cash_received)} · برگشت به مشتری ${compactMoney(t.cash_paid_back)}` : `از فاکتورها ${compactMoney(t.cash_in - t.deposits_received)} · بیعانه ${compactMoney(t.deposits_received)}`}
+            icon={<Banknote size={20} />} tone="emerald" /></button>
+        </> : <>
+          {/* reception / staff: the day's work; the takings are in the manager's reports */}
+          <button className="text-right" onClick={() => setDetail("sales")}><Stat label="فاکتورهای امروز" value={num(t.invoice_count ?? 0)} hint="برای دیدن فاکتورها کلیک کنید" icon={<Receipt size={20} />} tone="pink" /></button>
+          <Link to="/appointments"><Stat label="نوبت‌های امروز" value={num(data.agenda?.today?.length ?? 0)} hint={data.agenda?.tomorrow_count ? `فردا ${num(data.agenda.tomorrow_count)} نوبت` : "برای دیدن نوبت‌ها کلیک کنید"} icon={<CalendarClock size={20} />} tone="emerald" /></Link>
+        </>}
+        <Link to="/deposits"><Stat label="بیعانه‌های باز" value={t.deposits_held != null ? cmoney(t.deposits_held) : num(t.deposits_held_count ?? 0)} hint={`${num(t.deposits_held_count ?? 0)} مورد`} icon={<HandCoins size={20} />} tone="amber" /></Link>
         <button className="text-right" onClick={() => setDetail("customers")}><Stat label="مشتریان امروز" value={num(t.customers_served)} hint={`${num(t.new_customers)} مشتری جدید · ${num(data.agenda?.today?.length ?? 0)} نوبت امروز`} icon={<Users size={20} />} tone="sky" /></button>
       </div>
 

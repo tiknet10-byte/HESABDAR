@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -50,12 +51,13 @@ def validate_password_strength(password: str) -> None:
         raise ValueError("رمز عبور باید ترکیبی از حروف و اعداد باشد")
 
 
-def create_access_token(user_id: int, role: str, minutes: int | None = None) -> str:
+def create_access_token(user_id: int, role: str, minutes: int | None = None, ver: int = 0) -> str:
     s = get_settings()
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "role": role,
+        "ver": ver,  # the user's token_version: a new password or deactivation ends every older login
         "iat": now,
         "exp": now + timedelta(minutes=minutes or s.access_token_minutes),
     }
@@ -68,6 +70,29 @@ def decode_token(token: str) -> dict:
 
 def has_permission(role: str, permission: str) -> bool:
     return role in PERMISSIONS.get(permission, set())
+
+
+def host_allowed(host_header: str | None) -> bool:
+    """Guard against DNS rebinding: a web page whose own domain name points to this PC must not reach the API.
+    Allowed: localhost, any IP address (127.0.0.1, ::1, the PC's LAN address) and names in HESABDAR_ALLOWED_HOSTS."""
+    s = get_settings()
+    h = (host_header or "").strip().lower()
+    if not h:
+        return True  # no Host header: not a browser, nothing to rebind
+    if h.startswith("["):  # [::1]:8000
+        h = h[1:].split("]", 1)[0]
+    elif h.count(":") == 1:  # name:port
+        h = h.rsplit(":", 1)[0]
+    h = h.rstrip(".")
+    if h == "localhost" or (h == "testserver" and s.environment == "test"):
+        return True
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        pass
+    extra = {x.strip().lower().rstrip(".") for x in (s.allowed_hosts or "").split(",") if x.strip()}
+    return "*" in extra or h in extra
 
 
 def sign_payload(body: bytes, secret: str | None = None) -> str:

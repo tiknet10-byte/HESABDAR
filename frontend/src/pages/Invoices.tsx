@@ -539,6 +539,12 @@ export default function Invoices() {
   const [view, setView] = useState<number | null>(params.get("open") ? Number(params.get("open")) : null); // ?open=<id> from other pages
   const open = params.get("new") === "1";
   const st = data?.stats;
+  // [count, amount]; reception / staff get no amount for a period's sales (the takings are the manager's report)
+  const statCard = (k: string) => {
+    const [n, amt] = st?.[k] ?? [];
+    if (!st) return { value: "…" };
+    return amt != null ? { value: cmoney(amt), hint: `${num(n)} فاکتور` } : { value: `${num(n)} فاکتور`, hint: "برای دیدن فاکتورها کلیک کنید" };
+  };
   const pages = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE));
 
   return (
@@ -546,10 +552,10 @@ export default function Invoices() {
       <PageHeader title="فروش و فاکتور" subtitle="ثبت خدمات ارائه‌شده، کسر بیعانه و دریافت از چند کارتخوان" icon={<Receipt size={22} />}
         actions={<button className="btn btn-primary" onClick={() => setParams({ new: "1" })}><Plus size={16} />فاکتور جدید</button>} />
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <button className="text-right" onClick={() => { setPeriod("today"); setStatus(""); }}><Stat label="فروش امروز" value={st ? cmoney(st.today[1]) : "…"} hint={st && `${num(st.today[0])} فاکتور`} tone="pink" /></button>
-        <button className="text-right" onClick={() => { setPeriod("week"); setStatus(""); }}><Stat label="فروش این هفته" value={st ? cmoney(st.week[1]) : "…"} hint={st && `${num(st.week[0])} فاکتور`} tone="violet" /></button>
-        <button className="text-right" onClick={() => { setPeriod("month"); setStatus(""); }}><Stat label="فروش این ماه" value={st ? cmoney(st.month[1]) : "…"} hint={st && `${num(st.month[0])} فاکتور`} tone="sky" /></button>
-        <button className="text-right" onClick={() => { setPeriod(""); setStatus("unpaid"); }}><Stat label="مانده‌های دریافت‌نشده" value={st ? cmoney(st.unpaid[1]) : "…"} hint={st && `${num(st.unpaid[0])} فاکتور`} tone="amber" /></button>
+        <button className="text-right" onClick={() => { setPeriod("today"); setStatus(""); }}><Stat label="فروش امروز" {...statCard("today")} tone="pink" /></button>
+        <button className="text-right" onClick={() => { setPeriod("week"); setStatus(""); }}><Stat label="فروش این هفته" {...statCard("week")} tone="violet" /></button>
+        <button className="text-right" onClick={() => { setPeriod("month"); setStatus(""); }}><Stat label="فروش این ماه" {...statCard("month")} tone="sky" /></button>
+        <button className="text-right" onClick={() => { setPeriod(""); setStatus("unpaid"); }}><Stat label="مانده‌های دریافت‌نشده" {...statCard("unpaid")} tone="amber" /></button>
       </div>
       <Card pad={false}>
         <div className="space-y-3 p-4">
@@ -603,7 +609,7 @@ export default function Invoices() {
         </div>
         {data && (
           <div className="flex flex-wrap items-center justify-between gap-2 border-t p-3 text-sm" style={{ borderColor: "var(--border)" }}>
-            <span className="muted">{num(data.total)} فاکتور · فروش <b className="num">{money(data.amount)}</b> · دریافت‌شده <b className="num">{money(data.paid)}</b>{data.due > 0 && <> · مانده <b className="num text-amber-600">{money(data.due)}</b></>}</span>
+            <span className="muted">{num(data.total)} فاکتور{data.amount != null && <> · فروش <b className="num">{money(data.amount)}</b> · دریافت‌شده <b className="num">{money(data.paid)}</b>{data.due > 0 && <> · مانده <b className="num text-amber-600">{money(data.due)}</b></>}</>}</span>
             {pages > 1 && (
               <div className="flex items-center gap-2">
                 <button className="btn btn-sm" disabled={page === 0} onClick={() => setPage(page - 1)}>قبلی</button>

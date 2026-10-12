@@ -16,11 +16,13 @@ from ..models import (
     Expense,
     Invoice,
     InvoiceItem,
+    JournalEntry,
     Payment,
     PaymentAccount,
     Service,
     ServiceLine,
     Staff,
+    StockMove,
     User,
 )
 
@@ -34,6 +36,12 @@ def _range(start: date | None, end: date | None) -> tuple[datetime, datetime]:
 # money that really came in during a period: deposits brought over from the previous software are opening
 # balances (received in the old system), so they never count as cash received here
 REAL_DEPOSIT = Deposit.source.not_in(("import", "void_credit"))  # void_credit: already counted as the invoice payment
+# money of a website order that the website later gave back is booked as "received with the order, paid back on the
+# refund's day" (a deposit of source woocommerce): it is the order's money (invoice payment / invoice refund), not a deposit
+SITE_REFUND = "woocommerce"
+
+# customers brought over from other software (Chehreh, Tizpardaz) are not "new" on the day they were imported
+IMPORTED_CUSTOMERS = ("import", "tizpardaz")
 
 # product sales are reported as a line of their own (they have no service line)
 PRODUCTS_LINE = -1
@@ -41,15 +49,41 @@ PRODUCTS_NAME = "فروش محصولات"
 PRODUCTS_COLOR = "#0ea5e9"
 
 
-def product_cogs(db: Session, s: datetime, e: datetime) -> int:
-    """Cost of the products sold on (non-void) invoices of the period."""
-    from ..models import StockMove
+def _old_service():  # noqa: ANN202
+    """A done appointment without an invoice is a service of the previous software only when it was brought over by
+    the import (its note starts with the import's mark); one set to 'done' by hand has no money behind it."""
+    from .legacy_import import IMPORT_NOTE
 
-    items = select(InvoiceItem.id).join(Invoice, Invoice.id == InvoiceItem.invoice_id).where(
-        InvoiceItem.product_id.is_not(None), Invoice.status != "void", Invoice.issued_at.between(s, e))
-    sold = db.scalar(select(func.coalesce(func.sum(StockMove.cost), 0)).where(StockMove.kind == "sale", StockMove.invoice_item_id.in_(items))) or 0
-    back = db.scalar(select(func.coalesce(func.sum(StockMove.cost), 0)).where(StockMove.kind == "sale_return", StockMove.invoice_item_id.in_(items))) or 0
-    return int(sold) - int(back)
+    return (Appointment.status == "done") & Appointment.invoice_id.is_(None) & Appointment.notes.startswith(IMPORT_NOTE, autoescape=True)
+
+
+def _undo():  # noqa: ANN202
+    """When the sale of each voided invoice was taken back in the books (the date of its reversing entries): on the
+    invoice's own date when it was cancelled as a mistake (it never happened), on the day of the void when it was
+    returned (refund / kept as credit). The reports follow the ledger: such a sale stays in its own day and month,
+    and the return is counted (negative) on the day it happened."""
+    return (select(JournalEntry.ref_id.label("invoice_id"), func.min(JournalEntry.at).label("at"))
+            .where(JournalEntry.ref_type == "invoice_void").group_by(JournalEntry.ref_id).subquery())
+
+
+def _sold(q, s: datetime, e: datetime, undo):  # noqa: ANN001, ANN202
+    """Invoices sold in [s, e] (q must select from / join Invoice): all of them except those cancelled as a mistake."""
+    return q.outerjoin(undo, undo.c.invoice_id == Invoice.id).where(
+        Invoice.issued_at.between(s, e), (Invoice.status != "void") | (undo.c.at != Invoice.issued_at))
+
+
+def _returned(q, s: datetime, e: datetime, undo):  # noqa: ANN001, ANN202
+    """Invoices returned in [s, e]: voided after their own day (q must select from / join Invoice)."""
+    return q.join(undo, undo.c.invoice_id == Invoice.id).where(
+        Invoice.status == "void", undo.c.at.between(s, e), undo.c.at != Invoice.issued_at)
+
+
+def product_cogs(db: Session, s: datetime, e: datetime) -> int:
+    """Cost of the products sold on invoices in the period minus the cost of those returned in it - as booked (5400):
+    each sale on its invoice's date, each return on its own date."""
+    signed = case((StockMove.kind == "sale_return", -StockMove.cost), else_=StockMove.cost)
+    return int(db.scalar(select(func.coalesce(func.sum(signed), 0)).where(
+        StockMove.kind.in_(("sale", "sale_return")), StockMove.invoice_item_id.is_not(None), StockMove.at.between(s, e))) or 0)
 
 
 def history_cogs(db: Session, s: datetime, e: datetime) -> int:
@@ -67,7 +101,8 @@ OUT_KINDS = {"deposit_refund": "استرداد بیعانه", "refund": "برگ�
 
 def money_movements(db: Session, s: datetime, e: datetime) -> list[dict]:
     """Every real money movement of customers in a period, signed (+ in, - out), with its account:
-    invoice payments, deposits received, deposits refunded, invoice money paid back and cancelled mistaken receipts."""
+    invoice payments, deposits received, deposits refunded, invoice money paid back and cancelled mistaken receipts.
+    Money a website order paid and the website gave back later is order money: a payment, then an invoice refund."""
     accounts = {a.id: a.name for a in db.scalars(select(PaymentAccount))}
     rows: list[dict] = []
     for p in db.scalars(select(Payment).where(Payment.paid_at.between(s, e))):
@@ -75,11 +110,12 @@ def money_movements(db: Session, s: datetime, e: datetime) -> list[dict]:
         rows.append({"at": p.paid_at, "kind": kind, "amount": int(p.amount), "account_id": p.payment_account_id,
                      "customer_id": p.customer_id, "invoice_id": p.invoice_id, "deposit_id": None})
     for d in db.scalars(select(Deposit).where(Deposit.received_at.between(s, e), REAL_DEPOSIT)):
-        rows.append({"at": d.received_at, "kind": "deposit", "amount": int(d.amount), "account_id": d.payment_account_id,
-                     "customer_id": d.customer_id, "invoice_id": None, "deposit_id": d.id})
+        rows.append({"at": d.received_at, "kind": "payment" if d.source == SITE_REFUND else "deposit", "amount": int(d.amount),
+                     "account_id": d.payment_account_id, "customer_id": d.customer_id, "invoice_id": None, "deposit_id": d.id})
     # a refunded deposit is money paid out on the day of the refund (also one brought over from the old software)
     for d in db.scalars(select(Deposit).where(Deposit.status == "refunded", Deposit.closed_at.between(s, e))):
-        rows.append({"at": d.closed_at, "kind": "deposit_refund", "amount": -int(d.amount), "account_id": d.refund_account_id or d.payment_account_id,
+        rows.append({"at": d.closed_at, "kind": "refund" if d.source == SITE_REFUND else "deposit_refund", "amount": -int(d.amount),
+                     "account_id": d.refund_account_id or d.payment_account_id,
                      "customer_id": d.customer_id, "invoice_id": None, "deposit_id": d.id})
     for r in rows:
         r["account"] = accounts.get(r["account_id"])
@@ -112,25 +148,40 @@ def _profit(db: Session, s: datetime, e: datetime) -> dict:
     return profit_breakdown(db, s, e + timedelta(microseconds=1))
 
 
+def receivable_total(db: Session) -> int:
+    """What customers owe, from the books (1200): unpaid invoices and debts brought over (opening balances) alike.
+    A customer whose account is in credit does not lower what the others owe."""
+    from ..models import JournalLine
+    from .accounting import AR, account
+
+    per = (select(func.sum(JournalLine.debit - JournalLine.credit).label("amt")).where(JournalLine.account_id == account(db, AR).id)
+           .group_by(JournalLine.customer_id).subquery())
+    return int(db.scalar(select(func.coalesce(func.sum(per.c.amt), 0)).where(per.c.amt > 0)) or 0)
+
+
 def summary(db: Session, start: date | None = None, end: date | None = None) -> dict:
     s, e = _range(start, end)
-    inv_q = (select(Invoice).where(Invoice.issued_at.between(s, e), Invoice.status != "void")
-             .options(selectinload(Invoice.items)))
-    invoices = db.scalars(inv_q).all()
-    revenue = sum(i.total for i in invoices)
-    discounts = sum(i.discount for i in invoices) + sum(it.discount for i in invoices for it in i.items)
+    undo = _undo()
+    # sales of the period, and invoices of earlier days returned (voided) in it: negative, on the day of the return
+    invoices = db.scalars(_sold(select(Invoice), s, e, undo).options(selectinload(Invoice.items))).all()
+    returned = db.scalars(_returned(select(Invoice), s, e, undo).options(selectinload(Invoice.items))).all()
+    signed = [(i, 1) for i in invoices] + [(i, -1) for i in returned]
+    gross = sum(i.total for i in invoices)
+    returns = sum(i.total for i in returned)
+    revenue = gross - returns
+    discounts = sum(k * (i.discount + sum(it.discount for it in i.items)) for i, k in signed)
     expenses = int(db.scalar(select(func.coalesce(func.sum(Expense.amount), 0)).where(Expense.spent_at.between(s, e))) or 0)
     moves = money_movements(db, s, e)
     received_deposits = sum(r["amount"] for r in moves if r["kind"] == "deposit")
     paid_back = -sum(r["amount"] for r in moves if r["kind"] in ("deposit_refund", "refund"))
     held = int(db.scalar(select(func.coalesce(func.sum(Deposit.amount), 0)).where(Deposit.status == "held")) or 0)
     held_count = db.scalar(select(func.count(Deposit.id)).where(Deposit.status == "held")) or 0
-    receivable = int(db.scalar(select(func.coalesce(func.sum(Invoice.total - Invoice.paid), 0))
-                               .where(Invoice.status.in_(["issued", "partial"]))) or 0)
+    receivable = receivable_total(db)
 
     customer_ids = {i.customer_id for i in invoices}
-    # customers brought over from the previous software are not "new" on the day they were imported
-    new_customers = db.scalar(select(func.count(Customer.id)).where(Customer.created_at.between(s, e), Customer.source != "import")) or 0
+    # customers brought over from other software are not "new" on the day they were imported
+    new_customers = db.scalar(select(func.count(Customer.id)).where(Customer.created_at.between(s, e),
+                                                                    Customer.source.not_in(IMPORTED_CUSTOMERS))) or 0
     # returning = had an earlier invoice here, or earlier services in the previous software's history
     earlier = set()
     if customer_ids:
@@ -145,13 +196,13 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
     by_staff: dict[str, int] = defaultdict(int)
     lines = {l.id: l for l in db.scalars(select(ServiceLine))}
     staff = {p.id: p.full_name for p in db.scalars(select(Staff))}
-    for inv in invoices:
+    for inv, k in signed:
         for it in inv.items:
-            amt = _net(it, inv)
+            amt = k * _net(it, inv)
             by_line[PRODUCTS_NAME if it.product_id else lines[it.line_id].name if it.line_id in lines else "سایر"] += amt
             key = it.description or "—"
             d = by_service.setdefault(key, {"name": key, "count": 0, "revenue": 0})
-            d["count"] += it.quantity
+            d["count"] += k * it.quantity
             d["revenue"] += amt
             if it.staff_id:
                 by_staff[staff.get(it.staff_id, "?")] += amt
@@ -168,11 +219,15 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
 
     return {
         "period": {"start": s.date().isoformat(), "end": e.date().isoformat()},
+        # sales of the period minus invoices returned in it (as in the books: a return is counted on its own day)
         "revenue": revenue,
+        "gross_sales": gross,
+        "returns": returns,
+        "returns_count": len(returned),
         "expenses": expenses,
         # gross profit of products = their sales - what they cost (COGS); services have no stock cost
         "cogs": (cogs := product_cogs(db, s, e)),
-        "product_revenue": (prod_rev := sum(_net(it, i) for i in invoices for it in i.items if it.product_id)),
+        "product_revenue": (prod_rev := sum(k * _net(it, i) for i, k in signed for it in i.items if it.product_id)),
         "product_profit": prod_rev - cogs,
         # forfeited deposits (no-shows): income of their line
         "forfeited": sum(int(x[2]) for x in forfeit_rows(db, s, e)),
@@ -190,7 +245,7 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
         "receivable": receivable,
         "discounts": discounts,
         "invoice_count": len(invoices),
-        "avg_ticket": revenue // len(invoices) if invoices else 0,
+        "avg_ticket": gross // len(invoices) if invoices else 0,
         "customers_served": len(customer_ids),
         "new_customers": new_customers,
         "returning_customers": returning,
@@ -256,14 +311,16 @@ def daily_series(db: Session, start: date | None = None, end: date | None = None
     rev: dict[date, int] = defaultdict(int)
     exp: dict[date, int] = defaultdict(int)
     cash: dict[date, int] = defaultdict(int)
-    for at, total in db.execute(select(Invoice.issued_at, Invoice.total).where(Invoice.issued_at.between(s, e), Invoice.status != "void")):
+    undo = _undo()  # sales per day, minus the invoices returned that day (as summary())
+    for total, at in db.execute(_sold(select(Invoice.total, Invoice.issued_at), s, e, undo)):
         rev[at.date()] += int(total)
+    for total, at in db.execute(_returned(select(Invoice.total, undo.c.at), s, e, undo)):
+        rev[at.date()] -= int(total)
     for at, amt in db.execute(select(Expense.spent_at, Expense.amount).where(Expense.spent_at.between(s, e))):
         exp[at.date()] += int(amt)
-    for at, amt in db.execute(select(Payment.paid_at, Payment.amount).where(Payment.paid_at.between(s, e))):
-        cash[at.date()] += int(amt)
-    for at, amt in db.execute(select(Deposit.received_at, Deposit.amount).where(Deposit.received_at.between(s, e), REAL_DEPOSIT)):
-        cash[at.date()] += int(amt)
+    # net money of customers per day: the same movements as summary()'s cash_in (refunded deposits included)
+    for r in money_movements(db, s, e):
+        cash[r["at"].date()] += r["amount"]
     out = []
     d = s.date()
     while d <= e.date():
@@ -281,6 +338,9 @@ def forecast(db: Session, days: int = 30, history_days: int = 120) -> dict:
     """
     end = date.today() - timedelta(days=1)  # today is incomplete
     hist = daily_series(db, end - timedelta(days=history_days - 1), end)
+    # the days before the first sale (the program was not in use yet) are not "no sales"
+    first = next((i for i, h in enumerate(hist) if h["revenue"]), len(hist))
+    hist = hist[first:]
     values = [h["revenue"] for h in hist]
     if sum(1 for v in values if v) < 7:
         return {"method": "insufficient_data", "points": [], "total": 0,
@@ -302,7 +362,9 @@ def forecast(db: Session, days: int = 30, history_days: int = 120) -> dict:
     residuals = []
     for h in hist:
         wd = date.fromisoformat(h["date"]).weekday()
-        x = h["revenue"] / (season[wd] or 1)
+        if season[wd] <= 0:
+            continue  # a weekday the salon is closed (e.g. Friday): says nothing about the level, forecast 0 for it
+        x = h["revenue"] / season[wd]
         if level is None:
             level = x
             continue
@@ -413,50 +475,64 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
     s, e = _range(start, end)
     staff = {p.id: p for p in db.scalars(select(Staff))}
     lines = {l.id: l.name for l in db.scalars(select(ServiceLine))}
-    rows = db.execute(select(InvoiceItem, Invoice.subtotal, Invoice.total).join(Invoice, Invoice.id == InvoiceItem.invoice_id)
-                      .where(Invoice.issued_at.between(s, e), Invoice.status != "void")).all()
+    # services only: products are a line of their own (revenue report), they have no staff and no staff share.
+    # A return (invoice voided after its day) counts negative on its own day, as its sale and staff share in the books.
+    undo = _undo()
+    q = (select(InvoiceItem, Invoice.subtotal, Invoice.total).join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+         .where(InvoiceItem.product_id.is_(None)))
+    rows = [(*r, 1) for r in db.execute(_sold(q, s, e, undo))] + [(*r, -1) for r in db.execute(_returned(q, s, e, undo))]
     per_staff: dict = {}
     per_line: dict = {}
-    for it, subtotal, total in rows:
+    for it, subtotal, total, k in rows:
         net = it.net_amount if it.net_amount is not None else (round(it.amount * total / subtotal) if subtotal else it.amount)
         person = staff.get(it.staff_id)
         if it.commission_amount is not None:
             comm = it.commission_amount
         else:
             comm = round(net * (person.commission_percent or 0) / 100) if person else 0
+        net, comm = k * net, k * comm
         key = it.staff_id or 0
         r = per_staff.setdefault(key, {"staff_id": it.staff_id, "name": person.full_name if person else "بدون پرسنل",
                                        "line": lines.get(person.line_id) if person and person.line_id else None,
                                        "percent": person.commission_percent if person else 0,
                                        "services": 0, "revenue": 0, "staff_share": 0, "salon_share": 0})
-        r["services"] += it.quantity
+        r["services"] += k * it.quantity
         r["revenue"] += net
         r["staff_share"] += comm
         r["salon_share"] += net - comm
         lk = it.line_id or 0
         lr = per_line.setdefault(lk, {"line_id": it.line_id, "name": lines.get(it.line_id, "سایر"), "services": 0,
-                                      "revenue": 0, "staff_share": 0, "salon_share": 0})
-        lr["services"] += it.quantity
+                                      "revenue": 0, "staff_share": 0, "salon_share": 0, "forfeits": 0})
+        lr["services"] += k * it.quantity
         lr["revenue"] += net
         lr["staff_share"] += comm
         lr["salon_share"] += net - comm
+    # forfeited deposits (no-shows): income of their line that is all the salon's (no staff share); shown on its own
+    for _, line_id, amount in forfeit_rows(db, s, e):
+        lr = per_line.setdefault(line_id or 0, {"line_id": line_id, "name": lines.get(line_id, "سایر"), "services": 0,
+                                                "revenue": 0, "staff_share": 0, "salon_share": 0, "forfeits": 0})
+        lr["forfeits"] += int(amount)
     # payouts in the period and outstanding balances
     payable = account(db, STAFF_PAYABLE)
     paid = dict(db.execute(select(JournalLine.staff_id, func.sum(JournalLine.debit))
                            .join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
                            .where(JournalLine.account_id == payable.id, JournalEntry.ref_type == "staff_payout",
                                   JournalEntry.at.between(s, e)).group_by(JournalLine.staff_id)).all())
+    balances = {pid: staff_balance(db, pid) for pid in staff}
     for pid, p in staff.items():
-        if p.is_active and pid not in per_staff:
+        # also someone no longer active who is still owed money or was paid in the period (to settle with them)
+        if pid not in per_staff and (p.is_active or balances[pid] or paid.get(pid)):
             per_staff[pid] = {"staff_id": pid, "name": p.full_name, "line": lines.get(p.line_id), "percent": p.commission_percent,
                               "services": 0, "revenue": 0, "staff_share": 0, "salon_share": 0}
     for r in per_staff.values():
         r["paid"] = int(paid.get(r["staff_id"]) or 0) if r["staff_id"] else 0
-        r["balance"] = staff_balance(db, r["staff_id"]) if r["staff_id"] else 0
+        r["balance"] = balances.get(r["staff_id"], 0) if r["staff_id"] else 0
+        r["active"] = bool(staff[r["staff_id"]].is_active) if r["staff_id"] in staff else True
     staff_rows = sorted(per_staff.values(), key=lambda x: -x["revenue"])
     totals = {k: sum(r[k] for r in staff_rows) for k in ("revenue", "staff_share", "salon_share", "paid", "balance")}
+    totals["forfeits"] = sum(r["forfeits"] for r in per_line.values())
     return {"period": {"start": s.date().isoformat(), "end": e.date().isoformat()}, "staff": staff_rows,
-            "lines": sorted(per_line.values(), key=lambda x: -x["revenue"]), "totals": totals}
+            "lines": sorted(per_line.values(), key=lambda x: -(x["revenue"] + x["forfeits"])), "totals": totals}
 
 
 # ------------------------------------------------------------------ revenue by line / staff / service
@@ -499,16 +575,19 @@ def _revenue_rows(db: Session, s: datetime, e: datetime, source: str = "all") ->
     rows: list[dict] = []
     if source in ("all", "new"):
         amt = func.coalesce(InvoiceItem.net_amount, InvoiceItem.unit_price * InvoiceItem.quantity - InvoiceItem.discount)
-        q = (select(func.date(Invoice.issued_at), InvoiceItem.line_id, InvoiceItem.staff_id, InvoiceItem.service_id,
-                    InvoiceItem.product_id, InvoiceItem.description, func.sum(amt), func.sum(InvoiceItem.quantity))
-             .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
-             .where(Invoice.issued_at.between(s, e), Invoice.status != "void")
-             .group_by(func.date(Invoice.issued_at), InvoiceItem.line_id, InvoiceItem.staff_id, InvoiceItem.service_id,
-                       InvoiceItem.product_id, InvoiceItem.description))
-        for day, line_id, staff_id, service_id, product_id, desc, total, n in db.execute(q):
-            rows.append({"day": str(day), "line_id": PRODUCTS_LINE if product_id else line_id, "staff_id": staff_id,
-                         "service_id": service_id, "product_id": product_id, "name": desc,
-                         "amount": int(total or 0), "count": int(n or 0), "old": False})
+        undo = _undo()
+        # sales on their invoice's day; invoices returned (voided after their day) negative on the day of the return
+        for when, filt, k in ((Invoice.issued_at, _sold, 1), (undo.c.at, _returned, -1)):
+            day_of = func.date(when)
+            q = filt(select(day_of, InvoiceItem.line_id, InvoiceItem.staff_id, InvoiceItem.service_id,
+                            InvoiceItem.product_id, InvoiceItem.description, func.sum(amt), func.sum(InvoiceItem.quantity))
+                     .select_from(InvoiceItem).join(Invoice, Invoice.id == InvoiceItem.invoice_id), s, e, undo)
+            q = q.group_by(day_of, InvoiceItem.line_id, InvoiceItem.staff_id, InvoiceItem.service_id, InvoiceItem.product_id,
+                           InvoiceItem.description)
+            for day, line_id, staff_id, service_id, product_id, desc, total, n in db.execute(q):
+                rows.append({"day": str(day), "line_id": PRODUCTS_LINE if product_id else line_id, "staff_id": staff_id,
+                             "service_id": service_id, "product_id": product_id, "name": desc,
+                             "amount": k * int(total or 0), "count": k * int(n or 0), "old": False, "returned": k < 0})
     if source in ("all", "new"):
         # forfeited deposits: income of their service line (from the ledger: 4800 and its per-line accounts)
         for day, line_id, total in forfeit_rows(db, s, e):
@@ -518,14 +597,15 @@ def _revenue_rows(db: Session, s: datetime, e: datetime, source: str = "all") ->
         q = (select(func.date(Appointment.start_at), Service.line_id, Appointment.staff_id, Appointment.service_id,
                     func.sum(Appointment.quoted_price), func.count(Appointment.id))
              .outerjoin(Service, Service.id == Appointment.service_id)
-             .where(Appointment.status == "done", Appointment.invoice_id.is_(None), Appointment.start_at.between(s, e))
+             .where(_old_service(), Appointment.start_at.between(s, e))
              .group_by(func.date(Appointment.start_at), Service.line_id, Appointment.staff_id, Appointment.service_id))
         for day, line_id, staff_id, service_id, total, n in db.execute(q):
             rows.append({"day": str(day), "line_id": line_id, "staff_id": staff_id, "service_id": service_id, "name": None,
                          "amount": int(total or 0), "count": int(n or 0), "old": True})
         # product sales brought over (Tizpardaz, and products sold in Chehreh): the products line
         from ..models import TradeHistory
-        signed = case((TradeHistory.kind == "sale_return", -TradeHistory.amount), else_=TradeHistory.amount)
+        net = func.coalesce(TradeHistory.net_amount, TradeHistory.amount)  # after its invoice's discount
+        signed = case((TradeHistory.kind == "sale_return", -net), else_=net)
         qty = case((TradeHistory.kind == "sale_return", -TradeHistory.qty), else_=TradeHistory.qty)
         q = (select(func.date(TradeHistory.at), TradeHistory.product_id, TradeHistory.description, func.sum(signed), func.sum(qty))
              .where(TradeHistory.kind.in_(("sale", "sale_return")), TradeHistory.at.between(s, e))
@@ -539,9 +619,19 @@ def _revenue_rows(db: Session, s: datetime, e: datetime, source: str = "all") ->
 def revenue_breakdown(db: Session, start: date | None = None, end: date | None = None, line_id: int | None = None,
                       staff_id: int | None = None, source: str = "all") -> dict:
     """Revenue per Jalali month, per line, per staff member and per service."""
-    if start is None:
-        first = [x for x in (db.scalar(select(func.min(Invoice.issued_at)).where(Invoice.status != "void")),
-                             db.scalar(select(func.min(Appointment.start_at)).where(Appointment.status == "done"))) if x]
+    if start is None:  # all records: from the first one of the chosen source (also product sales brought over)
+        from ..models import JournalLine, LedgerAccount, TradeHistory
+
+        qs = []
+        if source in ("all", "new"):
+            forfeits = select(LedgerAccount.id).where((LedgerAccount.code == "4800") | (LedgerAccount.parent_code == "4800"))
+            qs += [select(func.min(Invoice.issued_at)),
+                   select(func.min(JournalEntry.at)).join(JournalLine, JournalLine.entry_id == JournalEntry.id)
+                   .where(JournalLine.account_id.in_(forfeits))]
+        if source in ("all", "old"):
+            qs += [select(func.min(Appointment.start_at)).where(_old_service()),
+                   select(func.min(TradeHistory.at)).where(TradeHistory.kind.in_(("sale", "sale_return")))]
+        first = [x for x in (db.scalar(q) for q in qs) if x]
         start = min(first).date() if first else date.today()
     s, e = _range(start, end)
     from types import SimpleNamespace
@@ -563,7 +653,7 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
     agg_line: dict[int, dict] = {}
     agg_staff: dict[int, dict] = {}
     agg_svc: dict[str, dict] = {}
-    total = {"revenue": 0, "count": 0, "old": 0, "new": 0, "inferred_staff": 0, "forfeits": 0}
+    total = {"revenue": 0, "count": 0, "old": 0, "new": 0, "inferred_staff": 0, "forfeits": 0, "returns": 0}
     for r in _revenue_rows(db, s, e, source):
         svc = services.get(r["service_id"])
         lid = r["line_id"] or (svc.line_id if svc else None) or (people[r["staff_id"]].line_id if r["staff_id"] in people else None)
@@ -574,8 +664,8 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
             sid, inferred = by_line_staff[lid][0], True
         if line_id and lid != line_id:
             continue
-        if staff_id is not None and (forfeit or (sid or 0) != staff_id):
-            continue
+        if staff_id is not None and (forfeit or lid == PRODUCTS_LINE or (sid or 0) != staff_id):
+            continue  # one person's detail (also "بدون پرسنل"): their services only, as in the staff table
         amt, n = r["amount"], r["count"]
         mk = _jmonth(r["day"], cache)
         m = months.setdefault(mk, {"key": mk, "label": _jlabel(mk), "total": 0, "count": 0, "by_line": defaultdict(int)})
@@ -603,7 +693,8 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
         P["count"] += n
         P["inferred"] += n if inferred else 0
         P["months"][mk] += amt
-        P["last"] = max(P["last"] or r["day"], r["day"])
+        back = bool(r.get("returned"))  # a return: not the last time it was done / sold
+        P["last"] = P["last"] if back else max(P["last"] or r["day"], r["day"])
         prod = products.get(r.get("product_id")) if r.get("product_id") else None
         key = f"forfeit:{lid or 0}" if forfeit else f"p:{prod.id}" if prod else str(r["service_id"]) if r["service_id"] else f"name:{r['name'] or 'نامشخص'}"
         S = agg_svc.setdefault(key, {"id": r["service_id"], "product_id": prod.id if prod else None,
@@ -614,16 +705,18 @@ def revenue_breakdown(db: Session, start: date | None = None, end: date | None =
         S["revenue"] += amt
         S["count"] += n
         S["old"] += amt if r["old"] else 0
-        S["last"] = max(S["last"] or r["day"], r["day"])
+        S["last"] = S["last"] if back else max(S["last"] or r["day"], r["day"])
         total["revenue"] += amt
         total["count"] += n
         total["old" if r["old"] else "new"] += amt
         total["inferred_staff"] += n if inferred else 0
+        total["returns"] -= amt if back else 0
     keys = sorted(months)
     rev = total["revenue"] or 1
-    if PRODUCTS_LINE in agg_line:  # products: what they cost and the gross profit
+    if PRODUCTS_LINE in agg_line:  # products: what they cost and the gross profit (of the chosen source only)
         pl = agg_line[PRODUCTS_LINE]
-        pl["cogs"] = product_cogs(db, s, e) + (history_cogs(db, s, e) if source in ("all", "old") else 0)
+        pl["cogs"] = ((product_cogs(db, s, e) if source in ("all", "new") else 0)
+                      + (history_cogs(db, s, e) if source in ("all", "old") else 0))
         pl["profit"] = pl["revenue"] - pl["cogs"]
         pl["margin"] = round(pl["profit"] / pl["revenue"] * 100, 1) if pl["revenue"] else None
 
@@ -655,24 +748,35 @@ def staff_revenue_detail(db: Session, staff_id: int, start: date | None = None, 
     sole = person is not None and line_staff == [person.id]
     svc_ids_of_line = select(Service.id).where(Service.line_id == person.line_id) if person and person.line_id else None
     amt = func.coalesce(InvoiceItem.net_amount, InvoiceItem.unit_price * InvoiceItem.quantity - InvoiceItem.discount)
-    item_q = (select(Invoice.issued_at, Customer.full_name, Customer.legacy_code, InvoiceItem.description, amt, Invoice.number)
-              .join(Invoice, Invoice.id == InvoiceItem.invoice_id).join(Customer, Customer.id == Invoice.customer_id)
-              .where(Invoice.issued_at.between(s, e), Invoice.status != "void"))
+    undo = _undo()
+    # services only (products are nobody's service); a return is listed negative on its own day, as in the totals
+    item_q = (select(Invoice.issued_at, Customer.full_name, Customer.legacy_code, InvoiceItem.description, amt, Invoice.number, undo.c.at)
+              .select_from(InvoiceItem).join(Invoice, Invoice.id == InvoiceItem.invoice_id).join(Customer, Customer.id == Invoice.customer_id)
+              .where(InvoiceItem.product_id.is_(None)))
     hist_q = (select(Appointment.start_at, Customer.full_name, Customer.legacy_code, Service.name, Appointment.quoted_price, Appointment.notes)
               .join(Customer, Customer.id == Appointment.customer_id).outerjoin(Service, Service.id == Appointment.service_id)
-              .where(Appointment.status == "done", Appointment.invoice_id.is_(None), Appointment.start_at.between(s, e)))
+              .where(_old_service(), Appointment.start_at.between(s, e)))
     if staff_id:
         if sole and svc_ids_of_line is not None:  # unassigned records of their (single-person) line count as theirs
-            item_q = item_q.where((InvoiceItem.staff_id == staff_id) | (InvoiceItem.staff_id.is_(None) & InvoiceItem.service_id.in_(svc_ids_of_line)))
+            of_line = (InvoiceItem.line_id == person.line_id) | (InvoiceItem.line_id.is_(None) & InvoiceItem.service_id.in_(svc_ids_of_line))
+            item_q = item_q.where((InvoiceItem.staff_id == staff_id) | (InvoiceItem.staff_id.is_(None) & of_line))
             hist_q = hist_q.where((Appointment.staff_id == staff_id) | (Appointment.staff_id.is_(None) & Appointment.service_id.in_(svc_ids_of_line)))
         else:
             item_q = item_q.where(InvoiceItem.staff_id == staff_id)
             hist_q = hist_q.where(Appointment.staff_id == staff_id)
     else:
-        item_q = item_q.where(InvoiceItem.staff_id.is_(None))
-        hist_q = hist_q.where(Appointment.staff_id.is_(None))
+        # "بدون پرسنل": without the records of a single-person line (the table counts them as that person's)
+        sole = [lid for lid, n in db.execute(select(Staff.line_id, func.count(Staff.id)).where(Staff.is_active.is_(True),
+                                                                                             Staff.line_id.is_not(None)).group_by(Staff.line_id)) if n == 1]
+        sole_svc = select(Service.id).where(Service.line_id.in_(sole))
+        item_of_sole = ((InvoiceItem.line_id.is_not(None) & InvoiceItem.line_id.in_(sole))
+                        | (InvoiceItem.line_id.is_(None) & InvoiceItem.service_id.is_not(None) & InvoiceItem.service_id.in_(sole_svc)))
+        item_q = item_q.where(InvoiceItem.staff_id.is_(None), ~item_of_sole)
+        hist_q = hist_q.where(Appointment.staff_id.is_(None), ~(Appointment.service_id.is_not(None) & Appointment.service_id.in_(sole_svc)))
     records = [{"at": at.isoformat(timespec="minutes"), "customer": c, "code": code, "service": svc, "amount": int(a or 0),
-                "source": "new", "ref": num} for at, c, code, svc, a, num in db.execute(item_q)]
+                "source": "new", "ref": num} for at, c, code, svc, a, num, _ in db.execute(_sold(item_q, s, e, undo))]
+    records += [{"at": back.isoformat(timespec="minutes"), "customer": c, "code": code, "service": svc, "amount": -int(a or 0),
+                 "source": "new", "ref": num, "returned": True} for _, c, code, svc, a, num, back in db.execute(_returned(item_q, s, e, undo))]
     for at, c, code, svc, a, notes in db.execute(hist_q):
         name = svc or ((notes or "").split("خدمت: ", 1)[1].split(" - ")[0] if "خدمت: " in (notes or "") else "نامشخص")
         records.append({"at": at.isoformat(timespec="minutes"), "customer": c, "code": code, "service": name, "amount": int(a or 0),
@@ -698,8 +802,13 @@ def day_details(db: Session, day: date | None = None) -> dict:
                  "items": [it.description for it in i.items], "total": i.total, "paid": i.paid, "status": i.status} for i in invs]
     inv_numbers = {i.id: i.number for i in db.scalars(select(Invoice).where(Invoice.id.in_(
         select(Payment.invoice_id).where(Payment.paid_at.between(s, e)))))}
+    # the day's sales as summary() counts them: invoices of the day (not those cancelled as a mistake) minus
+    # invoices of earlier days returned (voided) today
+    undo = _undo()
+    sold = set(db.scalars(_sold(select(Invoice.id), s, e, undo)))
+    returned = db.execute(_returned(select(Invoice, undo.c.at), s, e, undo).order_by(undo.c.at)).all()
     moves = money_movements(db, s, e)
-    extra = {r["customer_id"] for r in moves} - names.keys()
+    extra = ({r["customer_id"] for r in moves} | {i.customer_id for i, _ in returned}) - names.keys()
     if extra:
         names.update({c.id: (c.full_name, c.legacy_code, c.mobile) for c in db.scalars(select(Customer).where(Customer.id.in_(extra)))})
     money_rows = [{"at": r["at"].isoformat(timespec="minutes"), "kind": r["kind"], "amount": r["amount"], "account": r["account"],
@@ -715,14 +824,17 @@ def day_details(db: Session, day: date | None = None) -> dict:
     for a in db.scalars(select(Appointment).where(Appointment.start_at.between(s, e), Appointment.status.in_(("booked", "done", "no_show")))):
         c = served.setdefault(a.customer_id, {"id": a.customer_id, "services": [], "total": 0, "appointment": None})
         c["appointment"] = {"at": a.start_at.isoformat(timespec="minutes"), "status": a.status, "time_unknown": bool(a.time_unknown)}
-    new_ids = set(db.scalars(select(Customer.id).where(Customer.created_at.between(s, e), Customer.source != "import")))
+    new_ids = set(db.scalars(select(Customer.id).where(Customer.created_at.between(s, e), Customer.source.not_in(IMPORTED_CUSTOMERS))))
     for cid in new_ids:
         served.setdefault(cid, {"id": cid, "services": [], "total": 0, "appointment": None})
     customers = [{**c, "name": names.get(c["id"], ("",))[0], "code": names.get(c["id"], ("", None))[1],
                   "mobile": names.get(c["id"], ("", None, None))[2], "new": c["id"] in new_ids} for c in served.values()]
     customers.sort(key=lambda x: (-x["total"], x["name"]))
-    valid = [i for i in invs if i.status != "void"]
-    return {"date": day.isoformat(), "invoices": invoices, "sales": sum(i.total for i in valid), "invoice_count": len(valid),
+    returns = [{"id": i.id, "number": i.number, "at": at.isoformat(timespec="minutes"), "issued_at": i.issued_at.isoformat(timespec="minutes"),
+                "customer": names.get(i.customer_id, ("",))[0], "total": i.total} for i, at in returned]
+    returns_total = sum(x["total"] for x in returns)
+    return {"date": day.isoformat(), "invoices": invoices, "sales": sum(i.total for i in invs if i.id in sold) - returns_total,
+            "invoice_count": len(sold), "returns": returns, "returns_total": returns_total,
             "money": money_rows, "money_total": sum(r["amount"] for r in money_rows),
             "money_in": sum(r["amount"] for r in money_rows if r["kind"] not in ("deposit_refund", "refund")),
             "money_out": -sum(r["amount"] for r in money_rows if r["kind"] in ("deposit_refund", "refund")),

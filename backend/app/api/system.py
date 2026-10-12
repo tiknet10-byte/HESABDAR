@@ -67,28 +67,46 @@ def insights(db: Session = Depends(get_db), _=Depends(require("reports"))):
     return {"insights": reports.insights(db), "customers": reports.customer_rfm(db, 30)}
 
 
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_text(value):  # noqa: ANN001, ANN201
+    """A text cell that Excel would run as a formula (a website buyer named '=HYPERLINK(...)') gets a leading ' so it
+    stays plain text. Numbers are left as they are (a negative amount starts with '-')."""
+    return "'" + value if isinstance(value, str) and value.startswith(_FORMULA_START) else value
+
+
 @router.get("/reports/export.csv")
 def export_csv(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), _=Depends(require("reports"))):
     rows = reports.invoice_item_rows(db, start, end)
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=["number", "date", "customer", "service", "qty", "unit_price", "discount"])
     w.writeheader()
-    w.writerows(rows)
+    w.writerows({k: csv_text(v) for k, v in r.items()} for r in rows)
     return StreamingResponse(iter(["﻿" + buf.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=sales.csv"})
 
 
+# what reception and staff (no 'reports' permission) see of today: the day's work and the open deposits they handle,
+# not the takings, profit, expenses, cash per account or revenue per staff member
+TODAY_FOR_ALL = ("period", "invoice_count", "customers_served", "new_customers", "returning_customers",
+                 "deposits_held", "deposits_held_count", "appointments")
+
+
 @router.get("/dashboard")
 def dashboard(db: Session = Depends(get_db), user=Depends(current_user)):
+    from ..core.security import has_permission
+
     today = date.today()
-    out = {"today": reports.summary(db, today, today), "reconciliation": matching.unreconciled_summary(db),
+    full = has_permission(user.role, "reports")
+    day = reports.summary(db, today, today)
+    out = {"today": day if full else {k: day[k] for k in TODAY_FOR_ALL}, "reconciliation": matching.unreconciled_summary(db),
            "now": __import__("datetime").datetime.now().isoformat(timespec="minutes"),
            "alerts": [{"id": a.id, "level": a.level, "title": a.title, "message": a.message, "at": a.at.isoformat()}
                       for a in db.scalars(select(Alert).where(Alert.is_read.is_(False)).order_by(Alert.at.desc()).limit(8))],
            "ai_available": claude.available()}
     out["agenda"] = reports.agenda(db)
-    from ..core.security import has_permission
-    if has_permission(user.role, "reports"):
+    if full:
         out["month"] = reports.summary(db)
         prev_end = today - timedelta(days=30)
         prev = reports.summary(db, prev_end - timedelta(days=29), prev_end)
@@ -105,10 +123,21 @@ def money_returned(start: date | None = None, end: date | None = None, db: Sessi
     return reports.money_returned(db, start, end)
 
 
+DAY_MONEY = ("sales", "money", "money_total", "money_in", "money_out", "by_account")
+
+
 @router.get("/dashboard/day")
-def dashboard_day(day: date | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
-    """Details behind the dashboard's today cards (sales, money received, customers)."""
-    return reports.day_details(db, day)
+def dashboard_day(day: date | None = None, db: Session = Depends(get_db), user=Depends(require("read"))):
+    """Details behind the dashboard's today cards (sales, money received, customers).
+    Without 'reports' (reception, staff): today only, the invoices and customers but not the money totals."""
+    from ..core.security import has_permission
+
+    if has_permission(user.role, "reports"):
+        return reports.day_details(db, day)
+    if day is not None and day != date.today():
+        raise HTTPException(403, "شما فقط جزئیات امروز را می‌بینید؛ روزهای دیگر در گزارش‌ها برای مدیر و حسابدار است")
+    out = reports.day_details(db, None)
+    return {k: v for k, v in out.items() if k not in DAY_MONEY}
 
 
 # ---------------------------------------------------------------- alerts
@@ -276,29 +305,50 @@ def verify(name: str, _=Depends(require("backup"))):
         raise HTTPException(400, str(exc)) from exc
 
 
+def _after_restore(name: str, out: dict, user) -> dict:  # noqa: ANN001
+    """The restored file may come from before the last update: add its missing tables, columns and indexes now (as
+    at start-up), use its plugin on/off and settings, and record the restore in its audit trail."""
+    from ..core.db import SessionLocal
+    from ..main import init_db
+    from ..models import PluginState
+
+    try:
+        init_db()
+        with SessionLocal() as db:
+            for pname, plugin in manager.plugins.items():
+                st = db.get(PluginState, pname)
+                if st is not None:  # a plugin the backup does not know keeps its current state until the next start
+                    plugin.ctx.config = {**plugin.default_config, **(st.config or {})}
+                    manager.enabled[pname] = st.enabled
+            audit(db, "backup.restore", "backup", name, out, user=user, actor=user.username)
+            db.commit()
+    except Exception:  # noqa: BLE001 - the data is back; a restart finishes the rest
+        log.exception("after restore of %s", name)
+        out["warning"] = "اطلاعات بازگردانی شد؛ لطفاً برنامه را یک بار ببندید و دوباره باز کنید."
+    return out
+
+
 @router.post("/backups/{name}/restore")
 def restore(name: str, user=Depends(require("users"))):  # owner only
     try:
         out = backup.restore_backup(name)
     except (backup.BackupError, FileNotFoundError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    from ..core.db import SessionLocal
-    with SessionLocal() as db:
-        audit(db, "backup.restore", "backup", name, out, user=user, actor=user.username)
-        db.commit()
-    return out
+    return _after_restore(name, out, user)
 
 
 @router.post("/backups/upload-restore")
-async def upload_restore(file: UploadFile = File(...), passphrase: str = Form(""), user=Depends(require("users"))):
+def upload_restore(file: UploadFile = File(...), passphrase: str = Form(""), user=Depends(require("users"))):
+    name = file.filename or "upload"
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         p = Path(tmp) / "upload.hbk"
         with p.open("wb") as f:
             shutil.copyfileobj(file.file, f)
         try:
-            return backup.restore_backup(file.filename or "upload", passphrase or None, file=p)
+            out = backup.restore_backup(name, passphrase or None, file=p)
         except backup.BackupError as exc:
             raise HTTPException(400, str(exc)) from exc
+    return _after_restore(name, {**out, "uploaded": True}, user)
 
 
 @router.get("/backups/{name}/download")

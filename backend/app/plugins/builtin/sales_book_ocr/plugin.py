@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from ....ai import claude
 from ....api.deps import require
 from ....core.db import get_db
-from ....models import ImportBatch, Invoice, PaymentAccount, Service
+from ....models import Customer, ImportBatch, Invoice, PaymentAccount, Service, local_now
 from ....services import accounting, learning
 from ....services.audit import audit
 from ....services.jalali import jalali_to_gregorian
@@ -77,7 +77,8 @@ def parse_text_lines(db: Session, text: str) -> dict:
     page_total = None
     current_date = None
     for line in to_en_digits(text).splitlines():
-        line = line.strip()
+        # the commas inside an amount (1,800,000) are not field separators: the amount written in the book counts
+        line = re.sub(r"(?<!\d)(?<!\d[,،٬])\d{1,3}(?:[,،٬]\d{3})+(?!\d)", lambda m: re.sub(r"\D", "", m.group()), line.strip())
         if not line:
             continue
         d = _jdate(line)
@@ -169,6 +170,12 @@ def validate(db: Session, parsed: dict) -> list[dict]:
             warnings.append("روش پرداخت مشخص نیست")
         elif acc_id is None:
             warnings.append(f"حسابی از نوع {method} تعریف نشده")
+        if date.fromisoformat(row_date[:10]) > date.today():
+            warnings.append("تاریخ این ردیف در آینده است و ثبت نمی‌شود؛ تیک آن را بردارید")
+        deposit = (r.get("deposit") or 0) * factor
+        if deposit:
+            warnings.append(f"در دفتر بیعانه {toman(deposit)} نوشته شده؛ بیعانه خودکار کم نمی‌شود و این مبلغ بدهی مشتری "
+                            "می‌ماند. بهتر است تیک این ردیف را بردارید و فاکتورش را در صفحه فاکتورها با تیک بیعانه ثبت کنید")
         cust = accounting.find_customer(db, mobile) if mobile else None
         if cust and total:
             d0 = datetime.fromisoformat(row_date)
@@ -178,7 +185,7 @@ def validate(db: Session, parsed: dict) -> list[dict]:
                 warnings.append("احتمال ثبت تکراری: فاکتور مشابه برای این مشتری در همین روز وجود دارد")
         out.append({"index": i, "date": row_date, "customer_name": r.get("customer_name"), "mobile": mobile,
                     "customer_id": cust.id if cust else None, "is_new_customer": cust is None,
-                    "items": items, "total": total or items_sum, "deposit": (r.get("deposit") or 0) * factor,
+                    "items": items, "total": total or items_sum, "deposit": deposit,
                     "payment_method": method, "payment_account_id": acc_id, "warnings": warnings,
                     "include": True, "raw": r.get("raw") or r.get("note")})
     return out
@@ -229,78 +236,89 @@ class Plugin(BasePlugin):
                 provider = "csv" if name.lower().endswith(".csv") else "text"
             parsed["currency"] = parsed.get("currency") or currency
             rows = validate(db, parsed)
-            batch = ImportBatch(file_name=name, provider=provider, raw_text=text[:20000], rows=rows, summary=summarize(parsed, rows))
+            batch = ImportBatch(kind="sales_book", file_name=name, provider=provider, raw_text=text[:20000], rows=rows, summary=summarize(parsed, rows))
             db.add(batch)
             db.commit()
             return _batch(batch)
 
         @r.get("/batches")
         def batches(db: Session = Depends(get_db), _=Depends(require("finance"))):
-            return [_batch(b, rows=False) for b in db.scalars(select(ImportBatch).order_by(ImportBatch.id.desc()).limit(100))]
+            q = select(ImportBatch).where(ImportBatch.kind == "sales_book").order_by(ImportBatch.id.desc()).limit(100)
+            return [_batch(b, rows=False) for b in db.scalars(q)]
 
         @r.get("/batches/{bid}")
         def batch(bid: int, db: Session = Depends(get_db), _=Depends(require("finance"))):
-            b = db.get(ImportBatch, bid) or _404()
-            return _batch(b)
+            return _batch(_sb(db, bid))
 
         @r.put("/batches/{bid}/rows")
-        def update_rows(bid: int, body: RowsIn, db: Session = Depends(get_db), _=Depends(require("finance"))):
-            b = db.get(ImportBatch, bid) or _404()
+        def update_rows(bid: int, body: RowsIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+            b = _sb(db, bid)
             if b.status != "review":
                 raise HTTPException(400, "batch already processed")
             b.rows = body.rows
             b.summary = {**b.summary, "total": sum(int(r.get("total") or 0) for r in body.rows if r.get("include", True))}
+            audit(db, "import.rows", "import_batch", b.id, {"rows": len(body.rows), "total": b.summary["total"]}, user=user)
             db.commit()
             return _batch(b)
 
         @r.post("/batches/{bid}/commit")
         def commit(bid: int, db: Session = Depends(get_db), user=Depends(require("finance"))):
-            b = db.get(ImportBatch, bid) or _404()
+            b = _sb(db, bid)
             if b.status != "review":
                 raise HTTPException(400, "batch already processed")
-            created = []
+            created, left_open = [], []
             try:
                 for row in b.rows:
                     if not row.get("include", True):
                         continue
-                    if row.get("customer_id"):
-                        from ....models import Customer
-                        cust = db.get(Customer, row["customer_id"])
-                    else:
+                    cust = db.get(Customer, row["customer_id"]) if row.get("customer_id") else None
+                    if cust is None:
                         cust, _ = accounting.find_or_create_customer(db, row.get("customer_name"), row.get("mobile"), source="ocr", user=user)
                     items = [{"service_id": it.get("service_id"), "description": it.get("service") or it.get("text"),
                               "unit_price": int(it.get("unit_price") or 0)} for it in row.get("items") or []]
                     if not items:
                         items = [{"description": "خدمت ثبت‌شده از دفتر", "unit_price": int(row.get("total") or 0)}]
-                    issued = datetime.fromisoformat(row["date"]) + timedelta(hours=12) if row.get("date") else None
-                    pays = []
-                    total = sum(i["unit_price"] for i in items)
-                    if row.get("payment_account_id") and total:
-                        pays = [{"payment_account_id": row["payment_account_id"], "amount": total}]
-                    inv = accounting.issue_invoice(db, customer=cust, items=items, apply_all_deposits=True, payments=[],
-                                                   issued_at=issued, source="ocr", notes=f"از دفتر فروش ({b.file_name})", user=user)
-                    due = inv.total - inv.paid
-                    if pays and due > 0:
-                        accounting.record_payment(db, invoice=inv, payment_account=db.get(PaymentAccount, pays[0]["payment_account_id"]),
-                                                  amount=due, paid_at=issued, source="ocr", user=user)
+                    issued = None
+                    if row.get("date"):
+                        day = datetime.fromisoformat(row["date"])
+                        if day.date() > local_now().date():
+                            raise accounting.AccountingError(f"تاریخ ردیف «{row.get('customer_name')}» در آینده است؛ تیک آن ردیف را بردارید")
+                        issued = min(day + timedelta(hours=12), local_now())  # a page of today, scanned before noon
+                    # no deposit is taken by itself (it may belong to another visit or come after this date): what the
+                    # book says was paid is recorded on its account; a deposit written in the book stays owed
+                    book_deposit = max(0, int(row.get("deposit") or 0))
+                    notes = f"از دفتر فروش ({b.file_name})"
+                    if book_deposit:
+                        notes += f" - بیعانه {toman(book_deposit)} در دفتر؛ از بیعانه‌های مشتری کم نشد"
+                    inv = accounting.issue_invoice(db, customer=cust, items=items, payments=[],
+                                                   issued_at=issued, source="ocr", notes=notes, user=user)
+                    paid = max(0, inv.total - book_deposit)
+                    if row.get("payment_account_id") and paid > 0:
+                        accounting.record_payment(db, invoice=inv, payment_account=db.get(PaymentAccount, row["payment_account_id"]),
+                                                  amount=paid, paid_at=inv.issued_at, source="ocr", user=user)
+                    if inv.total - inv.paid > 0:
+                        left_open.append({"invoice": inv.number, "amount": inv.total - inv.paid})
                     for it in row.get("items") or []:  # learn the book's vocabulary
                         if it.get("service_id") and it.get("text"):
                             learning.learn_text(db, it["text"], it["service_id"])
                     created.append(inv.number)
                 b.status = "committed"
-                b.summary = {**b.summary, "invoices": created}
+                b.summary = {**b.summary, "invoices": created, "left_open": left_open}
                 audit(db, "import.commit", "import_batch", b.id, {"invoices": len(created)}, user=user)
                 learning.refresh_price_stats(db)
                 db.commit()
             except accounting.AccountingError as exc:
                 db.rollback()
                 raise HTTPException(400, str(exc)) from exc
-            return {"ok": True, "invoices": created}
+            return {"ok": True, "invoices": created, "left_open": left_open}
 
         @r.post("/batches/{bid}/discard")
-        def discard(bid: int, db: Session = Depends(get_db), _=Depends(require("finance"))):
-            b = db.get(ImportBatch, bid) or _404()
+        def discard(bid: int, db: Session = Depends(get_db), user=Depends(require("finance"))):
+            b = _sb(db, bid)
+            if b.status != "review":
+                raise HTTPException(400, "این فایل قبلاً ثبت یا کنار گذاشته شده است")
             b.status = "discarded"
+            audit(db, "import.discard", "import_batch", b.id, {"file": b.file_name}, user=user)
             db.commit()
             return {"ok": True}
 
@@ -308,7 +326,8 @@ class Plugin(BasePlugin):
 
     def ai_tools(self) -> list[AITool]:
         def pending(db, user):  # noqa: ANN001, ANN202
-            return [_batch(b, rows=False) for b in db.scalars(select(ImportBatch).where(ImportBatch.status == "review"))]
+            q = select(ImportBatch).where(ImportBatch.kind == "sales_book", ImportBatch.status == "review")
+            return [_batch(b, rows=False) for b in db.scalars(q)]
         return [AITool("sales_book_batches_pending", "Scanned sales-book pages waiting for review, with warning counts.",
                        {"type": "object", "properties": {}}, pending, "finance")]
 
@@ -323,3 +342,11 @@ def _batch(b: ImportBatch, rows: bool = True) -> dict:
 
 def _404():  # noqa: ANN202
     raise HTTPException(404, "not found")
+
+
+def _sb(db: Session, bid: int) -> ImportBatch:
+    """A scanned sales-book batch (the Chehreh / Tizpardaz imports share the table; they are the owner's only)."""
+    b = db.get(ImportBatch, bid)
+    if b is None or b.kind != "sales_book":
+        _404()
+    return b
