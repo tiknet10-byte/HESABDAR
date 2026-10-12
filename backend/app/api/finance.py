@@ -394,7 +394,7 @@ DEPOSIT_SORTS = {"received_desc", "received_asc", "amount_desc", "amount_asc", "
 def deposits_search(q: str = "", status: str = "held", sort: str = "received_desc", filter: str = "",  # noqa: A002
                     line_id: int | None = None, staff_id: int | None = None, account_id: int | None = None,
                     start: date | None = None, end: date | None = None, limit: int = 50, offset: int = 0,
-                    db: Session = Depends(get_db), _=Depends(require("read"))):
+                    db: Session = Depends(get_db), user=Depends(require("read"))):
     """Deposits page: search by customer code / name / mobile / reference, filters, sorting, paging and totals."""
     appt = Appointment.__table__.alias("appt")
     svc = Service.__table__.alias("svc")
@@ -468,7 +468,8 @@ def deposits_search(q: str = "", status: str = "held", sort: str = "received_des
                                            Deposit.source != "woocommerce")).one()
     return {"total": total, "amount": int(amount), "items": items,
             "stats": {"held": [held_n, int(held_sum)], "overdue": [over_n, int(over_sum)], "no_appointment": [noappt_n, int(noappt_sum)],
-                      "month": [month_n, int(month_sum)]}}
+                      # money received in the month is a report (reception sees the count only)
+                      "month": [month_n, int(month_sum) if has_permission(user.role, "reports") else None]}}
 
 
 @router.get("/deposits/{did}")

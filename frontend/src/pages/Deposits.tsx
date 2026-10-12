@@ -374,7 +374,7 @@ export default function Deposits() {
         <button className="text-right" onClick={() => quick("held", "")}><Stat label="بیعانه‌های باز" value={st ? cmoney(st.held[1]) : "…"} hint={st && `${num(st.held[0])} بیعانه`} tone="emerald" /></button>
         <button className="text-right" onClick={() => quick("held", "overdue")}><Stat label="نوبت گذشته ولی هنوز باز" value={st ? cmoney(st.overdue[1]) : "…"} hint={st && `${num(st.overdue[0])} بیعانه - فاکتور، استرداد یا سوخت؟`} tone="pink" /></button>
         <button className="text-right" onClick={() => quick("held", "no_appointment")}><Stat label="باز بدون نوبت" value={st ? cmoney(st.no_appointment[1]) : "…"} hint={st && `${num(st.no_appointment[0])} بیعانه - نوبت تعیین کنید`} tone="amber" /></button>
-        <button className="text-right" onClick={() => quick("", "")}><Stat label="دریافتی این ماه" value={st ? cmoney(st.month[1]) : "…"} hint={st && `${num(st.month[0])} بیعانه`} tone="sky" /></button>
+        <button className="text-right" onClick={() => quick("", "")}><Stat label="دریافتی این ماه" value={!st ? "…" : st.month[1] == null ? `${num(st.month[0])} بیعانه` : cmoney(st.month[1])} hint={st && st.month[1] != null && `${num(st.month[0])} بیعانه`} tone="sky" /></button>
       </div>
       <Card pad={false}>
         <div className="space-y-3 p-4">
