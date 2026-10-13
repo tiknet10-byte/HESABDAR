@@ -649,7 +649,7 @@ def _inv(i: Invoice, name: str | None = None) -> dict:
     return {"id": i.id, "number": i.number, "customer_id": i.customer_id, "customer": name, "issued_at": i.issued_at.isoformat(),
             "status": i.status, "subtotal": i.subtotal, "discount": i.discount, "total": i.total, "paid": i.paid,
             "due": i.total - i.paid, "source": i.source, "notes": i.notes, "channel": i.channel or "in_person",
-            "items": [{"service_id": it.service_id, "product_id": it.product_id, "line_id": it.line_id, "staff_id": it.staff_id, "description": it.description,
+            "items": [{"service_id": it.service_id, "product_id": it.product_id, "kind": it.kind, "line_id": it.line_id, "staff_id": it.staff_id, "description": it.description,
                        "quantity": it.quantity, "unit_price": it.unit_price, "discount": it.discount, "amount": it.amount,
                        "net_amount": it.net_amount, "commission_amount": it.commission_amount,
                        "staff": _staff_names().get(it.staff_id), "line": _line_names().get(it.line_id)} for it in i.items]}
@@ -717,8 +717,16 @@ def invoices_search(q: str = "", status: str = "", sort: str = "date_desc", star
 
     month = month_start(now)  # the Jalali month, as the owner counts it
     week = day - timedelta(days=(now.weekday() + 2) % 7)  # Saturday
-    sums = lambda since: db.execute(select(func.count(Invoice.id), func.coalesce(func.sum(Invoice.total), 0))  # noqa: E731
-                                    .where(Invoice.issued_at >= since, Invoice.status != "void")).one()
+    from ..services.reports import _returned, _sold, _undo
+
+    undo, until = _undo(), now + timedelta(days=1)
+
+    def sums(since):  # noqa: ANN001, ANN202
+        """Sales from `since`, as the dashboard and the books count them: a sale on its own day, an invoice returned
+        later counted negative on the day of the return, one cancelled as a mistake not at all."""
+        n, sold = db.execute(_sold(select(func.count(Invoice.id), func.coalesce(func.sum(Invoice.total), 0)), since, until, undo)).one()
+        back = db.scalar(_returned(select(func.coalesce(func.sum(Invoice.total), 0)), since, until, undo)) or 0
+        return n, int(sold) - int(back)
     unpaid = db.execute(select(func.count(Invoice.id), func.coalesce(func.sum(Invoice.total - Invoice.paid), 0))
                         .where(Invoice.status.in_(("issued", "partial")))).one()
     stats = {k: [v[0], int(v[1])] for k, v in {"today": sums(day), "week": sums(week), "month": sums(month), "unpaid": unpaid}.items()}

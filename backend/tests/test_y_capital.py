@@ -372,3 +372,42 @@ def test_open_deposit_used_later_on_an_issued_invoice(client, accounts, services
     inv2 = client.post("/api/invoices", json={"customer_id": other["id"], "items": [{"service_id": svc["id"], "unit_price": 1_000}]}).json()
     assert client.post(f"/api/invoices/{inv2['id']}/apply-deposit", json={"deposit_id": held[0]["id"]}).status_code == 400
     tb(client)
+
+
+def test_reception_does_not_see_what_we_owe_a_seller(client):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    seller = client.post("/api/customers", json={"full_name": "فروشنده پنهان تست", "mobile": "09159990010"}).json()
+    prod = client.post("/api/products", json={"name": "کالای فروشنده پنهان", "sale_price": 1}).json()
+    client.post("/api/purchases", json={"supplier_name": "فروشنده پنهان تست", "items": [{"product_id": prod["id"], "quantity": 2,
+                                                                                       "unit_price": 700_000}]})
+    owner_view = client.get(f"/api/customers/{seller['id']}").json()
+    assert owner_view["we_owe"] == 1_400_000 and owner_view["purchases"][0]["total"] == 1_400_000
+    assert client.post("/api/auth/users", json={"username": "recep_seller", "password": "Recep12345", "role": "receptionist"}).status_code == 200
+    c = TestClient(app)
+    c.headers["Authorization"] = "Bearer " + c.post("/api/auth/login", json={"username": "recep_seller", "password": "Recep12345"}).json()["access_token"]
+    view = c.get(f"/api/customers/{seller['id']}").json()
+    assert view["we_owe"] is None
+    assert all(p["total"] is None and p["due"] is None and p["paid"] is None for p in view["purchases"])
+
+
+def test_product_report_keeps_a_sale_in_its_month_and_the_return_on_its_day(client, accounts):
+    cash = accounts["صندوق نقدی"]
+    p = client.post("/api/products", json={"name": "کالای برگشت ماه قبل", "sale_price": 1_000_000}).json()
+    old = (datetime.now() - timedelta(days=40)).replace(microsecond=0)
+    client.post(f"/api/products/{p['id']}/opening", json={"qty": 2, "unit_cost": 400_000, "at": (old - timedelta(days=1)).isoformat()})
+    inv = client.post("/api/invoices", json={"customer_name": "برگشتی ماه قبل", "customer_mobile": "09159990011", "issued_at": old.isoformat(),
+                                             "items": [{"product_id": p["id"], "quantity": 1}],
+                                             "payments": [{"payment_account_id": cash, "amount": 1_000_000}]}).json()
+    assert client.post(f"/api/invoices/{inv['id']}/void?payments=refund").status_code == 200
+
+    def mine(start, end):
+        r = client.get(f"/api/reports/products?start={start}&end={end}").json()
+        row = next((x for x in r["products"] if x["id"] == p["id"]), None)
+        return (row["revenue"], row["cogs"], row["qty"]) if row else (0, 0, 0)
+    d, today = old.date().isoformat(), datetime.now().date().isoformat()
+    assert mine(d, d) == (1_000_000, 400_000, 1)  # the sale stays on its own day
+    assert mine(today, today) == (-1_000_000, -400_000, -1)  # the return is today
+    assert mine(d, today) == (0, 0, 0)

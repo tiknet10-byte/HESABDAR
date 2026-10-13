@@ -355,6 +355,11 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
     return dep
 
 
+def is_service(item: InvoiceItem) -> bool:
+    """A service row (what a بیعانه may pay): not a product and not a website order's shipping / tax / fee row."""
+    return not item.product_id and item.kind != "extra"
+
+
 def is_credit(dep: Deposit) -> bool:
     """A customer credit (اعتبار), not a service deposit (بیعانه): pays anything and is never forfeited."""
     return dep.kind == "credit"
@@ -526,6 +531,9 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
             # products carry no staff commission; their line in the books is "product sales"
             item = InvoiceItem(product_id=prod.id, line_id=None, staff_id=None, description=it.get("description") or prod.name,
                                quantity=qty, unit_price=price, discount=int(it.get("discount") or 0))
+        elif it.get("kind") == "extra" and not svc:  # a website order's shipping / tax / fee: part of the product sale
+            item = InvoiceItem(kind="extra", line_id=None, staff_id=None, description=it.get("description") or "هزینهٔ سفارش",
+                               quantity=qty, unit_price=int(it.get("unit_price") or 0), discount=int(it.get("discount") or 0))
         else:
             price = int(it["unit_price"] if it.get("unit_price") is not None else (svc.base_price if svc else 0))
             item = InvoiceItem(service_id=svc.id if svc else None, line_id=svc.line_id if svc else it.get("line_id"),
@@ -562,7 +570,7 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
         item.net_amount = item.amount - share
     revenue_by_line: dict[int | str | None, int] = {}  # service line id, or "products"
     for item in inv.items:
-        key = "products" if item.product_id else item.line_id
+        key = "products" if item.product_id or item.kind == "extra" else item.line_id
         revenue_by_line[key] = revenue_by_line.get(key, 0) + item.net_amount
     legs = [Leg(account(db, AR), debit=inv.total, customer_id=customer.id)]
     for line_id, net in revenue_by_line.items():
@@ -605,7 +613,7 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     if apply_deposit_ids:
         deposit_q = deposit_q.where(Deposit.id.in_(apply_deposit_ids))
     # A customer CREDIT (اعتبار: money of theirs kept with us, e.g. a product credit brought over) pays anything.
-    room = sum(i.net_amount for i in inv.items if not i.product_id)
+    room = sum(i.net_amount for i in inv.items if is_service(i))
     if apply_deposit_ids or apply_all_deposits:
         chosen = list(db.scalars(deposit_q))
         if apply_deposit_ids and room <= 0 and chosen and not any(is_credit(d) for d in chosen):
@@ -661,7 +669,7 @@ def apply_deposit(db: Session, inv: Invoice, dep: Deposit, user=None) -> int:  #
         raise AccountingError("این بیعانه دیگر باز نیست")
     due = inv.total - inv.paid
     if not is_credit(dep):
-        services = sum((i.net_amount if i.net_amount is not None else i.amount) for i in inv.items if not i.product_id)
+        services = sum((i.net_amount if i.net_amount is not None else i.amount) for i in inv.items if is_service(i))
         used = sum(d.amount for d in db.scalars(select(Deposit).where(Deposit.applied_invoice_id == inv.id, Deposit.status == "applied"))
                    if not is_credit(d))
         due = min(due, services - used)

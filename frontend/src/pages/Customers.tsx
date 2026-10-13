@@ -101,7 +101,9 @@ function CustomerView({ id }: { id: number }) {
   const saleDocs = docs.filter((d) => d.kind.startsWith("sale"));
   const buyDocs = docs.filter((d) => d.kind.startsWith("purchase"));
   const purchases: any[] = data.purchases ?? [];
-  const boughtFromThem = buyDocs.reduce((t, d) => t + (d.kind === "purchase_return" ? -d.total : d.total), 0)
+  const hidden = data.we_owe === null; // purchase prices and what we owe a seller: management only
+  const signed = (x: number | null, minus: boolean) => (x == null ? null : minus ? -x : x);
+  const boughtFromThem = hidden ? null : buyDocs.reduce((t, d) => t + (d.kind === "purchase_return" ? -d.total : d.total), 0)
     + purchases.filter((p) => p.status !== "void" && !p.opening).reduce((t, p) => t + p.total, 0);
   const isSeller = buyDocs.length > 0 || purchases.length > 0 || (data.suppliers ?? []).length > 0;
   const sales = [
@@ -109,7 +111,7 @@ function CustomerView({ id }: { id: number }) {
       <DocRow key={`i${i.id}`} date={i.issued_at} title={i.number} sub={i.items?.join("، ")} amount={i.total} muted={i.status === "void"}
         badge={<Badge status={i.status} />} onClick={() => setOpened({ type: "invoice", id: i.id })} />) })),
     ...saleDocs.map((d) => ({ key: `d${d.id}`, date: d.at, el: (
-      <DocRow key={`d${d.id}`} date={d.at} title={`${d.kind_label} ${d.doc_no}`} amount={d.kind === "sale_return" ? -d.total : d.total}
+      <DocRow key={`d${d.id}`} date={d.at} title={`${d.kind_label} ${d.doc_no}`} amount={signed(d.total, d.kind === "sale_return")}
         badge={<span className="badge bg-amber-500/10 text-amber-700 dark:text-amber-300">{SOURCE_FA[d.source] ?? d.source}</span>}
         onClick={() => setOpened({ type: "doc", id: d.id })} />) })),
   ].sort((a, b2) => b2.date.localeCompare(a.date));
@@ -117,9 +119,9 @@ function CustomerView({ id }: { id: number }) {
     ...purchases.map((p) => ({ key: `p${p.id}`, date: p.at, el: (
       <DocRow key={`p${p.id}`} date={p.at} title={p.opening ? "ماندهٔ اول دوره (طلب او)" : p.number} sub={p.supplier_ref ? `فاکتور فروشنده ${p.supplier_ref}` : p.items_count ? `${num(p.items_count)} قلم` : undefined}
         amount={p.total} muted={p.status === "void"} onClick={() => setOpened({ type: "purchase", id: p.id })}
-        badge={p.status === "void" ? <Badge status="void" /> : p.due > 0 ? <span className="badge bg-amber-500/15 text-amber-700">مانده {money(p.due, false)}</span> : <Badge status="paid" />} />) })),
+        badge={p.status === "void" ? <Badge status="void" /> : p.due == null ? <Badge status={p.status} /> : p.due > 0 ? <span className="badge bg-amber-500/15 text-amber-700">مانده {money(p.due, false)}</span> : <Badge status="paid" />} />) })),
     ...buyDocs.map((d) => ({ key: `d${d.id}`, date: d.at, el: (
-      <DocRow key={`d${d.id}`} date={d.at} title={`${d.kind_label} ${d.doc_no}`} amount={d.kind === "purchase_return" ? -d.total : d.total}
+      <DocRow key={`d${d.id}`} date={d.at} title={`${d.kind_label} ${d.doc_no}`} amount={signed(d.total, d.kind === "purchase_return")}
         sub={d.discount > 0 ? `تخفیف ${money(d.discount, false)}` : undefined}
         badge={<span className="badge bg-amber-500/10 text-amber-700 dark:text-amber-300">{SOURCE_FA[d.source] ?? d.source}</span>}
         onClick={() => setOpened({ type: "doc", id: d.id })} />) })),
@@ -154,8 +156,8 @@ function CustomerView({ id }: { id: number }) {
           {b.receivable > 0 && <button className="btn btn-sm mt-1 w-full py-1 text-xs" onClick={() => setReceive(true)}><HandCoins size={13} />دریافت بدهی</button>}</div>
         <div className="rounded-2xl bg-violet-500/10 p-3"><div className="muted text-xs">تعداد مراجعه</div><div className="num font-bold">{num(new Set((data.history ?? []).map((h: any) => h.date.slice(0, 10))).size)}</div>{data.history?.[0] && <div className="muted text-[11px]">آخرین: {jdate(data.history[0].date)}</div>}</div>
         {isSeller && <>
-          <div className="rounded-2xl bg-pink-500/10 p-3"><div className="muted text-xs">خرید ما از این شخص</div><div className="num font-bold">{money(boughtFromThem)}</div><div className="muted text-[11px]">{num(buyDocs.length + purchases.filter((p) => !p.opening).length)} فاکتور خرید</div></div>
-          <div className="rounded-2xl bg-rose-500/10 p-3"><div className="muted text-xs">بدهی ما به او</div><div className="num font-bold">{money(data.we_owe ?? 0)}</div>
+          <div className="rounded-2xl bg-pink-500/10 p-3"><div className="muted text-xs">خرید ما از این شخص</div><div className="num font-bold">{boughtFromThem == null ? "—" : money(boughtFromThem)}</div><div className="muted text-[11px]">{num(buyDocs.length + purchases.filter((p) => !p.opening).length)} فاکتور خرید</div></div>
+          <div className="rounded-2xl bg-rose-500/10 p-3"><div className="muted text-xs">بدهی ما به او</div><div className="num font-bold">{hidden ? "—" : money(data.we_owe ?? 0)}</div>
             {data.suppliers?.[0] && <button className="btn btn-sm mt-1 w-full py-1 text-xs" onClick={() => setOpened({ type: "supplier", id: data.suppliers[0].id })}><Truck size={13} />حساب فروشنده</button>}</div>
         </>}
       </div>

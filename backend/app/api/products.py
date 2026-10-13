@@ -520,21 +520,28 @@ def product_profit(db: Session, start: date | None = None, end: date | None = No
     """Revenue (after discounts), cost of goods sold and gross profit per product, per month and per sales channel."""
     s = datetime.combine(start, datetime.min.time()) if start else None
     e = datetime.combine(end, datetime.max.time()) if end else None
-    q = (select(InvoiceItem, Invoice.issued_at, Invoice.channel).join(Invoice, Invoice.id == InvoiceItem.invoice_id)
-         .where(InvoiceItem.product_id.is_not(None), Invoice.status != "void"))
-    if s:
-        q = q.where(Invoice.issued_at >= s)
-    if e:
-        q = q.where(Invoice.issued_at <= e)
-    if channel in ("online", "in_person"):
-        q = q.where(Invoice.channel == "online") if channel == "online" else q.where(or_(Invoice.channel.is_(None), Invoice.channel == "in_person"))
-    rows = db.execute(q).all() if channel != "history" else []
-    cogs: dict[int, int] = defaultdict(int)
+    from ..services.reports import _returned, _sold, _undo
+
+    # as in the books: each sale on its invoice's day; an invoice returned later (voided after its day) counts negative
+    # on the day of the return; one cancelled as a mistake never happened (neither side)
+    lo, hi = s or datetime(1900, 1, 1), e or datetime(2999, 12, 31)
+    undo = _undo()
+
+    def base(when):  # noqa: ANN001, ANN202
+        q = (select(InvoiceItem, when, Invoice.channel).select_from(InvoiceItem).join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+             .where(InvoiceItem.product_id.is_not(None)))
+        if channel in ("online", "in_person"):
+            q = q.where(Invoice.channel == "online") if channel == "online" else q.where(or_(Invoice.channel.is_(None), Invoice.channel == "in_person"))
+        return q
+    rows = ([(it, at, ch, 1) for it, at, ch in db.execute(_sold(base(Invoice.issued_at), lo, hi, undo))]
+            + [(it, at, ch, -1) for it, at, ch in db.execute(_returned(base(undo.c.at), lo, hi, undo))]) if channel != "history" else []
+    sold_cost: dict[int, int] = defaultdict(int)
+    back_cost: dict[int, int] = defaultdict(int)
     estimated: set[int] = set()
-    ids = [it.id for it, _, _ in rows]
+    ids = list({it.id for it, *_ in rows})
     for i in range(0, len(ids), 900):
         for m in db.scalars(select(StockMove).where(StockMove.invoice_item_id.in_(ids[i:i + 900]), StockMove.kind.in_(("sale", "sale_return")))):
-            cogs[m.invoice_item_id] += m.cost if m.kind == "sale" else -m.cost
+            (sold_cost if m.kind == "sale" else back_cost)[m.invoice_item_id] += m.cost
             if m.estimated:
                 estimated.add(m.invoice_item_id)
     products = {p.id: p for p in db.scalars(select(Product))}
@@ -542,21 +549,21 @@ def product_profit(db: Session, start: date | None = None, end: date | None = No
     months: dict[str, dict] = {}
     chans: dict[str, dict] = {}
     tot = {"qty": 0, "revenue": 0, "cogs": 0, "profit": 0, "estimated": 0}
-    for it, at, ch in rows:
-        rev = it.net_amount if it.net_amount is not None else it.amount
-        c = cogs[it.id]
+    for it, at, ch, k in rows:
+        rev = k * (it.net_amount if it.net_amount is not None else it.amount)
+        c = sold_cost[it.id] if k > 0 else -back_cost[it.id]
         p = products.get(it.product_id)
         r = per.setdefault(it.product_id, {"id": it.product_id, "code": p.code if p else None, "sku": p.sku if p else None,
                                            "name": p.name if p else it.description, "qty": 0, "revenue": 0, "cogs": 0, "profit": 0,
                                            "online": 0, "estimated": False})
         for bucket in (r, tot, months.setdefault(_jm(at), {"key": _jm(at), "qty": 0, "revenue": 0, "cogs": 0, "profit": 0}),
                        chans.setdefault(ch or "in_person", {"channel": ch or "in_person", "qty": 0, "revenue": 0, "cogs": 0, "profit": 0})):
-            bucket["qty"] += it.quantity
+            bucket["qty"] += k * it.quantity
             bucket["revenue"] += rev
             bucket["cogs"] += c
             bucket["profit"] += rev - c
         if ch == "online":
-            r["online"] += it.quantity
+            r["online"] += k * it.quantity
         if it.id in estimated:
             r["estimated"] = True
             tot["estimated"] += 1

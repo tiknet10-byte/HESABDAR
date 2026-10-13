@@ -61,6 +61,7 @@ def init_db() -> None:
         from .services import inventory
 
         inventory.ensure_chart(db)  # inventory, supplier payables, product revenue, cost of goods sold
+        inventory.recost_if_engine_changed(db)  # once after the costing engine changed: voided/cancelled sales, value == 1300
         from .services import capital
 
         capital.ensure_chart(db)  # gold / coins / currency, gain on selling them

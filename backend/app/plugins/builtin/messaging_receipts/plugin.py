@@ -149,6 +149,25 @@ def _fmt_toman(rial: int | None) -> str:
     return f"{(rial or 0) // 10:,}"
 
 
+_no_secret_alert: list = [None]  # when the owner was last told (once a day is enough)
+
+
+def _warn_no_secret() -> None:
+    """Messages come from Meta but no App Secret is set (e.g. right after the update that started checking it):
+    they are refused, so tell the owner how to fix it instead of failing silently."""
+    from ....services.audit import raise_alert
+
+    now = local_now()
+    if _no_secret_alert[0] is not None and now - _no_secret_alert[0] < timedelta(days=1):
+        return
+    _no_secret_alert[0] = now
+    with SessionLocal() as db:
+        raise_alert(db, "messaging_no_app_secret", "پیام‌های واتساپ/اینستاگرام دریافت نمی‌شوند",
+                    "برای امنیت، برنامه فقط پیام‌هایی را می‌پذیرد که امضای متا را دارند. در «تنظیمات ← افزونه‌ها ← رسیدهای پیام‌رسان» "
+                    "کلید App Secret برنامهٔ متا را وارد کنید (از developers.facebook.com ← تنظیمات برنامه ← Basic).", level="danger")
+        db.commit()
+
+
 def handle_incoming(db: Session, channel: str, sender: str, text: str = "", image: bytes | None = None,
                     image_type: str = "image/jpeg", config: dict | None = None) -> dict:
     config = config or {}
@@ -355,6 +374,7 @@ class Plugin(BasePlugin):
             raw = await request.body()
             secret = str(plugin.ctx.config.get("app_secret") or "").strip()  # a space copied with it would refuse all
             if not secret:
+                await asyncio.to_thread(_warn_no_secret)
                 raise HTTPException(401, "App Secret متا در تنظیمات افزونه وارد نشده است")
             if not meta_signature_ok(raw, request.headers.get("X-Hub-Signature-256"), secret):
                 raise HTTPException(401, "invalid signature")

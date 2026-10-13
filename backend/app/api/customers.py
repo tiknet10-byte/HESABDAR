@@ -248,7 +248,11 @@ def bulk_delete(body: BulkDeleteIn, db: Session = Depends(get_db), user=Depends(
 
 
 @router.get("/{cid}")
-def get_customer(cid: int, db: Session = Depends(get_db), _=Depends(require("read"))):
+def get_customer(cid: int, db: Session = Depends(get_db), user=Depends(require("read"))):
+    from ..core.security import has_permission
+    from .products import _doc
+
+    costs = has_permission(user.role, "reports")  # what we bought from a seller / owe them: management only
     c = db.get(Customer, cid) or _404()
     invoices = db.scalars(select(Invoice).where(Invoice.customer_id == cid).order_by(Invoice.issued_at.desc())).all()
     deposits = db.scalars(select(Deposit).where(Deposit.customer_id == cid).order_by(Deposit.received_at.desc())).all()
@@ -262,12 +266,13 @@ def get_customer(cid: int, db: Session = Depends(get_db), _=Depends(require("rea
                            .order_by(TradeDoc.at.desc(), TradeDoc.id.desc())))
     return _c(c, {
         "balance": accounting.customer_balance(db, cid),
-        "we_owe": sum(p.total - p.paid for p in purchases if p.status in ("open", "partial")),  # to this person as a seller
+        # to this person as a seller
+        "we_owe": sum(p.total - p.paid for p in purchases if p.status in ("open", "partial")) if costs else None,
         "suppliers": [{"id": x.id, "name": x.name} for x in sups],
-        "purchases": [{"id": p.id, "number": p.number, "at": p.at.isoformat(timespec="minutes"), "total": p.total, "paid": p.paid,
-                       "due": p.total - p.paid, "status": p.status, "items_count": len(p.items), "opening": p.subtotal == 0 and not p.items,
+        "purchases": [{"id": p.id, "number": p.number, "at": p.at.isoformat(timespec="minutes"), "total": p.total if costs else None,
+                       "paid": p.paid if costs else None, "due": p.total - p.paid if costs else None, "status": p.status, "items_count": len(p.items), "opening": p.subtotal == 0 and not p.items,
                        "supplier_ref": p.supplier_ref, "notes": p.notes} for p in purchases],
-        "docs": [tizpardaz.doc_out(db, d, people={c.id: c}) for d in docs],
+        "docs": [_doc(tizpardaz.doc_out(db, d, people={c.id: c}), costs) for d in docs],
         "invoices": [{"id": i.id, "number": i.number, "issued_at": i.issued_at.isoformat(), "total": i.total, "paid": i.paid,
                       "status": i.status, "items": [it.description for it in i.items]} for i in invoices],
         "deposits": [{"id": d.id, "amount": d.amount, "status": d.status, "received_at": d.received_at.isoformat(),
@@ -325,7 +330,8 @@ def _trade_history(db: Session, cid: int) -> list[dict]:
         name = names.get(h.product_id) or h.description
         out.append({"date": h.at.isoformat(timespec="minutes"), "service": f"{'برگشت: ' if h.kind == 'sale_return' else ''}{name}"
                     + (f" × {h.qty}" if h.qty and h.qty != 1 else ""), "staff": None,
-                    "amount": -h.amount if h.kind == "sale_return" else h.amount, "source": h.source, "product": True, "doc_id": h.doc_id,
+                    # after its share of the invoice discount (as the customer's "spent" total counts it)
+                    "amount": (-1 if h.kind == "sale_return" else 1) * (h.net_amount if h.net_amount is not None else h.amount), "source": h.source, "product": True, "doc_id": h.doc_id,
                     "notes": f"سند {h.doc_no}" if h.doc_no else None})
     return out
 

@@ -668,3 +668,56 @@ def test_a_product_removed_from_the_website_is_not_linked_or_priced(client, shop
     out = _sync(client)
     assert out["catalog"]["linked"] == 1
     assert client.get(f"/api/products/{p['id']}").json()["online_price"] == 4_000_000
+
+
+def test_website_shipping_is_product_sales_and_no_service_deposit_pays_it(client, shop, accounts):
+    """Shipping / tax / fee rows of a website order are part of the product sale (4200), never a service line, and a
+    بیعانه (prepayment for services) cannot pay them."""
+    sp = shop.add_product("کرم گ۸ ارسال", "G8-SHIP-1", 100_000, stock=10)
+    dep = client.post("/api/deposits", json={"customer_name": "ارسال گ۸", "customer_mobile": "09151080031", "amount": 300_000,
+                                             "payment_account_id": next(iter(accounts.values()))}).json()
+    _connect(client, shop)
+    before = {r["code"]: r for r in client.get("/api/ledger/trial-balance").json()["rows"]}
+    o = shop.add_order([(sp, 1)], phone="09151080031", first="ارسال", last="گ۸", shipping=20_000, status="on-hold", paid=False)
+    _sync(client)
+    row = _orders(client)[o["id"]]
+    inv = client.get(f"/api/invoices/{row['invoice_id']}").json()
+    ship = [i for i in inv["items"] if not i.get("product_id")]
+    assert ship and all(i["kind"] == "extra" for i in ship)
+    after = {r["code"]: r for r in client.get("/api/ledger/trial-balance").json()["rows"]}
+    sales = after["4200"]["balance"] - (before["4200"]["balance"] if "4200" in before else 0)
+    assert sales == inv["total"] == 1_200_000  # 100,000 + 20,000 toman, all product sales
+    assert inv["due"] == 1_200_000  # not paid yet: the service deposit still can't pay the product or its shipping
+    r = client.post(f"/api/invoices/{inv['id']}/apply-deposit", json={"deposit_id": dep["id"]})
+    assert r.status_code == 400 and "خدمت" in r.json()["detail"]
+    _balanced(client)
+
+
+def test_clinic_money_survives_two_changes_of_the_order(client, shop):
+    """Cash on delivery paid at the clinic, then the order is changed twice on the website: the clinic money keeps
+    paying the rebooked invoice, and the website's own payment is never booked on top of it."""
+    sp = shop.add_product("کرم دو تغییر گ۸", "G8-TWICE-1", 200_000, stock=10)
+    gw = _connect(client, shop)
+    cash = client.post("/api/accounts", json={"kind": "cash", "name": f"صندوق دو تغییر {shop.ids}"}).json()["id"]
+    a = shop.add_order([(sp, 3)], status="on-hold", paid=False, phone="09151080041", first="دو", last="تغییر", method="cod",
+                       created=datetime.now() - timedelta(days=1))
+    _sync(client)
+    inv0 = _orders(client)[a["id"]]["invoice_id"]
+    assert client.post(f"/api/invoices/{inv0}/payments", json={"payment_account_id": cash, "amount": 6_000_000}).status_code == 200
+    li = a["line_items"][0]
+    for q in (2, 1):
+        li["quantity"], li["subtotal"], li["total"], a["total"] = q, f"{200000 * q}.00", f"{200000 * q}.00", f"{200000 * q}.00"
+        shop._touch(a)
+        _sync(client)
+        inv = client.get(f"/api/invoices/{_orders(client)[a['id']]['invoice_id']}").json()
+        assert inv["total"] == 2_000_000 * q and inv["paid"] == inv["total"]  # paid by the clinic money kept as credit
+    shop.set_status(a["id"], "completed", paid=True)
+    _sync(client)
+    inv = client.get(f"/api/invoices/{_orders(client)[a['id']]['invoice_id']}").json()
+    assert inv["paid"] == inv["total"] == 2_000_000
+    assert sum(v for _, v in _moves(gw)) == 0  # nothing booked on the website's gateway: it received nothing
+    assert sum(v for _, v in _moves(cash)) == 6_000_000  # the clinic money is all still there
+    with SessionLocal() as db:
+        held = sum(d.amount for d in db.scalars(select(Deposit).where(Deposit.customer_id == inv["customer_id"], Deposit.status == "held")))
+    assert held == 4_000_000  # the rest is the customer's credit
+    _balanced(client)

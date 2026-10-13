@@ -8,6 +8,8 @@ import { useApi, useToast } from "../lib/hooks";
 import { formatJ } from "../lib/jalali";
 
 export const SOURCE_FA: Record<string, string> = { tizpardaz: "تیزپرداز", chehreh: "چهره" };
+// amounts hidden from this user (purchase prices, what we owe a seller: management only) come as null
+const amt = (x: number | null | undefined, unit = true) => (x == null ? "—" : money(x, unit));
 
 /** An invoice brought over from the previous software (Tizpardaz): its items, prices, discount and what was paid. */
 export function TradeDocView({ id }: { id: number }) {
@@ -33,19 +35,19 @@ export function TradeDocView({ id }: { id: number }) {
                 <td className="num muted">{num(k + 1)}</td>
                 <td>{i.code && <span className="num muted">{i.code} </span>}<b>{i.name}</b>{!i.product_id && <div className="text-[10px] text-amber-600">به کالای سیستم وصل نیست</div>}</td>
                 <td className="num">{num(i.qty)}</td>
-                <td className="num">{money(i.unit_price, false)}</td>
-                <td className="num font-semibold">{money(i.amount, false)}</td>
-                {sale && <td className="num">{i.profit != null ? money(i.profit, false) : "—"}</td>}
+                <td className="num">{amt(i.unit_price, false)}</td>
+                <td className="num font-semibold">{amt(i.amount, false)}</td>
+                {sale && <td className="num">{amt(i.profit, false)}</td>}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
       <div className="space-y-1 rounded-2xl p-3" style={{ background: "var(--surface)" }}>
-        <div className="flex justify-between"><span className="muted">جمع کالاها</span><span className="num">{money(d.items_total)}</span></div>
+        <div className="flex justify-between"><span className="muted">جمع کالاها</span><span className="num">{amt(d.items_total)}</span></div>
         {d.discount > 0 && <div className="flex justify-between text-emerald-700 dark:text-emerald-300"><span>تخفیف</span><span className="num">− {money(d.discount)}</span></div>}
         {d.additions > 0 && <div className="flex justify-between"><span className="muted">هزینه‌های اضافه (حمل، مالیات…)</span><span className="num">+ {money(d.additions)}</span></div>}
-        <div className="flex justify-between font-extrabold"><span>مبلغ فاکتور</span><span className="num">{money(d.total)}</span></div>
+        <div className="flex justify-between font-extrabold"><span>مبلغ فاکتور</span><span className="num">{amt(d.total)}</span></div>
         {d.paid > 0 && <div className="flex justify-between"><span className="muted">{sale ? "دریافت‌شده" : "پرداخت‌شده"} همان موقع</span><span className="num">{money(d.paid)}</span></div>}
       </div>
       {d.extras?.length > 0 && (
@@ -65,11 +67,11 @@ export function TradeDocView({ id }: { id: number }) {
 }
 
 /** One row of an invoice list (here or brought over) that opens its details. */
-export function DocRow({ date, title, sub, amount, badge, onClick, muted }: { date: string; title: React.ReactNode; sub?: React.ReactNode; amount: number; badge?: React.ReactNode; onClick: () => void; muted?: boolean }) {
+export function DocRow({ date, title, sub, amount, badge, onClick, muted }: { date: string; title: React.ReactNode; sub?: React.ReactNode; amount: number | null; badge?: React.ReactNode; onClick: () => void; muted?: boolean }) {
   return (
     <button type="button" onClick={onClick} className={`flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2 text-right transition hover:bg-violet-500/10 ${muted ? "opacity-60" : ""}`} style={{ background: "var(--surface)" }}>
       <span className="min-w-0"><span className="muted num ml-2 text-xs">{formatJ(date, false)}</span><b>{title}</b>{sub && <span className="muted text-xs"> · {sub}</span>}</span>
-      <span className="flex shrink-0 items-center gap-2"><span className="num font-semibold">{money(amount)}</span>{badge}<FileText size={14} className="muted" /></span>
+      <span className="flex shrink-0 items-center gap-2"><span className="num font-semibold">{amt(amount)}</span>{badge}<FileText size={14} className="muted" /></span>
     </button>
   );
 }
@@ -112,9 +114,9 @@ export function SupplierView({ id, onOpenPurchase, onChange }: { id: number; onO
         </div>
       )}
       <div className="grid grid-cols-3 gap-2">
-        <div className="rounded-2xl bg-amber-500/10 p-3"><div className="muted text-xs">بدهی ما به او</div><div className="num font-bold">{money(s.owed)}</div></div>
-        <div className="rounded-2xl bg-sky-500/10 p-3"><div className="muted text-xs">خرید در این سیستم</div><div className="num font-bold">{money(s.bought)}</div></div>
-        <div className="rounded-2xl bg-violet-500/10 p-3"><div className="muted text-xs">خرید در تیزپرداز ({num(s.history_count)} فاکتور)</div><div className="num font-bold">{money(s.history_total)}</div></div>
+        <div className="rounded-2xl bg-amber-500/10 p-3"><div className="muted text-xs">بدهی ما به او</div><div className="num font-bold">{amt(s.owed)}</div></div>
+        <div className="rounded-2xl bg-sky-500/10 p-3"><div className="muted text-xs">خرید در این سیستم</div><div className="num font-bold">{amt(s.bought)}</div></div>
+        <div className="rounded-2xl bg-violet-500/10 p-3"><div className="muted text-xs">خرید در تیزپرداز ({num(s.history_count)} فاکتور)</div><div className="num font-bold">{amt(s.history_total)}</div></div>
       </div>
       <div>
         <div className="mb-1 font-bold">فاکتورهای خرید از این فروشنده</div>
@@ -123,7 +125,7 @@ export function SupplierView({ id, onOpenPurchase, onChange }: { id: number; onO
             {s.purchases.map((p: any) => (
               <DocRow key={`p${p.id}`} date={p.at} title={p.items_count ? p.number : "ماندهٔ اول دوره"} sub={p.supplier_ref ? `فاکتور فروشنده ${p.supplier_ref}` : p.items_count ? `${num(p.items_count)} قلم` : p.notes}
                 amount={p.total} muted={p.status === "void"} onClick={() => onOpenPurchase(p.id)}
-                badge={p.status === "void" ? <Badge status="void" /> : p.due > 0 ? <span className="badge bg-amber-500/15 text-amber-700">مانده {money(p.due, false)}</span> : <Badge status="paid" />} />
+                badge={p.status === "void" ? <Badge status="void" /> : p.due == null ? <Badge status={p.status} /> : p.due > 0 ? <span className="badge bg-amber-500/15 text-amber-700">مانده {money(p.due, false)}</span> : <Badge status="paid" />} />
             ))}
             {s.docs.map((d: any) => (
               <DocRow key={`d${d.id}`} date={d.at} title={`${d.kind_label} ${d.doc_no}`} amount={d.total} onClick={() => setDoc(d.id)}

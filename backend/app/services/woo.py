@@ -30,7 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..core.security import decrypt_secret, encrypt_secret
-from ..models import Customer, Invoice, Payment, PaymentAccount, Product, WooLog, WooOrder, WooOutbox, WooProduct, local_now
+from ..models import Customer, Deposit, Invoice, Payment, PaymentAccount, Product, WooLog, WooOrder, WooOutbox, WooProduct, local_now
 from . import accounting, inventory, routing, settings_store
 from .customer_merge import person_key
 from .textutil import normalize_mobile
@@ -697,7 +697,7 @@ def _book(db: Session, wo: WooOrder, o: dict, pl: dict, refunds: list[dict], f: 
         p = _product(db, x["li"], x["unit_price"])
         items.append({"product_id": p.id, "quantity": x["quantity"], "unit_price": x["unit_price"], "discount": x["discount"],
                       "description": (x["li"].get("name") or p.name)[:256]})
-    items += [{k: v for k, v in x.items()} for x in pl["extras"]]
+    items += [{**x, "kind": "extra"} for x in pl["extras"]]  # shipping / tax / fees: product sales, not a service
     wo.customer_id = customer.id
     if not items:
         wo.state, wo.invoice_id = "skipped", None
@@ -725,8 +725,12 @@ def _undo(db: Session, inv: Invoice, reason: str) -> tuple[list[Payment], list[i
     payments that were on it (their money is booked again by the caller) and the customer credits made of money
     received here at the clinic for it (e.g. «دریافت بدهی»): that money is real, it stays the customer's."""
     pays = list(db.scalars(select(Payment).where(Payment.invoice_id == inv.id, Payment.amount > 0)))
+    # clinic money already kept as a credit and used on this invoice (an earlier change of the order): the void opens
+    # it again, and it must pay the rebooked invoice again (not be forgotten while the website's payment is booked twice)
+    used = [d.id for d in db.scalars(select(Deposit).where(Deposit.applied_invoice_id == inv.id, Deposit.status == "applied"))
+            if accounting.is_credit(d)]
     accounting.void_invoice(db, inv, reason=reason, payments="cancel")
-    customer, kept = db.get(Customer, inv.customer_id), []
+    customer, kept = db.get(Customer, inv.customer_id), list(used)
     for p in pays:
         if p.source != SOURCE:
             dep = accounting.record_deposit(db, customer=customer, amount=p.amount, payment_account=db.get(PaymentAccount, p.payment_account_id),

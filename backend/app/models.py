@@ -243,6 +243,8 @@ class InvoiceItem(Base):
     unit_price: Mapped[int] = mapped_column(BigInteger)
     discount: Mapped[int] = mapped_column(BigInteger, default=0)
     net_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # after invoice-level discount share
+    # "extra": a website order's shipping / tax / fee / rounding row - product sales (4200), not a service
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     commission_percent: Mapped[float | None] = mapped_column(Float, nullable=True)  # staff % at issue time
     commission_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # staff share (Rial)
     invoice: Mapped[Invoice] = relationship(back_populates="items")

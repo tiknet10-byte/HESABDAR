@@ -331,3 +331,23 @@ def test_undo_forgets_the_automatic_codes_of_the_customers_it_removed(client):
     with SessionLocal() as db:
         auto = db.get(ImportBatch, pv["id"]).summary["auto_codes"]
     assert auto == {str(minoo["id"]): minoo["code"]}  # Minoo's number is still one given here, Jila's is forgotten
+
+
+def test_an_automatic_code_of_a_merged_duplicate_is_not_matched_to_another_person(client):
+    pv = _post(client, "c5.xlsx", _xlsx([["نام مشتری", "موبایل"], ["مهسا ادغام جی‌چهار", "09151040901"],
+                                          ["مهسا ادغام جی‌چهار", "09151040902"]]), "customers").json()
+    client.post(f"/api/import/legacy/{pv['id']}/commit", json={})
+    a, b = _customer(client, "09151040901"), _customer(client, "09151040902")
+    assert client.post("/api/customers/merge", json={"keep_id": a["id"], "drop_ids": [b["id"]]}).status_code == 200
+    kept = client.get(f"/api/customers/{a['id']}").json()
+    assert b["code"] in (kept.get("other_codes") or [])
+    # the old software later gives the dropped record's automatic number to someone else
+    dep = _xlsx([["کد مشتری", "نام مشتری", "موبایل", "مبلغ بیعانه"], [b["code"], "رویا دیگری جی‌چهار", "09151040903", 700_000]])
+    pv2 = _post(client, "d5.xlsx", dep, "deposits").json()
+    r = client.post(f"/api/import/legacy/{pv2['id']}/commit", json={}).json()["result"]
+    assert r["customers_new"] == 1
+    roya = _customer(client, "09151040903")
+    assert _balance(client, roya["id"])["deposits_held"] == 700_000
+    assert _balance(client, a["id"])["deposits_held"] == 0
+    kept = client.get(f"/api/customers/{a['id']}").json()
+    assert kept["code"] == a["code"] and b["code"] not in (kept.get("other_codes") or [])

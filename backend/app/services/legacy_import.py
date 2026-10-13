@@ -729,6 +729,12 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
                 from .customer_merge import find_by_other_code
                 c = find_by_other_code(db, code)
                 merged_code = c is not None
+                if c is not None and code in set(auto.values()) and not same_person(c, row):
+                    # an automatic code of a merged duplicate: the old software may give that number to someone else
+                    c.other_codes = [x for x in (c.other_codes or []) if x != code] or None  # its own code stays
+                    db.flush()
+                    counts["codes_moved"] = counts.get("codes_moved", 0) + 1
+                    c, merged_code = None, False
             else:
                 merged_code = False
             if c is not None and not merged_code and (c.source != "import" or is_auto(c)):

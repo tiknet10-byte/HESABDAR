@@ -132,7 +132,15 @@ def test_whatsapp_and_instagram_webhooks_need_meta_signature(client, receipts_on
     before = _count(InboundReceipt)
     # no App Secret in the settings -> nothing gets in, even with a signature
     monkeypatch.setitem(manager.plugins["messaging_receipts"].ctx.config, "app_secret", "")
+    from app.plugins.builtin.messaging_receipts import plugin as mr
+
+    monkeypatch.setattr(mr, "_no_secret_alert", [None])
+    alerts = len(client.get("/api/alerts").json())
     assert anon.post(WA, content=raw, headers={"X-Hub-Signature-256": _sig(raw)}).status_code == 401
+    assert anon.post(WA, content=raw, headers={"X-Hub-Signature-256": _sig(raw)}).status_code == 401
+    # the owner is told once (not on every message) how to fix it
+    new = client.get("/api/alerts").json()
+    assert len(new) == alerts + 1 and any("App Secret" in (a.get("message") or "") for a in new)
     monkeypatch.undo()
     for url, body in ((WA, raw), (IG, ig)):
         assert anon.post(url, content=body, headers={"Content-Type": "text/plain"}).status_code == 401  # a web page / LAN post

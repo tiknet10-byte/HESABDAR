@@ -135,6 +135,14 @@ def _per_account(rows: list[dict]) -> list[dict]:
     return sorted(({**a, "value": a["in"] - a["out"]} for a in acc.values()), key=lambda x: -x["in"])
 
 
+# a website order's shipping / tax / fee rows belong to the product sale (booked on 4200), not to any service line
+NOT_EXTRA = func.coalesce(InvoiceItem.kind, "") != "extra"
+
+
+def _product_side(it: InvoiceItem) -> bool:
+    return bool(it.product_id) or it.kind == "extra"
+
+
 def _net(it: InvoiceItem, inv: Invoice) -> int:
     """An item's amount after its share of the invoice discount (as booked); older items without it: proportional."""
     if it.net_amount is not None:
@@ -199,7 +207,7 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
     for inv, k in signed:
         for it in inv.items:
             amt = k * _net(it, inv)
-            by_line[PRODUCTS_NAME if it.product_id else lines[it.line_id].name if it.line_id in lines else "سایر"] += amt
+            by_line[PRODUCTS_NAME if _product_side(it) else lines[it.line_id].name if it.line_id in lines else "سایر"] += amt
             key = it.description or "—"
             d = by_service.setdefault(key, {"name": key, "count": 0, "revenue": 0})
             d["count"] += k * it.quantity
@@ -227,7 +235,7 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
         "expenses": expenses,
         # gross profit of products = their sales - what they cost (COGS); services have no stock cost
         "cogs": (cogs := product_cogs(db, s, e)),
-        "product_revenue": (prod_rev := sum(k * _net(it, i) for i, k in signed for it in i.items if it.product_id)),
+        "product_revenue": (prod_rev := sum(k * _net(it, i) for i, k in signed for it in i.items if _product_side(it))),
         "product_profit": prod_rev - cogs,
         # forfeited deposits (no-shows): income of their line
         "forfeited": sum(int(x[2]) for x in forfeit_rows(db, s, e)),
@@ -482,7 +490,7 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
     # A return (invoice voided after its day) counts negative on its own day, as its sale and staff share in the books.
     undo = _undo()
     q = (select(InvoiceItem, Invoice.subtotal, Invoice.total).join(Invoice, Invoice.id == InvoiceItem.invoice_id)
-         .where(InvoiceItem.product_id.is_(None)))
+         .where(InvoiceItem.product_id.is_(None), NOT_EXTRA))
     rows = [(*r, 1) for r in db.execute(_sold(q, s, e, undo))] + [(*r, -1) for r in db.execute(_returned(q, s, e, undo))]
     per_staff: dict = {}
     per_line: dict = {}
@@ -583,12 +591,13 @@ def _revenue_rows(db: Session, s: datetime, e: datetime, source: str = "all") ->
         for when, filt, k in ((Invoice.issued_at, _sold, 1), (undo.c.at, _returned, -1)):
             day_of = func.date(when)
             q = filt(select(day_of, InvoiceItem.line_id, InvoiceItem.staff_id, InvoiceItem.service_id,
-                            InvoiceItem.product_id, InvoiceItem.description, func.sum(amt), func.sum(InvoiceItem.quantity))
+                            InvoiceItem.product_id, InvoiceItem.description, func.sum(amt), func.sum(InvoiceItem.quantity),
+                            InvoiceItem.kind)
                      .select_from(InvoiceItem).join(Invoice, Invoice.id == InvoiceItem.invoice_id), s, e, undo)
             q = q.group_by(day_of, InvoiceItem.line_id, InvoiceItem.staff_id, InvoiceItem.service_id, InvoiceItem.product_id,
-                           InvoiceItem.description)
-            for day, line_id, staff_id, service_id, product_id, desc, total, n in db.execute(q):
-                rows.append({"day": str(day), "line_id": PRODUCTS_LINE if product_id else line_id, "staff_id": staff_id,
+                           InvoiceItem.description, InvoiceItem.kind)
+            for day, line_id, staff_id, service_id, product_id, desc, total, n, kind in db.execute(q):
+                rows.append({"day": str(day), "line_id": PRODUCTS_LINE if product_id or kind == "extra" else line_id, "staff_id": staff_id,
                              "service_id": service_id, "product_id": product_id, "name": desc,
                              "amount": k * int(total or 0), "count": k * int(n or 0), "old": False, "returned": k < 0})
     if source in ("all", "new"):
@@ -755,7 +764,7 @@ def staff_revenue_detail(db: Session, staff_id: int, start: date | None = None, 
     # services only (products are nobody's service); a return is listed negative on its own day, as in the totals
     item_q = (select(Invoice.issued_at, Customer.full_name, Customer.legacy_code, InvoiceItem.description, amt, Invoice.number, undo.c.at)
               .select_from(InvoiceItem).join(Invoice, Invoice.id == InvoiceItem.invoice_id).join(Customer, Customer.id == Invoice.customer_id)
-              .where(InvoiceItem.product_id.is_(None)))
+              .where(InvoiceItem.product_id.is_(None), NOT_EXTRA))
     hist_q = (select(Appointment.start_at, Customer.full_name, Customer.legacy_code, Service.name, Appointment.quoted_price, Appointment.notes)
               .join(Customer, Customer.id == Appointment.customer_id).outerjoin(Service, Service.id == Appointment.service_id)
               .where(_old_service(), Appointment.start_at.between(s, e)))
