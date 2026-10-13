@@ -90,7 +90,15 @@ and how to use it. Commit messages end with the attribution lines the session as
 * People: one list (customers) also holds sellers; the customer file shows sales and purchase invoices (here and
   Tizpardaz) with clickable details, what we owe them; `customer_merge.LINKED/RECORDS` = every table that belongs to
   a customer (merge moves them; a customer with any of them is never deleted).
-* Data reset (`services/maintenance.py`): TRANSACTIONS order is children-first (FKs) - add new tables there.
+* Data reset (`services/maintenance.py`): TRANSACTIONS order is children-first (FKs) - add new tables there
+  (`tests/test_g9_integration.py` fails when a table is missing).
+* Security (1.20.0): roles without `reports` (reception, staff) never get money totals, product costs or what we owe
+  sellers (backend returns null, UI shows «—»); `capital` = owner/admin. Login gives one 401 for every failure, the
+  owner can unlock a user, a password change revokes old tokens (`users.token_version`). Host header check
+  (`HESABDAR_ALLOWED_HOSTS` for names other than localhost / IPs). WhatsApp/Instagram webhooks need the Meta App Secret
+  (plugin setting); the receipts plugin is off on new installs; a chat receipt books a deposit only on a strong bank
+  match. Startup also: `reclass_forfeits`, `classify_credits`, `inventory.recost_if_engine_changed`, audit re-chain once.
+* Upgrade path is tested by `tests/test_y_upgrade.py` (starts the app on an older database).
 * Website shop (WooCommerce, `services/woo.py`, Settings > «فروشگاه سایت»): the local program **polls** the site
   every N minutes (the clinic PC is not reachable from the internet). Orders -> online invoices (customer by mobile;
   a namesake without mobile gets it; else new customer), payment on the chosen account when paid, cancel/refund ->
