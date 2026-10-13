@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect
 
-from app.api.system import DAY_MONEY, TODAY_FOR_ALL, csv_text
+from app.api.system import CSV_HEAD, DAY_MONEY, TODAY_FOR_ALL, csv_text
 from app.core import db as dbmod
 from app.core.config import get_settings
 from app.main import app
@@ -120,7 +120,8 @@ def test_sales_export_neutralises_formula_names(client, accounts, services):
     _, inv = _invoice(client, accounts, services, evil, "09151030004", 1_200_000, 0, description="-تخفیف=1+1")
     r = client.get("/api/reports/export.csv", params={"start": date.today().isoformat(), "end": date.today().isoformat()})
     assert r.status_code == 200
-    rows = list(csv.DictReader(io.StringIO(r.text.lstrip("﻿"))))
+    head = {v: k for k, v in CSV_HEAD.items()}  # the file's columns are in Persian
+    rows = [{head[k]: v for k, v in x.items()} for x in csv.DictReader(io.StringIO(r.text.lstrip("﻿")))]
     mine = [x for x in rows if x["number"] == inv["number"]]
     assert len(mine) == 1
     assert mine[0]["customer"] == "'" + evil and mine[0]["service"] == "'-تخفیف=1+1"

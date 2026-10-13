@@ -68,6 +68,9 @@ ACTIVE = {"processing", "on-hold", "completed"}  # real orders (the website took
 DEAD = {"cancelled", "refunded", "failed", "trash"}
 SOURCE = "woocommerce"
 CATALOG_EVERY = timedelta(hours=6)
+GONE_EVERY = timedelta(hours=1)  # how often the booked orders are looked up for the trash / deleted for good
+GONE_DAYS = 45  # orders placed in the last 45 days (an old order put in the trash is the website being tidied up)
+GONE_CONFIRM = 10  # orders missing from the website's list asked for one by one in a run
 MAX_ATTEMPTS = 20
 PER_PAGE = 100  # the most WooCommerce gives in one page
 SENT_META = "_hesabdar_sent"  # on a website product: the queued stock changes ("first-last" ids) it has already got
@@ -77,7 +80,9 @@ _transport: httpx.BaseTransport | None = None  # tests plug a fake website in he
 
 
 class WooError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None, code: str = "") -> None:
+        super().__init__(message)
+        self.status, self.code = status, code  # the website's answer (HTTP status, WooCommerce error code), if any
 
 
 # ------------------------------------------------------------------ settings
@@ -150,6 +155,9 @@ def save_config(db: Session, body: dict) -> dict:
     if (cfg["url"], cfg["key"]) != (old["url"], old["key"]) or cfg.get("start") != old.get("start"):
         st.pop("cursor", None)  # read the orders again from the start date
         st.pop("catalog_at", None)
+        if (cfg["url"], cfg["key"]) != (old["url"], old["key"]):  # maybe another website: its orders are the ones read from now on
+            st["site_since"] = local_now().isoformat()
+            st.pop("gone_at", None)
         _save_state(db, st)
     settings_store.set_value(db, CFG_KEY, {**cfg, "secret": encrypt_secret(cfg["secret"]) if cfg["secret"] else ""})
     db.flush()
@@ -212,7 +220,11 @@ class Client:
                 self.query_auth = False  # not the host: the key itself is wrong (it is not put in the address for nothing)
                 raise
         if r.status_code >= 400:
-            raise WooError(_err(r))
+            try:
+                code = str(r.json().get("code") or "")
+            except (ValueError, AttributeError):
+                code = ""
+            raise WooError(_err(r), r.status_code, code)
         try:
             return r.json(), r.headers
         except ValueError as exc:
@@ -614,11 +626,18 @@ def plan(o: dict, refunds: list[dict], f: int) -> dict:
                 by_product_qty[k] += q
                 by_product_amt[k] += a
     lines, extras, discount = [], [], 0
-    for li in o.get("line_items") or []:
+    order_lines = o.get("line_items") or []
+    last_row = {(int(li.get("variation_id") or 0) or int(li.get("product_id") or 0)): int(li["id"]) for li in order_lines}
+    for li in order_lines:
         k = int(li.get("variation_id") or 0) or int(li.get("product_id") or 0)
-        rq = by_line_qty.pop(int(li["id"]), 0) + by_product_qty.pop(k, 0)
-        ra = by_line_amt.pop(int(li["id"]), 0) + by_product_amt.pop(k, 0)
         qty0 = int(li.get("quantity") or 0)
+        rq, ra = by_line_qty.pop(int(li["id"]), 0), by_line_amt.pop(int(li["id"]), 0)
+        # a refund row that names no order row: as much as this row still has, the last row of the product the rest
+        pq, pa = by_product_qty.get(k, 0), by_product_amt.get(k, 0)
+        tq = pq if int(li["id"]) == last_row[k] else min(pq, max(qty0 - rq, 0))
+        ta = pa if int(li["id"]) == last_row[k] else (pa * tq // pq if pq else 0)
+        by_product_qty[k], by_product_amt[k] = pq - tq, pa - ta
+        rq, ra = rq + tq, ra + ta
         gross0, net0 = rial(li.get("subtotal"), f), rial(li.get("total"), f)
         qty, net = qty0 - rq, net0 - ra
         gross = gross0 - (gross0 * rq // qty0 if qty0 else 0)
@@ -819,7 +838,8 @@ def sync_order(db: Session, c: Client, cfg: dict, o: dict) -> str:
 
 
 STATUS_FA = {"pending": "در انتظار پرداخت", "processing": "در حال انجام", "on-hold": "در انتظار بررسی", "completed": "تکمیل‌شده",
-             "cancelled": "لغو", "refunded": "مسترد", "failed": "ناموفق", "trash": "حذف", "checkout-draft": "پیش‌نویس"}
+             "cancelled": "لغو", "refunded": "مسترد", "failed": "ناموفق", "trash": "حذف", "checkout-draft": "پیش‌نویس",
+             "deleted": "پاک‌شده از سایت"}
 
 
 def import_orders(db: Session, c: Client, cfg: dict) -> dict:
@@ -884,6 +904,84 @@ def import_orders(db: Session, c: Client, cfg: dict) -> dict:
     return dict(out)
 
 
+def check_gone(db: Session, c: Client, cfg: dict) -> dict:
+    """Orders moved to the website's trash, or deleted for good, are not in the website's list of orders (WooCommerce
+    leaves the trash out of it), so they are looked up by id now and then: the booked orders of the last weeks.
+    One in the trash is undone like a cancelled one; one deleted for good is only reported (what happened to its
+    money can't be seen any more): its invoice stays until a person voids it."""
+    since = local_now() - timedelta(days=GONE_DAYS)
+    q = (select(WooOrder).join(Invoice, Invoice.id == WooOrder.invoice_id)
+         .where(WooOrder.state == "booked", Invoice.status != "void", WooOrder.created >= since, WooOrder.status != "deleted"))
+    try:
+        site_since = datetime.fromisoformat(state(db).get("site_since") or "")
+    except ValueError:
+        site_since = None
+    if site_since:  # orders of a website connected before (another address or key) are not looked for on this one
+        q = q.where(WooOrder.synced_at >= site_since)
+    rows = {wo.order_id: wo for wo in db.scalars(q)}
+    ids, out = sorted(rows), defaultdict(int)
+    trashed: dict[int, dict] = {}
+    listed: set[int] = set()
+    exact = True  # the website gave only the orders asked for (an older one may not know `include`: nothing is guessed then)
+    try:
+        for i in range(0, len(ids), PER_PAGE):
+            chunk = ids[i:i + PER_PAGE]
+            ask = ",".join(map(str, chunk))
+            for o in c.all("/orders", status="trash", include=ask):
+                if int(o["id"]) in rows and o.get("status") == "trash":
+                    trashed[int(o["id"])] = o
+            found = {int(o["id"]) for o in c.all("/orders", include=ask)}
+            exact = exact and found <= set(chunk)
+            listed |= found
+        missing = [oid for oid in ids if oid not in trashed and oid not in listed] if exact else []
+        for oid in missing[:GONE_CONFIRM]:
+            try:
+                o = c.get(f"/orders/{oid}")
+            except WooError as exc:
+                if exc.status == 404 and exc.code.endswith("invalid_id"):  # WooCommerce: no such order (deleted for good)
+                    wo, inv = rows[oid], db.get(Invoice, rows[oid].invoice_id)
+                    wo.status, wo.note = "deleted", "این سفارش در سایت پاک شده است؛ اگر سفارش واقعی نبود، فاکتورش را در سیستم باطل کنید"
+                    msg = (f"سفارش سایت #{wo.number} در سایت پاک شده (در سطل زباله هم نیست). فاکتور {inv.number if inv else ''} آن "
+                           "دست نخورد؛ اگر سفارش واقعی نبود یا پولش برگشت داده شده، فاکتور را در سیستم باطل کنید.")
+                    note(db, msg, "warn")
+                    from .audit import raise_alert
+
+                    raise_alert(db, "woo_deleted", "سفارش سایت پاک شد", msg, ref_type="invoice", ref_id=wo.invoice_id)
+                    db.commit()
+                    out["deleted"] += 1
+                    continue
+                raise
+            if isinstance(o, dict) and int(o.get("id") or 0) == oid and o.get("status") == "trash":
+                trashed[oid] = o
+    except WooError as exc:
+        if exc.status is None:  # the website can't be reached: the run stops as it does for the orders
+            raise
+        log.info("woo: trash check skipped: %s", exc)
+        out["error"] = 1
+    for oid, o in trashed.items():
+        try:
+            with db.begin_nested():
+                result = sync_order(db, c, cfg, o)
+            db.commit()
+            out[result] += 1
+        except Exception as exc:  # noqa: BLE001 - like an order of the list: the others still go on
+            db.rollback()
+            log.exception("woo: trashed order %s", oid)
+            out["error"] += 1
+            note(db, f"سفارش سایت #{o.get('number') or oid} در سایت به سطل زباله رفته، ولی فاکتورش باطل نشد: {exc}", "error")
+            db.commit()
+    for oid in trashed:
+        wo = rows[oid]
+        if wo.state == "cancelled":
+            note(db, f"سفارش سایت #{wo.number} در سایت به سطل زباله رفت و فاکتورش باطل شد. سایت با این کار معمولاً موجودی "
+                     "کالاهایش را برنمی‌گرداند: در همین صفحه، «موجودی متفاوت» را ببینید.", "warn")
+    st = state(db)
+    st["gone_at"] = local_now().isoformat(timespec="seconds")
+    _save_state(db, st)
+    db.commit()
+    return dict(out)
+
+
 # ------------------------------------------------------------------ the job
 def run_sync(db: Session, force_catalog: bool = False) -> dict:
     """Read the website (products, orders) and send the stock changes. One run at a time."""
@@ -906,6 +1004,9 @@ def run_sync(db: Session, force_catalog: bool = False) -> dict:
                 db.commit()
             if cfg.get("enabled"):
                 out["orders"] = import_orders(db, c, cfg)
+                gone_at = _dt(state(db).get("gone_at"))
+                if gone_at is None or local_now() - gone_at > GONE_EVERY:
+                    out["gone"] = check_gone(db, c, cfg)
                 out["stock"] = push_stock(db, c, cfg)
             error = ""
         except WooError as exc:

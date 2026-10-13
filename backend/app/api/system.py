@@ -76,12 +76,17 @@ def csv_text(value):  # noqa: ANN001, ANN201
     return "'" + value if isinstance(value, str) and value.startswith(_FORMULA_START) else value
 
 
+CSV_HEAD = {"type": "نوع", "date": "تاریخ", "number": "شماره فاکتور", "invoice_date": "تاریخ فاکتور", "customer": "مشتری",
+            "service": "شرح", "qty": "تعداد", "unit_price": "فی (ریال)", "discount": "تخفیف ردیف (ریال)",
+            "net": "مبلغ پس از تخفیف فاکتور (ریال)"}
+
+
 @router.get("/reports/export.csv")
 def export_csv(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), _=Depends(require("reports"))):
     rows = reports.invoice_item_rows(db, start, end)
     buf = io.StringIO()
-    w = csv.DictWriter(buf, fieldnames=["number", "date", "customer", "service", "qty", "unit_price", "discount"])
-    w.writeheader()
+    w = csv.DictWriter(buf, fieldnames=list(CSV_HEAD))
+    w.writerow(CSV_HEAD)  # Persian column names (Excel opens the file as it is)
     w.writerows({k: csv_text(v) for k, v in r.items()} for r in rows)
     return StreamingResponse(iter(["﻿" + buf.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=sales.csv"})

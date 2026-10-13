@@ -47,6 +47,7 @@ from ..models import (
 from . import accounting, inventory, settings_store, woo_queue
 from .customer_merge import has_records, person_key
 from .legacy_import import ImportProblem, _amount, _key, _text, parse_date, read_table
+from .reports import _old_service
 from .service_catalog import keys_alike, name_key
 from .textutil import normalize_mobile, to_en_digits
 from .tizpardaz_defaults import SKU_MAP
@@ -176,7 +177,7 @@ def _spent(db: Session, ids: list[int]) -> dict[int, int]:
         return {}
     out: dict[int, int] = defaultdict(int)
     for cid, amt in db.execute(select(Appointment.customer_id, func.sum(Appointment.quoted_price))
-                               .where(Appointment.customer_id.in_(ids), Appointment.status == "done").group_by(Appointment.customer_id)):
+                               .where(Appointment.customer_id.in_(ids), _old_service()).group_by(Appointment.customer_id)):
         out[cid] += int(amt or 0)
     for cid, amt in db.execute(select(Invoice.customer_id, func.sum(Invoice.total)).where(Invoice.customer_id.in_(ids), Invoice.status != "void")
                                .group_by(Invoice.customer_id)):
@@ -393,7 +394,7 @@ def preview_products(db: Session, rows: list[list[object]], mapping: dict[str, i
     by_code = {p.code: p for p in products}
     by_sku = {(p.sku or "").lower(): p for p in products if p.sku}
     services = list(db.scalars(select(Service)))
-    sold = dict(db.execute(select(Appointment.service_id, func.count(Appointment.id)).where(Appointment.status == "done", Appointment.invoice_id.is_(None))
+    sold = dict(db.execute(select(Appointment.service_id, func.count(Appointment.id)).where(_old_service())
                            .group_by(Appointment.service_id)).all())
     pkeys = [(p, name_key(p.name)) for p in products]
     skeys = [(s, name_key(s.name)) for s in services]
@@ -548,8 +549,7 @@ def _relink_chehreh(db: Session, bid: int, old: int, new: int) -> None:
 def _service_to_product(db: Session, service: Service, product: Product, batch_id: int, created: dict) -> int:
     n = 0
     source = _chehreh_batches(db)
-    for a in list(db.scalars(select(Appointment).where(Appointment.service_id == service.id, Appointment.status == "done",
-                                                       Appointment.invoice_id.is_(None)))):
+    for a in list(db.scalars(select(Appointment).where(Appointment.service_id == service.id, _old_service()))):
         h = TradeHistory(batch_id=batch_id, source="chehreh", kind="sale", at=a.start_at, product_id=product.id, customer_id=a.customer_id,
                          description=service.name, qty=1, unit_price=int(a.quoted_price or 0), amount=int(a.quoted_price or 0),
                          fp=f"chehreh|appt|{a.id}")

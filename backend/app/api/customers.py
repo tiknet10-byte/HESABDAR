@@ -12,6 +12,8 @@ from ..models import (Appointment, Customer, Deposit, Invoice, JournalLine, Paym
                       Supplier, TradeDoc, TradeHistory)
 from ..services import accounting, customer_merge, routing, tizpardaz
 from ..services.audit import audit
+from ..services.legacy_import import IMPORT_NOTE
+from ..services.reports import _old_service
 from ..services.search import fa_like
 from ..services.textutil import normalize_mobile, to_en_digits
 from .deps import require
@@ -43,10 +45,10 @@ def _activity():  # noqa: ANN202
     inv = (select(Invoice.customer_id.label("cid"), func.sum(Invoice.total).label("amt"),
                   func.count(func.distinct(func.date(Invoice.issued_at))).label("n"), func.max(Invoice.issued_at).label("last"))
            .where(Invoice.status != "void").group_by(Invoice.customer_id).subquery())
-    # completed appointments without an invoice = history (e.g. receipts of the previous software)
+    # completed appointments without an invoice brought over from the previous software = history (its receipts)
     hist = (select(Appointment.customer_id.label("cid"), func.sum(Appointment.quoted_price).label("amt"),
                    func.count(func.distinct(func.date(Appointment.start_at))).label("n"), func.max(Appointment.start_at).label("last"))
-            .where(Appointment.status == "done", Appointment.invoice_id.is_(None)).group_by(Appointment.customer_id).subquery())
+            .where(_old_service()).group_by(Appointment.customer_id).subquery())
     held = (select(Deposit.customer_id.label("cid"), func.sum(Deposit.amount).label("amt"))
             .where(Deposit.status == "held").group_by(Deposit.customer_id).subquery())
     # product purchases brought over from the product accounting software (Tizpardaz); its returns count negative
@@ -312,8 +314,9 @@ def _service_history(db: Session, invoices: list[Invoice], appts: list[Appointme
         name = _svc_name(db, a.service_id)
         if not name and "خدمت: " in (a.notes or ""):
             name = a.notes.split("خدمت: ", 1)[1].split(" - ")[0]
+        imported = (a.notes or "").startswith(IMPORT_NOTE)  # set 'done' by hand (older versions): no money behind it
         out.append({"date": (a.start_at).isoformat(timespec="minutes"), "service": name or "—", "staff": _staff_name(db, a.staff_id),
-                    "amount": a.quoted_price or None, "source": "import" if (a.notes or "").startswith("انتقال از نرم‌افزار قبلی") else "appointment",
+                    "amount": (a.quoted_price or None) if imported else None, "source": "import" if imported else "appointment",
                     "notes": a.notes})
     out.sort(key=lambda x: x["date"], reverse=True)
     return out

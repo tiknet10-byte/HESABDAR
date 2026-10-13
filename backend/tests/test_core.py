@@ -3,6 +3,16 @@ import json
 from app.core.security import sign_payload
 
 
+def _set_done(aid: int) -> None:
+    """Mark an appointment done the way an invoice (or the previous software's import) does."""
+    from app.core.db import SessionLocal
+    from app.models import Appointment
+
+    with SessionLocal() as db:
+        db.get(Appointment, aid).status = "done"
+        db.commit()
+
+
 def balanced(client):
     tb = client.get("/api/ledger/trial-balance").json()
     assert tb["total_debit"] == tb["total_credit"]
@@ -407,8 +417,11 @@ def test_booking_rules_are_strict(client, accounts):
     # the live check reports the same problem
     chk = client.get(f"/api/appointments/check?service_id={svc['id']}&start_at={t(14)}").json()
     assert not chk["ok"] and chk["errors"]
-    # a completed appointment still occupies its time
-    client.patch(f"/api/appointments/{a['id']}?status=done")
+    # a completed appointment still occupies its time (done only by its invoice; by hand it is refused)
+    r = client.patch(f"/api/appointments/{a['id']}?status=done")
+    assert r.status_code == 400 and "فاکتور" in r.json()["detail"]
+    assert client.put(f"/api/appointments/{a['id']}", json={"status": "done"}).status_code == 400
+    _set_done(a["id"])
     assert book(customer_name="ب", customer_mobile="09120000002", start_at=t(13)).status_code == 409
     sugg = [s["start_at"] for s in client.get(f"/api/appointments/suggest?service_id={svc['id']}&after={t(9)}&count=10").json()]
     assert all(not (t(13)[:16] <= s < t(15)[:16]) for s in sugg)
@@ -1070,8 +1083,10 @@ def test_refunded_deposit_cancels_its_appointment_and_easy_appointment_changes(c
     assert client.get(f"/api/deposits/{d3['id']}").json()["status"] == "held"
     # done appointments (history) are not deleted
     hist = client.post("/api/appointments", json={"customer_id": d["customer_id"], "service_id": svc["id"], "start_at": slots[4]["start_at"]}).json()
-    client.patch(f"/api/appointments/{hist['id']}?status=done")
+    _set_done(hist["id"])  # as its invoice (or the previous software's import) does
     assert client.delete(f"/api/appointments/{hist['id']}").status_code == 400
+    r = client.patch(f"/api/appointments/{hist['id']}?status=cancelled")  # history: its status is not changed by hand
+    assert r.status_code == 400 and "سوابق" in r.json()["detail"]
 
 
 def test_refunded_deposit_is_money_out_on_the_dashboard(client, accounts, services):

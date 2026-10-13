@@ -164,6 +164,16 @@ class FakeWoo:
             o["status"] = "refunded"
         self._touch(o)
 
+    def trash(self, oid: int) -> None:
+        """Moved to the trash in the website's admin: the order keeps its status underneath, its goods stay out of the
+        stock, and the order list (status 'any') no longer shows it."""
+        o = self.orders[oid]
+        o["status"] = "trash"
+
+    def delete(self, oid: int) -> None:
+        """Deleted for good: the website no longer knows the order."""
+        self.orders.pop(oid)
+
     # ---------------------------------------------------------------- HTTP
     def _authorized(self, request: httpx.Request, q: dict) -> bool:
         if q.get("consumer_key") == self.key and q.get("consumer_secret") == self.secret:
@@ -222,7 +232,12 @@ class FakeWoo:
         if path == "/orders":
             if self.on_orders_page:
                 self.on_orders_page(int(q.get("page", 1)))
-            rows = list(self.orders.values())
+            # status: a list; 'any' (the default) is every status but the trash (WooCommerce stops at 'any')
+            wanted = (q.get("status") or "any").split(",")
+            rows = [o for o in self.orders.values() if (o["status"] != "trash" if "any" in wanted else o["status"] in wanted)]
+            if q.get("include"):
+                ids = {int(x) for x in q["include"].split(",") if x}
+                rows = [o for o in rows if o["id"] in ids]
             if q.get("modified_after"):
                 after = datetime.fromisoformat(q["modified_after"])
                 rows = [o for o in rows if datetime.fromisoformat(o["date_modified_gmt"]) > after]
@@ -232,6 +247,12 @@ class FakeWoo:
                 q.get("orderby", "date"), lambda o: (o["date_created_gmt"], tie * o["id"]))
             rows.sort(key=by, reverse=q.get("order", "desc") == "desc")
             return self._page(rows, q)
+        m = re.fullmatch(r"/orders/(\d+)", path)
+        if m:
+            o = self.orders.get(int(m[1]))
+            if o is None:
+                return httpx.Response(404, json={"code": "woocommerce_rest_shop_order_invalid_id", "message": "Invalid ID.", "data": {"status": 404}})
+            return httpx.Response(200, json=o)
         m = re.fullmatch(r"/orders/(\d+)/refunds", path)
         if m:
             return self._page(self.refunds.get(int(m[1]), []), q)

@@ -24,6 +24,7 @@ from ..models import (
     WaitlistEntry,
 )
 from . import codes, learning
+from .reports import _old_service
 from .textutil import normalize_text
 
 IMPORT_LINE = "خدمات انتقالی"
@@ -122,7 +123,7 @@ def usage(db: Session, ids: list[int] | None = None) -> dict[int, dict]:
         r = row(sid)
         r["invoices"], r["invoice_amount"], r["last"] = int(n or 0), int(total or 0), last
     q = (select(Appointment.service_id, func.count(Appointment.id), func.sum(Appointment.quoted_price), func.max(Appointment.start_at))
-         .where(Appointment.service_id.is_not(None), Appointment.status == "done", Appointment.invoice_id.is_(None))
+         .where(Appointment.service_id.is_not(None), _old_service())
          .group_by(Appointment.service_id))
     if ids is not None:
         q = q.where(Appointment.service_id.in_(ids))

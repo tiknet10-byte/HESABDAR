@@ -203,6 +203,17 @@ def create_appointment(body: AppointmentIn, db: Session = Depends(get_db), user=
     return _appt(db, a, c.full_name)
 
 
+def _check_done(a: Appointment, status: str) -> None:
+    """An appointment is done only by its invoice (the money and the staff share are on the invoice); a done one is the
+    customer's history: voiding its invoice opens it again."""
+    if status == "done" and a.status != "done":
+        raise HTTPException(400, "برای «انجام شد»، فاکتور این نوبت را صادر کنید (دکمهٔ «فاکتور» کنار نوبت)؛ "
+                                 "نوبت با صدور فاکتور خودش انجام‌شده می‌شود")
+    if a.status == "done" and status != "done":
+        raise HTTPException(400, "نوبت انجام‌شده جزو سوابق مشتری است و وضعیتش عوض نمی‌شود؛ اگر فاکتورش اشتباه است، "
+                                 "فاکتور را باطل کنید تا نوبت دوباره فعال شود")
+
+
 class AppointmentUpdate(BaseModel):
     customer_id: int | None = None  # the appointment was registered for the wrong customer
     service_id: int | None = None
@@ -221,6 +232,8 @@ def edit_appointment(aid: int, body: AppointmentUpdate, db: Session = Depends(ge
     allow = data.pop("allow_outside_hours", False)
     if "status" in data and data["status"] not in ("booked", "done", "cancelled", "no_show"):
         raise HTTPException(400, "وضعیت نامعتبر")
+    if "status" in data:
+        _check_done(a, data["status"])
     timing = {"service_id", "staff_id", "start_at", "duration_minutes"} & data.keys()
     if timing and a.status != "booked":
         raise HTTPException(400, "فقط نوبت‌های رزرو (انجام‌نشده) قابل جابه‌جایی هستند")
@@ -261,6 +274,7 @@ def update_appointment(aid: int, status: str, deposits: str = "keep", refund_acc
     if deposits not in ("keep", "refund", "forfeit"):
         raise HTTPException(400, "انتخاب بیعانه نامعتبر است")
     a = _get(db, Appointment, aid, "نوبت")
+    _check_done(a, status)
     if status == "booked" and a.status != "booked":
         # re-activating a cancelled / no-show appointment takes its slot back: it must still be free and in the future
         _ensure_bookable(db, a.service_id, a.staff_id, a.start_at, customer_id=a.customer_id, duration_minutes=a.duration_minutes,

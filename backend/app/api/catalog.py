@@ -26,6 +26,7 @@ from ..models import (
 )
 from ..services import accounting, learning, routing, service_catalog
 from ..services.audit import audit
+from ..services.reports import _old_service
 from .deps import require
 
 router = APIRouter(prefix="/api", tags=["catalog"])
@@ -383,7 +384,7 @@ def services_usage(db: Session = Depends(get_db), _=Depends(require("read"))):
         r = row(sid)
         r["invoices"], r["invoice_amount"], r["invoice_last"] = int(n or 0), int(total or 0), last
     q = (select(Appointment.service_id, func.count(Appointment.id), func.sum(Appointment.quoted_price), func.max(Appointment.start_at))
-         .where(Appointment.service_id.is_not(None), Appointment.status == "done", Appointment.invoice_id.is_(None))
+         .where(Appointment.service_id.is_not(None), _old_service())
          .group_by(Appointment.service_id))
     for sid, n, total, last in db.execute(q):
         r = row(sid)

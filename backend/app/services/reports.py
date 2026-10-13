@@ -465,13 +465,30 @@ def services_catalog(db: Session) -> list[dict]:
             for s in rows]
 
 
+SALE, RETURN = "فروش", "برگشت"
+
+
 def invoice_item_rows(db: Session, start: date | None, end: date | None) -> list[dict]:
+    """Every invoice row of the period as the books count it: each sale on its invoice's day (a later return does not
+    take it out of that day) and each return as a row of its own on the day it was returned, amounts positive.
+    An invoice cancelled as a mistake never happened, so it is in neither. net = the row after its share of the
+    invoice discount: the sales minus the returns of the file add up to the period's sales in the reports."""
+    from .jalali import gregorian_to_jalali
+
     s, e = _range(start, end)
-    rows = db.execute(select(Invoice.number, Invoice.issued_at, Customer.full_name, InvoiceItem.description,
-                             InvoiceItem.quantity, InvoiceItem.unit_price, InvoiceItem.discount)
-                      .join(Invoice, Invoice.id == InvoiceItem.invoice_id).join(Customer, Customer.id == Invoice.customer_id)
-                      .where(Invoice.issued_at.between(s, e), Invoice.status != "void")).all()
-    return [dict(number=r[0], date=r[1].isoformat(), customer=r[2], service=r[3], qty=r[4], unit_price=r[5], discount=r[6]) for r in rows]
+    undo = _undo()
+    q = (select(InvoiceItem, Invoice.number, Invoice.issued_at, Invoice.subtotal, Invoice.total, Customer.full_name)
+         .join(Invoice, Invoice.id == InvoiceItem.invoice_id).join(Customer, Customer.id == Invoice.customer_id))
+    found = [(SALE, *r) for r in db.execute(_sold(q.add_columns(Invoice.issued_at), s, e, undo))]
+    found += [(RETURN, *r) for r in db.execute(_returned(q.add_columns(undo.c.at), s, e, undo))]
+    out = []
+    for kind, it, number, issued, subtotal, total, name, at in sorted(found, key=lambda r: (r[7], r[2], r[0] == RETURN, r[1].id)):
+        net = it.net_amount if it.net_amount is not None else (round(it.amount * total / subtotal) if subtotal else it.amount)
+        out.append(dict(type=kind, number=number, date="%04d/%02d/%02d" % gregorian_to_jalali(at.year, at.month, at.day),
+                        invoice_date="%04d/%02d/%02d" % gregorian_to_jalali(issued.year, issued.month, issued.day),
+                        customer=name, service=it.description, qty=it.quantity, unit_price=it.unit_price,
+                        discount=it.discount, net=net))
+    return out
 
 
 def staff_shares(db: Session, start: date | None = None, end: date | None = None) -> dict:
