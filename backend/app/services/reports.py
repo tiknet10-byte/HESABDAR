@@ -373,6 +373,9 @@ def forecast(db: Session, days: int = 30, history_days: int = 120) -> dict:
         prev = level
         level = alpha * x + (1 - alpha) * (level + phi * trend)
         trend = beta * (level - prev) + (1 - beta) * phi * trend
+    if level is None:  # no weekday with real sales (e.g. only sales returned on the same weekday): nothing to go on
+        return {"method": "insufficient_data", "points": [], "total": 0,
+                "message": "برای پیش‌بینی دقیق حداقل به ۷ روز داده فروش نیاز است"}
     spread = (sum(r * r for r in residuals) / len(residuals)) ** 0.5 if residuals else 0
 
     points = []

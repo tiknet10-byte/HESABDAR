@@ -304,6 +304,12 @@ def commit_customers(db: Session, batch: ImportBatch, choices: dict[str, int | s
             counts["unresolved"] += 1
             continue
         if choice == "new" or not str(choice).isdigit():
+            # the code is the new person's: one held already (e.g. by a journal's placeholder) moves to them, and a
+            # placeholder gets the real name, so it is offered for merging - never two people with one code
+            for other in (db.scalars(select(Customer).where(Customer.tp_code == row["code"])).all() if row["code"] else []):
+                created["linked"].append([other.id, other.tp_code])
+                other.tp_code = None
+                real_name(other, row["name"])
             c = Customer(full_name=row["name"], mobile=row["mobile"] if row["mobile"] and not accounting.find_customer(db, row["mobile"]) else None,
                          legacy_code=accounting.next_customer_code(db), source=SOURCE, tp_code=row["code"] or None)
             if not c.mobile:
@@ -355,7 +361,8 @@ def commit_customers(db: Session, batch: ImportBatch, choices: dict[str, int | s
             # the customer's credit from the PRODUCT software: a customer credit (اعتبار), not a service deposit
             # (بیعانه) - it pays anything on a next invoice and is never forfeited
             if account is None:
-                raise ImportProblem("برای نگه‌داشتن بستانکاری مشتریان یک حساب دریافت (کارتخوان، صندوق...) لازم است")
+                raise ImportProblem("ابتدا در تنظیمات یک حساب دریافت (کارتخوان، کارت یا صندوق) تعریف کنید؛ "
+                                    "بستانکاری مشتریان روی آن نگه داشته می‌شود")
             dep = Deposit(customer_id=c.id, amount=row["credit"], payment_account_id=account.id, received_at=at, source="import",
                           kind="credit", notes=f"ماندهٔ بستانکار تیزپرداز (کد {row['code']})")
             db.add(dep)

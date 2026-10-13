@@ -524,3 +524,25 @@ def test_undo_counts_a_seller_payable_that_was_paid(client, accounts):
     assert u.get("payables_kept") == 1 and not u.get("payables")
     assert client.get(f"/api/customers/{cid}").json()["we_owe"] == 600_000
     assert _ledger(client) == before
+
+
+def test_a_new_customer_takes_the_code_from_a_journal_placeholder(client):
+    """(review) «مشتری جدید» chosen for a row whose code a journal placeholder holds: the code moves to the new
+    person (never two people with one code) and the placeholder gets the real name, so it is offered for merging."""
+    _commit(client, _up(client, "journal", [JHEAD, ["فاکتور فروش", 6131, "1405/04/02", "کالا", "کالای بی نامشش به 77062", 1, 100_000, 0, 100_000]]))
+    ph = _by_tp(77062)
+    b = _up(client, "customers", [CHEAD, [77062, "تازهشش(نسیم)", 100_000, None]])
+    assert (b["rows"][0]["status"], b["rows"][0]["customer_id"]) == ("linked", ph)
+    res = _commit(client, b, choices={str(b["rows"][0]["row"]): "new"}, balances=True)
+    assert res["new"] == 1 and res["renamed"] == 1 and res["debts"] == 1
+    with SessionLocal() as db:
+        holders = db.scalars(select(Customer).where(Customer.tp_code == "77062")).all()
+        assert len(holders) == 1 and holders[0].id != ph and holders[0].full_name == "نسیم تازهشش"
+        assert (db.get(Customer, ph).full_name, db.get(Customer, ph).tp_code) == ("نسیم تازهشش", None)
+        new = holders[0].id
+    assert _bal(client, new)["receivable"] == 1_000_000 and _bal(client, ph)["receivable"] == 0
+    assert any({new, ph} <= {c["id"] for c in g["customers"]} for g in client.get("/api/customers/duplicates").json())
+    _undo(client, b)
+    with SessionLocal() as db:
+        assert db.get(Customer, new) is None  # nothing else of hers: she goes with the file
+        assert (db.get(Customer, ph).full_name, db.get(Customer, ph).tp_code) == ("مشتری تیزپرداز 77062", "77062")

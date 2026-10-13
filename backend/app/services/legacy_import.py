@@ -195,9 +195,11 @@ def read_table(filename: str, data: bytes) -> list[list[object]]:
         best: list[list[object]] = []
         try:
             for ws in wb.worksheets:  # the sheet with the most filled rows
-                # the size a sheet declares can be wrong (or huge, e.g. A1:XFD1048576): read only the cells really there
+                # the size a sheet declares can be wrong (or huge, e.g. A1:XFD1048576): read only the cells really there,
+                # at most MAX_COLS of each row (a cell far to the right never makes a row 16,384 cells wide); a row with
+                # nothing in it is passed over at once
                 ws.reset_dimensions()
-                rows = _filled(_cells(r) for r in ws.iter_rows(values_only=True))
+                rows = _filled(_cells(r) for r in ws.iter_rows(max_col=MAX_COLS, values_only=True) if r.count(None) < len(r))
                 if len(rows) > len(best):
                     best = rows
         finally:
@@ -930,8 +932,8 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         db.delete(a)
         removed["appointments"] += 1
     db.flush()
-    if gone:
-        removed["appointments"] += _undo_moved_sales(db, batch, gone)
+    if gone:  # (a products file from before each sale noted its file: matched by id only for a history file's receipts)
+        removed["appointments"] += _undo_moved_sales(db, batch, gone if kind == "history" else set())
     for sid in created.get("services", []):
         s = db.get(Service, sid)
         if s is None:

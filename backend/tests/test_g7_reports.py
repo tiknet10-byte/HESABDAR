@@ -379,3 +379,22 @@ def test_g7_forecast_not_pulled_down_by_closed_fridays(monkeypatch):
     assert all(abs(p["revenue"] - 10_000_000) <= 100_000 for p in open_days), [p["revenue"] for p in open_days]
     assert abs(f["total"] - 24 * 10_000_000) <= 2_400_000
     assert abs(f["trend_per_day"]) < 50_000
+
+
+def test_g7_forecast_with_every_sale_returned_does_not_crash(monkeypatch):
+    """A week of sales all returned the next week (same weekdays): no weekday has real sales - no forecast, no error."""
+    from app.services import reports
+
+    def fake(db, start=None, end=None):  # noqa: ANN001, ANN202
+        out, d = [], start
+        while d <= end:
+            ago = (end - d).days
+            out.append({"date": d.isoformat(), "revenue": 5_000_000 if 7 <= ago < 14 else -5_000_000 if ago < 7 else 0,
+                        "expenses": 0, "cash_in": 0})
+            d += timedelta(days=1)
+        return out
+
+    monkeypatch.setattr(reports, "daily_series", fake)
+    with _db() as db:
+        f = reports.forecast(db, days=7)
+    assert f["method"] == "insufficient_data" and f["points"] == []

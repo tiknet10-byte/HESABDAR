@@ -101,6 +101,36 @@ def test_xlsx_with_a_bogus_huge_size_is_read_quickly(client):
     assert r.json()["summary"]["ok"] == 2
 
 
+def test_xlsx_rows_with_a_far_right_cell_are_never_built_full_width(monkeypatch):
+    """(review) Thousands of rows that each hold one (styled, empty) cell in column XFD: every row used to be built
+    16,384 cells wide (minutes for a small hostile file). Now no row is read wider than MAX_COLS."""
+    from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+    head = ('<row r="1"><c r="A1" t="inlineStr"><is><t>نام مشتری</t></is></c><c r="B1" t="inlineStr"><is><t>موبایل</t></is></c></row>'
+            '<row r="2"><c r="A2" t="inlineStr"><is><t>ستون دور</t></is></c><c r="B2" t="inlineStr"><is><t>09151040501</t></is></c>'
+            '<c r="XFD2" s="1"/></row>')
+    far = "".join(f'<row r="{i}"><c r="XFD{i}" s="1"/></row>' for i in range(3, 3003))
+    sheet = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+             f'<dimension ref="A1:XFD3002"/><sheetData>{head}{far}</sheetData></worksheet>')
+    buf = io.BytesIO(_xlsx([["x"]]))
+    src = zipfile.ZipFile(buf)
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for item in src.infolist():
+            z.writestr(item, sheet.encode() if item.filename == "xl/worksheets/sheet1.xml" else src.read(item.filename))
+    widest = [0]
+    real = ReadOnlyWorksheet._get_row
+
+    def spy(self, *a, **kw):  # noqa: ANN001, ANN002, ANN003
+        r = real(self, *a, **kw)
+        widest[0] = max(widest[0], len(r))
+        return r
+    monkeypatch.setattr(ReadOnlyWorksheet, "_get_row", spy)
+    rows = li.read_table("far.xlsx", out.getvalue())
+    assert rows == [["نام مشتری", "موبایل"], ["ستون دور", "09151040501"]]
+    assert 0 < widest[0] <= li.MAX_COLS
+
+
 def test_upload_handlers_do_not_block_the_server():
     from app.api import legacy, tizpardaz
     assert not inspect.iscoroutinefunction(legacy.preview)

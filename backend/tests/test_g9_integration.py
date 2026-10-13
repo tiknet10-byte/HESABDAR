@@ -157,7 +157,7 @@ def test_reset_transactions_on_a_database_with_data_in_every_table():
         assert db.get(Supplier, ids["supplier"]).customer_id == ids["c2"]  # the seller stays linked to the person
         kinds = set(db.scalars(select(KnowledgeItem.kind)))
         assert "loyalty" not in kinds and {"customer_not_same", "token_service"} <= kinds
-        # the website keeps its place: the orders read before are not booked again (the clinic's past sales are gone too)
+        # the website keeps its reading place: the orders read before are not read again unless they change on the website
         assert db.get(Setting, "woo.state").value == {"cursor": "2026-01-09T08:00:00", "methods": {"cod": "پرداخت در محل"}}
         assert db.get(Setting, "salon.name").value == "سالن g9"
         assert db.execute(text("PRAGMA foreign_key_check")).fetchall() == []

@@ -610,3 +610,61 @@ def test_another_website_gets_its_own_currency(client, done):
     assert client.get("/api/woo/config").json()["config"]["unit"] == "IRR"
     row = next(r for r in client.get("/api/woo/products").json()["rows"] if r["woo_id"] == sp)
     assert row["site_price"] == 2_500_000  # not 25,000,000 (read as toman)
+
+
+def test_a_paid_order_put_back_to_pending_is_not_a_refund(client, shop):
+    """A paid order set back to "pending payment" and paid again: its money is received once, on its own day - no
+    refund today (the website gave nothing back) and no second receipt."""
+    sp = shop.add_product("کرم گ۸ انتظار پرداخت‌شده", "G8-PEND-2", 100_000, stock=10)
+    _product(client, "کرم گ۸ انتظار پرداخت‌شده", "G8-PEND-2", qty=10)
+    gw = _connect(client, shop)
+    day = datetime.now().replace(microsecond=0) - timedelta(days=2)
+    o = shop.add_order([(sp, 2)], phone="09151080020", first="انتظار", last="پرداخت‌شده گ۸", created=day)
+    _sync(client)
+    shop.set_status(o["id"], "pending")
+    assert _sync(client)["orders"].get("cancelled") == 1
+    assert _orders(client)[o["id"]]["paid"] is False and _orders(client)[o["id"]]["state"] == "waiting"
+    today = date.today()
+    assert sum(v for _, v in _moves(gw)) == 0 and not [v for at, v in _moves(gw) if at.date() == today]
+    shop.set_status(o["id"], "processing", paid=True)
+    assert _sync(client)["orders"].get("booked") == 1
+    inv = client.get(f"/api/invoices/{_orders(client)[o['id']]['invoice_id']}").json()
+    assert inv["total"] == inv["paid"] == 2_000_000
+    assert sum(v for _, v in _moves(gw)) == 2_000_000 and not [v for at, v in _moves(gw) if at.date() == today]
+    back = client.get("/api/reports/money-returned", params={"start": (today - timedelta(days=5)).isoformat()}).json()
+    assert not [x for x in back["items"] if x["kind"] == "refund" and "پرداخت‌شده گ۸" in (x["customer"] or "")]
+    _balanced(client)
+
+
+def test_an_order_of_a_product_unlinked_by_hand_does_not_touch_the_skus_product(client, shop):
+    """The owner unlinked a website product from the product with its SKU ("it is not this one"): its order does not
+    take that product's stock; it gets a product of its own (as an unknown website product does), kept as its link."""
+    wrong = _product(client, "کرم گ۸ ۵۰ میل", "G8-UNL-3", qty=5)
+    sp = shop.add_product("کرم گ۸ ۳۰ میل", "G8-UNL-3", 100_000, stock=5)
+    _connect(client, shop)
+    _sync(client)
+    assert client.post("/api/woo/products/link", json={"woo_id": sp, "product_id": None}).json()["ok"]
+    o = shop.add_order([(sp, 1)], phone="09151080021", first="جداشده", last="گ۸")
+    assert _sync(client)["orders"].get("booked") == 1
+    assert client.get(f"/api/products/{wrong['id']}").json()["stock_qty"] == 5
+    inv = client.get(f"/api/invoices/{_orders(client)[o['id']]['invoice_id']}").json()
+    own = inv["items"][0]["product_id"]
+    assert own != wrong["id"] and inv["total"] == 1_000_000
+    _sync(client)
+    row = next(r for r in client.get("/api/woo/products").json()["rows"] if r["woo_id"] == sp)
+    assert row["product"]["id"] == own  # kept as its link, not taken back by the SKU
+    _balanced(client)
+
+
+def test_a_product_removed_from_the_website_is_not_linked_or_priced(client, shop):
+    """The same SKU listed again on the website with a new price, the old listing deleted: the new price is kept and
+    the deleted listing is not counted (it is gone from the list in the same read)."""
+    p = _product(client, "سرم گ۸ آگهی تازه", "G8-RELIST-1")
+    old = shop.add_product("سرم گ۸ آگهی قدیمی", "G8-RELIST-1", 300_000, stock=2)
+    _connect(client, shop)
+    assert _sync(client)["catalog"]["linked"] == 1
+    del shop.products[old]
+    shop.add_product("سرم گ۸ آگهی تازه", "G8-RELIST-1", 400_000, stock=2)
+    out = _sync(client)
+    assert out["catalog"]["linked"] == 1
+    assert client.get(f"/api/products/{p['id']}").json()["online_price"] == 4_000_000

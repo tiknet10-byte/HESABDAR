@@ -371,6 +371,7 @@ def refresh_catalog(db: Session, c: Client, cfg: dict) -> dict:
     db.flush()
     for wp in db.scalars(select(WooProduct).where(WooProduct.id.not_in(list(seen) or [-1]))):
         db.delete(wp)
+    db.flush()  # gone now (no autoflush): a product removed from the website is not counted or priced below
     by_sku = {}
     for p in db.scalars(select(Product).where(Product.sku.is_not(None)).order_by(Product.is_active, Product.id)):
         by_sku[p.sku.strip().lower()] = p  # active products win (they come last)
@@ -561,14 +562,15 @@ def _product(db: Session, li: dict, unit: int) -> Product:
     sku = (li.get("sku") or "").strip()
     vid = int(li.get("variation_id") or 0) or int(li.get("product_id") or 0)
     wp = db.get(WooProduct, vid) if vid else None
-    hand = _links(db).get(str(vid)) if vid else None
+    hand = _links(db).get(str(vid), 0) if vid else 0  # a product id; None = unlinked by hand (its SKU's product is not it)
     p = db.get(Product, hand) if hand else None  # linked by hand: wins over the SKU
-    if p is None and sku:
+    if p is None and sku and hand is not None:
         p = db.scalar(select(Product).where(func.lower(Product.sku) == sku.lower()).order_by(Product.is_active.desc(), Product.id))
     if p is None and wp is not None and wp.product_id:
         p = db.get(Product, wp.product_id)
     if p is None:
-        p = Product(code=inventory.next_product_code(db), name=(li.get("name") or "کالای سایت")[:160], sku=sku or None,
+        p = Product(code=inventory.next_product_code(db), name=(li.get("name") or "کالای سایت")[:160],
+                    sku=(sku or None) if hand is not None else None,  # unlinked by hand: the SKU is the other product's
                     sale_price=unit, online_price=unit, notes="ساخته‌شده خودکار از سفارش سایت")
         db.add(p)
         db.flush()
@@ -578,6 +580,8 @@ def _product(db: Session, li: dict, unit: int) -> Product:
         wp.product_id = p.id
         db.add(wp)
         db.flush()  # the same product on another line of the order finds this link (not a second one)
+        if hand is None:  # unlinked by hand: this is its product from now on (the next reading keeps it)
+            link_product(db, wp, p)
     return p
 
 
@@ -784,17 +788,21 @@ def sync_order(db: Session, c: Client, cfg: dict, o: dict) -> str:
             # day of each refund of the website (what no refund covers - cancelled without a refund there: today)
             web, kept = _undo(db, inv, f"سفارش سایت #{num} در سایت {STATUS_FA.get(st, st)} شد")
             paid = sum(p.amount for p in web)
-            if paid:
+            # put back to "pending payment": the website says it is not paid - its payment is only cancelled on its own
+            # date (by _undo), nothing is paid back; paid again later, it is booked again with its money (and refunds) once
+            if paid and st != "pending":
                 customer, pa, at = db.get(Customer, inv.customer_id), db.get(PaymentAccount, web[0].payment_account_id), min(p.paid_at for p in web)
                 rest = paid - _give_back(db, wo, customer, pa, refunds, at, num, f, cap=paid)
                 if rest > 0:
                     dep = accounting.record_deposit(db, customer=customer, amount=rest, payment_account=pa, received_at=at, source=SOURCE,
                                                     notes=f"مبلغ برگشتی سفارش سایت #{num} ({STATUS_FA.get(st, st)})")
                     accounting.close_deposit(db, dep, "refund", pa)
-            else:
+            elif not paid:
                 wo.refund_ids = sorted(set(wo.refund_ids or []) | {int(r["id"]) for r in refunds})
-            wo.state = "waiting" if st == "pending" else "cancelled"
-            note(db, f"سفارش سایت #{num} {STATUS_FA.get(st, st)} شد؛ فاکتورش باطل{' و مبلغ آن برگشت داده' if paid else ''} شد"
+            wo.state, wo.paid = ("waiting", False) if st == "pending" else ("cancelled", wo.paid)
+            done = (" و پرداختش لغو" if st == "pending" else " و مبلغ آن برگشت داده") if paid else ""
+            note(db, f"سفارش سایت #{num} {STATUS_FA.get(st, st)} شد؛ فاکتورش باطل{done} شد"
+                     + ("؛ اگر دوباره پرداخت شود، دوباره ثبت می‌شود" if st == "pending" else "")
                      + ("؛ پولی که در کلینیک برای آن گرفته شده بود اعتبار مشتری ماند (اگر پس داده‌اید، از صفحهٔ بیعانه‌ها استرداد بزنید)" if kept else ""),
                  "warn" if kept else "info")
             return "cancelled"

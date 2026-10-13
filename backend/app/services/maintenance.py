@@ -89,7 +89,8 @@ def reset(db: Session, scope: str) -> dict:
     db.execute(update(Holding).values(qty_m=0, cost=0))
     # services stay, without the average price learned from the sales that are gone (it warns about prices, fills OCR rows)
     db.execute(update(Service).values(learned_avg_price=None, learned_count=0))
-    # (the website keeps its place: orders already read are not booked again, as the clinic's own past sales are gone too)
+    # (the website keeps its reading place: orders read before are not read again - unless they change on the website
+    # later, then they are booked as new; to start the website clean too, set a new start date in its settings)
     if scope in ("customers", "factory"):
         db.execute(update(Supplier).values(customer_id=None))
         wipe(Customer)

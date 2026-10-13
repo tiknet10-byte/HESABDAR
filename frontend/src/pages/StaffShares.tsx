@@ -81,7 +81,7 @@ export default function StaffShares() {
                 <tbody>{data.lines.map((r: any) => (
                   <tr key={r.line_id ?? 0}><td className="font-semibold">{r.name}</td><td className="num">{num(r.services)}</td><td className="num">{money(r.revenue)}</td>
                     <td className="num text-amber-600">{money(r.staff_share)}</td><td className="num font-semibold text-emerald-600">{money(r.salon_share)}</td>
-                    <td className="num text-rose-600">{r.forfeits ? money(r.forfeits) : "—"}</td></tr>
+                    <td className="num text-emerald-600">{r.forfeits ? money(r.forfeits) : "—"}</td></tr>
                 ))}</tbody>
               </table>
             </div>
