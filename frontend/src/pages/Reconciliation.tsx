@@ -109,8 +109,13 @@ export default function Reconciliation() {
   const toast = useToast();
   const [tab, setTab] = useState<"receipts" | "bank">("receipts");
   const [status, setStatus] = useState("");
-  const receipts = useApi<any[]>(`/api/plugins/messaging_receipts/receipts${status ? `?status=${status}` : ""}`, [status]);
-  const bank = useApi<any[]>("/api/plugins/bank_sync/transactions");
+  // each part comes from a plugin: only ask a plugin that is turned on (Settings > plugins)
+  const plugins = useApi<any[]>("/api/plugins").data;
+  const on = (name: string) => !!plugins?.find((p) => p.name === name)?.enabled;
+  const receiptsOn = on("messaging_receipts");
+  const bankOn = on("bank_sync");
+  const receipts = useApi<any[]>(receiptsOn ? `/api/plugins/messaging_receipts/receipts${status ? `?status=${status}` : ""}` : null, [status]);
+  const bank = useApi<any[]>(bankOn ? "/api/plugins/bank_sync/transactions" : null);
   const [assign, setAssign] = useState<any>(null);
   const [modal, setModal] = useState<"sim" | "bank" | null>(null);
   const reload = () => { receipts.reload(); bank.reload(); };
@@ -127,7 +132,13 @@ export default function Reconciliation() {
         <Stat label="تراکنش تطبیق‌نشده" value={num((bank.data ?? []).filter((x) => x.status === "unmatched" && x.direction === "in").length)} tone="sky" />
       </div>
       <Tabs value={tab} onChange={setTab} items={[{ value: "receipts", label: "رسیدهای مشتریان" }, { value: "bank", label: "تراکنش‌های بانک" }]} />
-      {tab === "receipts" ? (
+      {plugins && ((tab === "receipts" && !receiptsOn) || (tab === "bank" && !bankOn)) && (
+        <div className="card p-4 text-sm">
+          {tab === "receipts" ? "دریافت رسید مشتری‌ها (پیامک، واتساپ، اینستاگرام) خاموش است." : "دریافت تراکنش‌های بانک خاموش است."}{" "}
+          برای روشن کردن به «تنظیمات ← افزونه‌ها» بروید{tab === "receipts" ? " (برای واتساپ و اینستاگرام کلید App Secret متا هم لازم است)" : ""}.
+        </div>
+      )}
+      {tab === "receipts" && !receiptsOn ? null : tab === "receipts" ? (
         <Card pad={false}>
           <div className="p-4"><Tabs value={status} onChange={setStatus} items={[{ value: "", label: "همه" }, { value: "pending", label: "در انتظار" }, { value: "matched", label: "تطبیق (منتظر تأیید)" }, { value: "mismatch", label: "مغایرت" }, { value: "registered", label: "ثبت‌شده" }]} /></div>
           <div className="overflow-x-auto">
@@ -162,7 +173,7 @@ export default function Reconciliation() {
       ) : (
         <Card pad={false}>
           <div className="overflow-x-auto">
-            {!bank.data ? <Loading /> : bank.data.length === 0 ? <Empty text="تراکنشی دریافت نشده" /> : (
+            {!bankOn ? null : !bank.data ? <Loading /> : bank.data.length === 0 ? <Empty text="تراکنشی دریافت نشده" /> : (
               <table className="table">
                 <thead><tr><th>زمان</th><th>مبلغ</th><th>نوع</th><th>پیگیری</th><th>منبع</th><th>وضعیت</th><th>تطبیق با</th><th></th></tr></thead>
                 <tbody>{bank.data.map((t) => (

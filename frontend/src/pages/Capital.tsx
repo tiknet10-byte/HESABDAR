@@ -5,7 +5,7 @@ import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Tabs
 import { api } from "../lib/api";
 import { money, num } from "../lib/format";
 import { formatJ, toGregorian, toJalali, toLocalIso } from "../lib/jalali";
-import { useApi, useToast } from "../lib/hooks";
+import { can, useApi, useAuth, useToast } from "../lib/hooks";
 
 const UNIT_BY_KIND: Record<string, string> = { gold: "گرم", coin: "عدد", currency: "دلار", other: "عدد" };
 const MOVE_KINDS: { value: string; label: string; hint: string }[] = [
@@ -33,6 +33,12 @@ function Row({ label, value, strong, tone, sub }: { label: React.ReactNode; valu
 }
 
 export default function Capital() {
+  const { user } = useAuth();
+  if (!can(user, "capital")) return <Empty text="این صفحه فقط برای مدیر است." />;
+  return <CapitalPage />;
+}
+
+function CapitalPage() {
   const [range, setRange] = useState<"year" | "all">("year");
   const start = range === "year" ? yearStart() : "2000-01-01";
   const { data: p, reload } = useApi<any>(`/api/capital/position?start=${start}`);
