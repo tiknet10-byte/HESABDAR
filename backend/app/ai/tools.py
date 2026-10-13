@@ -158,8 +158,8 @@ CORE_TOOLS: list[AITool] = [
 ]
 
 # tools that only read: the assistant runs them by itself; every other tool changes data and the user must confirm it
-# (the plugins' 'finance' tools only read too: unmatched bank transactions, sales-book pages waiting for review)
-READ_ONLY = {"read", "reports", "finance"}
+# (a tool that only reads money data takes 'reports', never 'finance': 'finance' is for moving money)
+READ_ONLY = {"read", "reports"}
 
 
 def all_tools() -> list[AITool]:

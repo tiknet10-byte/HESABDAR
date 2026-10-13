@@ -386,3 +386,30 @@ def test_existing_data_recosted_once_at_start(client):
     assert pv["stock_value"] == 200_000 and pv["stock_qty"] == 2
     assert all(m["cost"] == 0 for m in pv["moves"] if m["kind"] in ("sale", "sale_return"))
     assert _books(client) == right
+
+
+def test_imported_purchase_price_after_discount_hidden_without_reports(client):
+    """(review) A Tizpardaz purchase item now also carries its price after the invoice discount (net_amount):
+    staff must not see that one either, on the invoice or on the product page."""
+    import io
+
+    import openpyxl
+    p = _product(client, "تونر خرید پنهان گروه پنج")
+    wb = openpyxl.Workbook()
+    for r in [["نوع سند", "شماره سند", "تاریخ", "عنوان حساب", "شرح", "مقدار", "فی", "بدهکار", "بستانکار"],
+              ["فاکتور خرید", 5501, "1405/02/01", "کالا", "تونر خرید پنهان گروه پنج از پخش گروه پنج", 4, 100_000, 400_000, 0],
+              ["فاکتور خرید", 5501, "1405/02/01", "پخش گروه پنج", "فاکتور 5501", None, None, 0, 300_000]]:
+        wb.active.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    pv = client.post("/api/import/tizpardaz/preview", files={"file": ("j.xlsx", buf.getvalue(), "application/octet-stream")},
+                     data={"kind": "journal", "unit": "toman"})
+    assert pv.status_code == 200, pv.text
+    assert client.post(f"/api/import/tizpardaz/{pv.json()['id']}/commit", json={}).status_code == 200
+    did = next(h["doc_id"] for h in client.get(f"/api/products/{p['id']}").json()["history"])
+    assert client.get(f"/api/trade-docs/{did}").json()["items"][0]["net_amount"] == 3_000_000  # the owner sees it
+    staff = _as_role(client, "g5_staff_doc", "staff")
+    item = staff.get(f"/api/trade-docs/{did}").json()["items"][0]
+    assert item["qty"] == 4 and all(item[k] is None for k in ("unit_price", "amount", "net_amount", "cost"))
+    h = staff.get(f"/api/products/{p['id']}").json()["history"][0]
+    assert h["qty"] == 4 and all(h[k] is None for k in ("unit_price", "amount", "net_amount", "cost"))

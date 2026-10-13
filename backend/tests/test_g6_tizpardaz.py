@@ -423,3 +423,104 @@ def test_chehreh_sales_moved_to_a_product_follow_their_chehreh_file(client):
     assert client.post(f"/api/import/legacy/{l2}/undo").status_code == 200
     _undo(client, b2)
     assert appts(s2["id"]) == 0
+
+
+def _chehreh_history(client, code, name, service):
+    hist = [["کد مشتری", "نام مشتری", "تاریخ", "خدمت", "مبلغ"], [code, name, "1404/11/02", service, 1_000_000]]
+    pv = client.post("/api/import/legacy/preview", files={"file": ("h.xlsx", _xlsx(hist), "application/octet-stream")},
+                     data={"kind": "history", "unit": "toman"})
+    assert pv.status_code == 200, pv.text
+    assert client.post(f"/api/import/legacy/{pv.json()['id']}/commit", json={}).status_code == 200
+    return pv.json()["id"]
+
+
+def _sold(pid):
+    with SessionLocal() as db:
+        return db.scalar(select(func.count(TradeHistory.id)).where(TradeHistory.product_id == pid)) or 0
+
+
+def test_undoing_a_chehreh_file_takes_its_sales_moved_to_a_product_with_it(client):
+    """(review) The Chehreh file is undone after a Tizpardaz file moved its receipts to a product: those sales go
+    with it (they no longer count in revenue) and the customer it made goes too; undoing Tizpardaz then is clean."""
+    line = client.post("/api/lines", json={"name": "لاین فروش بازبینیشش"}).json()
+    s = client.post("/api/services", json={"line_id": line["id"], "name": "محلول بازبینیشش", "base_price": 1}).json()
+    lb = _chehreh_history(client, "990621", "مهتاب بازبینیشش", "محلول بازبینیشش")
+    with SessionLocal() as db:
+        cust = db.scalar(select(Customer.id).where(Customer.legacy_code == "990621"))
+    b = _up(client, "products", [PHEAD, [906501, "محلول بازبینیشش", 0, None, 0, 0, None]])
+    assert _commit(client, b, choices={})["chehreh_sales"] == 1
+    pid = next(x for x in client.get("/api/products?all=1").json() if x["code"] == "906501")["id"]
+    assert _sold(pid) == 1
+    assert next(x for x in client.get("/api/reports/products").json()["products"] if x["id"] == pid)["revenue"] == 10_000_000
+    r = client.post(f"/api/import/legacy/{lb}/undo")
+    assert r.status_code == 200, r.text
+    assert _sold(pid) == 0 and client.get(f"/api/customers/{cust}").status_code == 404
+    assert not any(x["id"] == pid and x["revenue"] for x in client.get("/api/reports/products").json()["products"])
+    _undo(client, b)
+    with SessionLocal() as db:
+        assert not db.scalar(select(func.count(Appointment.id)).where(Appointment.service_id == s["id"]))
+
+
+def test_undo_after_the_chehreh_customer_was_merged_gives_the_sale_back_to_the_kept_person(client):
+    """(review) Undoing Tizpardaz products used to crash (FOREIGN KEY) when the person of a moved Chehreh sale had
+    been merged into another record: the sale goes back to the person it belongs to now."""
+    line = client.post("/api/lines", json={"name": "لاین ادغام بازبینیشش"}).json()
+    s = client.post("/api/services", json={"line_id": line["id"], "name": "محلول ادغامشش", "base_price": 1}).json()
+    _chehreh_history(client, "990622", "مهتاب ادغامشش", "محلول ادغامشش")
+    with SessionLocal() as db:
+        drop = db.scalar(select(Customer.id).where(Customer.legacy_code == "990622"))
+    keep = _customer(client, "مهتاب ادغامشش", "09151060021")
+    b = _up(client, "products", [PHEAD, [906502, "محلول ادغامشش", 0, None, 0, 0, None]])
+    assert _commit(client, b, choices={})["chehreh_sales"] == 1
+    r = client.post("/api/customers/merge", json={"keep_id": keep, "drop_ids": [drop]})
+    assert r.status_code == 200, r.text
+    _undo(client, b)
+    with SessionLocal() as db:
+        back = list(db.scalars(select(Appointment).where(Appointment.service_id == s["id"])))
+        assert [(a.customer_id, a.quoted_price, a.status) for a in back] == [(keep, 10_000_000, "done")]
+
+
+def test_reimporting_products_after_a_rename_here_is_the_same_product(client):
+    """(review) A product brought over from Tizpardaz (no SKU) and renamed here: the same list again must link it by
+    its Tizpardaz code - not make a second product with the stock counted twice."""
+    b = _up(client, "products", [PHEAD, [906503, "کرم بازبینیشش", 5, None, 100_000, 200_000, None]])
+    _commit(client, b, choices={})
+    p = next(x for x in client.get("/api/products?all=1").json() if x["code"] == "906503")
+    r = client.put(f"/api/products/{p['id']}", json={"name": "کرم بازبینیشش اصلاح‌شده", "code": "906503", "sale_price": 2_000_000})
+    assert r.status_code == 200, r.text
+    before = _ledger(client)
+    again = _up(client, "products", [PHEAD, [906503, "کرم بازبینیشش", 5, None, 100_000, 200_000, None]])
+    assert (again["rows"][0]["status"], again["rows"][0]["default"]) == ("linked", f"p:{p['id']}")
+    res = _commit(client, again, choices={})
+    assert res["combined"] == 1 and not res.get("new") and not res.get("codes_moved")
+    same = [x for x in client.get("/api/products?all=1").json() if "کرم بازبینیشش" in x["name"]]
+    assert [(x["id"], x["code"], x["stock_qty"], x["stock_value"]) for x in same] == [(p["id"], "906503", 5, 5_000_000)]
+    assert _ledger(client) == before  # nothing new on the shelf, nothing posted
+
+
+def test_product_page_history_is_after_the_invoice_discount_like_the_report(client):
+    """(review) The product page's history shows what was really received (after the invoice's discount), so its
+    totals agree with the product report."""
+    p = _product(client, "ماسک صفحهشش")
+    _commit(client, _up(client, "journal", [
+        JHEAD, ["فاکتور فروش", 6121, "1405/04/01", "کالا", "ماسک صفحهشش به متفرقه", 4, 250_000, 0, 1_000_000],
+        ["فاکتور فروش", 6121, "1405/04/01", "تخفیف فروش", "تخفیف", None, None, 100_000, 0],
+        ["فاکتور فروش", 6121, "1405/04/01", "متفرقه", "فاکتور 6121", None, None, 900_000, 0]]))
+    h = client.get(f"/api/products/{p['id']}").json()["history"]
+    assert [(x["amount"], x["net_amount"]) for x in h] == [(10_000_000, 9_000_000)]
+    assert next(x for x in client.get("/api/reports/products").json()["products"] if x["id"] == p["id"])["revenue"] == 9_000_000
+
+
+def test_undo_counts_a_seller_payable_that_was_paid(client, accounts):
+    """(review) A seller's opening payable that was paid since stays with the payment, and undo says so."""
+    b = _up(client, "customers", [CHEAD, [60701, "فروشندهپرداختشش(بهرام)", None, 100_000]])
+    _commit(client, b, choices={}, balances=True, credit_as={str(b["rows"][0]["row"]): "payable"})
+    cid = _by_tp(60701)
+    pur = next(x for x in client.get("/api/purchases").json() if x["supplier"] and "بهرام" in x["supplier"])
+    r = client.post(f"/api/purchases/{pur['id']}/pay", json={"payment_account_id": next(iter(accounts.values())), "amount": 400_000})
+    assert r.status_code == 200, r.text
+    before = _ledger(client)
+    u = _undo(client, b)
+    assert u.get("payables_kept") == 1 and not u.get("payables")
+    assert client.get(f"/api/customers/{cid}").json()["we_owe"] == 600_000
+    assert _ledger(client) == before

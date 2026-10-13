@@ -28,9 +28,12 @@ from ..models import (
     InvoiceItem,
     JournalEntry,
     PaymentAccount,
+    Product,
     Service,
     ServiceLine,
     Staff,
+    TradeDoc,
+    TradeHistory,
     local_now,
 )
 from . import accounting, scheduling, service_catalog
@@ -913,9 +916,11 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         db.delete(d)
         removed["deposits"] += 1
     db.flush()
+    gone: set[int] = set()  # receipts no longer here as appointments (e.g. moved to a product by a Tizpardaz file)
     for aid in created.get("appointments", []):
         a = db.get(Appointment, aid)
         if a is None:
+            gone.add(aid)
             continue
         if a.invoice_id or db.scalar(select(func.count(Deposit.id)).where(Deposit.appointment_id == aid)):
             kept["appointments"] += 1
@@ -925,6 +930,8 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         db.delete(a)
         removed["appointments"] += 1
     db.flush()
+    if gone:
+        removed["appointments"] += _undo_moved_sales(db, batch, gone)
     for sid in created.get("services", []):
         s = db.get(Service, sid)
         if s is None:
@@ -949,6 +956,40 @@ def undo(db: Session, batch: ImportBatch) -> dict:
     s = batch.summary or {}
     # rows whose record stays are still "brought over": importing the file again must skip them
     kept_fps = [fp for fp, rid in zip(s.get("fps", []), s.get("fp_rec", [])) if rid in kept_ids]
+    # automatic codes only of the customers that stay (a removed customer's number may be given to someone else)
+    auto_codes = {k: v for k, v in (s.get("auto_codes") or {}).items() if db.get(Customer, int(k)) is not None}
     batch.status = "undone"
-    batch.summary = {**s, "undo": {"removed": removed, "kept": kept}, "kept_fps": kept_fps}
+    batch.summary = {**s, "undo": {"removed": removed, "kept": kept}, "kept_fps": kept_fps, "auto_codes": auto_codes}
     return {"removed": removed, "kept": kept}
+
+
+def _undo_moved_sales(db: Session, batch: ImportBatch, gone: set[int]) -> int:
+    """Receipts of this file that a Tizpardaz products file turned into sales of a product (their appointments are
+    gone): they go with this file too, and that file's own undo then leaves them out."""
+    from .tizpardaz import _refresh_doc, recost_history
+
+    n, docs, products = 0, set(), set()
+    for tb in db.scalars(select(ImportBatch).where(ImportBatch.kind == "tp_products", ImportBatch.status == "committed")):
+        cr = (tb.summary or {}).get("created") or {}
+        mine = [m for m in cr.get("appointments", []) if m.get("batch") == batch.id or (m.get("batch") is None and m.get("id") in gone)]
+        if not mine:
+            continue
+        fps = {f"chehreh|appt|{m['id']}" for m in mine}
+        for h in list(db.scalars(select(TradeHistory).where(TradeHistory.batch_id == tb.id, TradeHistory.source == "chehreh"))):
+            if h.fp in fps:
+                docs.add(h.doc_id)
+                products.add(h.product_id)
+                db.delete(h)
+                n += 1
+        # (a file from before the Chehreh file was noted with each sale: noted now, so its undo skips them)
+        tb.summary = {**tb.summary, "created": {**cr, "appointments": [{**m, "batch": batch.id} if m in mine else m
+                                                                       for m in cr["appointments"]]}}
+    db.flush()
+    for doc in db.scalars(select(TradeDoc).where(TradeDoc.id.in_([d for d in docs if d] or [-1]))):
+        if db.scalar(select(TradeHistory.id).where(TradeHistory.doc_id == doc.id).limit(1)) is None:
+            db.delete(doc)
+        else:
+            _refresh_doc(db, doc)
+    db.flush()
+    recost_history(db, [p for p in products if p and db.get(Product, p) is not None])
+    return n

@@ -22,6 +22,7 @@ import threading
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 import httpx
@@ -56,6 +57,7 @@ class _HideKeys(logging.Filter):
 logging.getLogger("httpx").addFilter(_HideKeys())
 
 STATE_KEY = "woo.state"
+LINKS_KEY = "woo.links"
 MASK = "••••••••"
 DEFAULTS = {"url": "", "key": "", "secret": "", "enabled": False, "interval": 5, "start": None, "account_id": None,
             "method_accounts": {}, "push_stock": True, "pull_prices": True, "unit": "", "auth": "basic"}
@@ -123,6 +125,8 @@ def save_config(db: Session, body: dict) -> dict:
         if k in body and k not in ("key", "secret", "auth", "unit"):  # auth / unit: found by the connection test
             cfg[k] = body[k]
     cfg["url"] = normalize_url(cfg.get("url") or "")
+    if cfg["url"] != old["url"]:  # another website: its currency and way of sending the key are found again
+        cfg["unit"], cfg["auth"] = "", "basic"
     if body.get("key") and body["key"] != _mask_key(old["key"]):
         cfg["key"] = body["key"].strip()
     if body.get("secret") and body["secret"] != MASK:
@@ -172,6 +176,13 @@ def _err(r: httpx.Response) -> str:
     return f"خطای سایت ({r.status_code}){': ' + msg if msg else ''}"
 
 
+def _https_only(request: httpx.Request) -> None:
+    """The key goes with every request: never to a plain http address (e.g. a website that redirects to http)."""
+    if request.url.scheme != "https" and request.url.host not in ("localhost", "127.0.0.1"):
+        raise WooError("سایت درخواست را به آدرسی بدون https فرستاد؛ برای امن ماندن کلید API ارسال نشد. "
+                       "در تنظیمات وردپرس آدرس سایت را با https بگذارید")
+
+
 class Client:
     def __init__(self, cfg: dict) -> None:
         if not (cfg.get("url") and cfg.get("key") and cfg.get("secret")):
@@ -179,7 +190,7 @@ class Client:
         self.base = cfg["url"] + "/wp-json/wc/v3"
         self.key, self.secret = cfg["key"], cfg["secret"]
         self.query_auth = cfg.get("auth") == "query"
-        self.http = httpx.Client(timeout=40, transport=_transport, follow_redirects=True,
+        self.http = httpx.Client(timeout=40, transport=_transport, follow_redirects=True, event_hooks={"request": [_https_only]},
                                  headers={"User-Agent": "Hesabdar-Accounting/1.0", "Accept": "application/json"})
 
     def request(self, method: str, path: str, params: dict | None = None, body: dict | None = None) -> tuple[object, httpx.Headers]:
@@ -195,7 +206,11 @@ class Client:
             raise WooError(f"سایت در دسترس نیست ({type(exc).__name__})؛ اینترنت یا آدرس سایت را بررسی کنید") from exc
         if r.status_code == 401 and not self.query_auth:  # some hosts drop the Authorization header
             self.query_auth = True
-            return self.request(method, path, params, body)
+            try:
+                return self.request(method, path, params, body)
+            except WooError:
+                self.query_auth = False  # not the host: the key itself is wrong (it is not put in the address for nothing)
+                raise
         if r.status_code >= 400:
             raise WooError(_err(r))
         try:
@@ -217,22 +232,44 @@ class Client:
             return len(data) if isinstance(data, list) else 0
 
     def all(self, path: str, **params) -> list:  # noqa: ANN003
-        """Every page of a list. A list that changes size while it is read (e.g. an order deleted) shifts its pages
-        and a row could be skipped: it is then read again from the first page."""
+        """Every page of a list. A row taken out of the list while it is read (e.g. an order deleted) shifts the next
+        pages back and a row could be skipped: the list is then read again from the first page (a row added only
+        makes one row come twice). Afterwards self.read_at is the website's clock when the reading started (None if
+        unknown) and self.stable is False if rows were still taken out on the last try."""
+        self.read_at, self.stable = None, True
         for attempt in range(3):
-            out, page, total = [], 1, None
+            out, page, total, self.stable = [], 1, 0, True
             while True:
                 data, headers = self.request("GET", path, {**params, "per_page": PER_PAGE, "page": page})
                 if page == 1:
-                    total = headers.get("x-wp-total")
-                elif headers.get("x-wp-total") != total and attempt < 2:
-                    break
+                    self.read_at = _server_time(headers)
+                elif _total(headers) < total:
+                    self.stable = False
+                    if attempt < 2:
+                        break
+                total = max(total, _total(headers))
                 out.extend(data or [])
                 pages = int(headers.get("x-wp-totalpages") or 0)
                 if not data or len(data) < PER_PAGE or (pages and page >= pages) or page >= 500:
                     return out
                 page += 1
         return out
+
+
+def _total(headers: httpx.Headers) -> int:
+    try:
+        return int(headers.get("x-wp-total") or 0)
+    except ValueError:
+        return 0
+
+
+def _server_time(headers: httpx.Headers) -> datetime | None:
+    """The website's clock (GMT) from the answer's Date header."""
+    try:
+        t = parsedate_to_datetime(headers.get("date"))
+    except (TypeError, ValueError, IndexError):
+        return None
+    return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def factor(currency: str | None, cfg: dict | None = None) -> int:
@@ -337,12 +374,15 @@ def refresh_catalog(db: Session, c: Client, cfg: dict) -> dict:
     by_sku = {}
     for p in db.scalars(select(Product).where(Product.sku.is_not(None)).order_by(Product.is_active, Product.id)):
         by_sku[p.sku.strip().lower()] = p  # active products win (they come last)
-    hand = {int(k): v for k, v in (state(db).get("links") or {}).items()}
+    hand = {int(k): v for k, v in _links(db).items()}
     linked = prices = 0
     for wp in db.scalars(select(WooProduct)):
         p = by_sku.get(wp.sku.lower()) if wp.sku else None
-        if wp.id in hand and db.get(Product, hand[wp.id]) is not None:
-            wp.product_id = hand[wp.id]  # linked by hand (e.g. the SKU is written differently): kept
+        h = hand.get(wp.id, 0)  # chosen by hand: a product id, or None = unlinked by hand
+        if h and db.get(Product, h) is not None:
+            wp.product_id = h  # linked by hand (e.g. the SKU is written differently): kept
+        elif h is None:
+            wp.product_id = None
         elif p is not None:
             wp.product_id = p.id
         elif wp.sku:
@@ -363,14 +403,15 @@ def refresh_catalog(db: Session, c: Client, cfg: dict) -> dict:
 def link_product(db: Session, wp: WooProduct, p: Product | None) -> None:
     """Link a website product to a product here by hand (or unlink it); kept when the website is read again."""
     wp.product_id = p.id if p else None
-    st = state(db)
-    links = dict(st.get("links") or {})  # a new dict, so the change is saved
-    if p is not None:
-        links[str(wp.id)] = p.id
-    else:
-        links.pop(str(wp.id), None)
-    st["links"] = links
-    _save_state(db, st)
+    links = _links(db)  # a new dict, so the change is saved
+    links[str(wp.id)] = p.id if p is not None else None  # None: not linked again by its SKU
+    settings_store.set_value(db, LINKS_KEY, links)
+
+
+def _links(db: Session) -> dict:
+    """Website products linked by hand: {website id: product id, or None = unlinked by hand}. Kept apart from the
+    sync state (which the sync job writes all the time), so a link saved during a sync is not overwritten."""
+    return dict(settings_store.get(db, LINKS_KEY) or {})
 
 
 def _path(wp: WooProduct) -> str:
@@ -518,11 +559,12 @@ def _customer(db: Session, o: dict) -> Customer:
 
 def _product(db: Session, li: dict, unit: int) -> Product:
     sku = (li.get("sku") or "").strip()
-    p = None
-    if sku:
-        p = db.scalar(select(Product).where(func.lower(Product.sku) == sku.lower()).order_by(Product.is_active.desc(), Product.id))
     vid = int(li.get("variation_id") or 0) or int(li.get("product_id") or 0)
     wp = db.get(WooProduct, vid) if vid else None
+    hand = _links(db).get(str(vid)) if vid else None
+    p = db.get(Product, hand) if hand else None  # linked by hand: wins over the SKU
+    if p is None and sku:
+        p = db.scalar(select(Product).where(func.lower(Product.sku) == sku.lower()).order_by(Product.is_active.desc(), Product.id))
     if p is None and wp is not None and wp.product_id:
         p = db.get(Product, wp.product_id)
     if p is None:
@@ -636,7 +678,10 @@ def _give_back(db: Session, wo: WooOrder, customer: Customer, pa: PaymentAccount
     return total
 
 
-def _book(db: Session, wo: WooOrder, o: dict, pl: dict, refunds: list[dict], f: int, cfg: dict) -> Invoice | None:
+def _book(db: Session, wo: WooOrder, o: dict, pl: dict, refunds: list[dict], f: int, cfg: dict,
+          credits: list[int] | None = None, pa: PaymentAccount | None = None) -> Invoice | None:
+    """credits: the customer's credits (money received here for the order's earlier invoice) that pay it first;
+    pa: the account the website's money came in on before (booked again: the same account)."""
     now = local_now()
     created = min(_when(o, "date_created") or now, now)
     paid_at = _paid_at(o)
@@ -654,19 +699,37 @@ def _book(db: Session, wo: WooOrder, o: dict, pl: dict, refunds: list[dict], f: 
         wo.state, wo.invoice_id = "skipped", None
         return None
     num = o.get("number") or o["id"]
+    # only the credits named here (never the customer's service deposits: a website order is a product sale)
     inv = accounting.issue_invoice(db, customer=customer, items=items, discount=pl["discount"], issued_at=created, source=SOURCE,
-                                   channel="online", notes=f"سفارش سایت #{num}{' - ' + method if method else ''}")
-    paid = bool(paid_at) and inv.total > 0
-    if paid:
-        pa = _account(db, cfg, o.get("payment_method") or "")
-        accounting.record_payment(db, payment_account=pa, amount=inv.total, invoice=inv, reference=f"سفارش سایت #{num}",
-                                  paid_at=max(paid_at, created), source=SOURCE)
+                                   channel="online", notes=f"سفارش سایت #{num}{' - ' + method if method else ''}",
+                                   apply_deposit_ids=credits or None)
+    if paid_at and (inv.total > inv.paid or refunds):
+        pa = pa or _account(db, cfg, o.get("payment_method") or "")
+        if inv.total > inv.paid:
+            accounting.record_payment(db, payment_account=pa, amount=inv.total - inv.paid, invoice=inv, reference=f"سفارش سایت #{num}",
+                                      paid_at=max(paid_at, created), source=SOURCE)
         # money given back on the website: received with the order, paid back on the refund's day
         _give_back(db, wo, customer, pa, refunds, max(paid_at, created), num, f)
-    else:
+    elif not paid_at:
         wo.refund_ids = sorted(set(wo.refund_ids or []) | {int(r["id"]) for r in refunds})
-    wo.invoice_id, wo.state, wo.paid, wo.fp = inv.id, "booked", paid, pl["fp"]
+    wo.invoice_id, wo.state, wo.paid, wo.fp = inv.id, "booked", bool(paid_at), pl["fp"]
     return inv
+
+
+def _undo(db: Session, inv: Invoice, reason: str) -> tuple[list[Payment], list[int]]:
+    """Void the invoice of an order on its own date (the sale as it was booked never happened). Returns the website's
+    payments that were on it (their money is booked again by the caller) and the customer credits made of money
+    received here at the clinic for it (e.g. «دریافت بدهی»): that money is real, it stays the customer's."""
+    pays = list(db.scalars(select(Payment).where(Payment.invoice_id == inv.id, Payment.amount > 0)))
+    accounting.void_invoice(db, inv, reason=reason, payments="cancel")
+    customer, kept = db.get(Customer, inv.customer_id), []
+    for p in pays:
+        if p.source != SOURCE:
+            dep = accounting.record_deposit(db, customer=customer, amount=p.amount, payment_account=db.get(PaymentAccount, p.payment_account_id),
+                                            received_at=p.paid_at, reference=p.reference, kind="credit",
+                                            notes=f"وجه دریافتی در کلینیک برای فاکتور {inv.number} (سفارش سایت)")
+            kept.append(dep.id)
+    return [p for p in pays if p.source == SOURCE], kept
 
 
 def sync_order(db: Session, c: Client, cfg: dict, o: dict) -> str:
@@ -674,7 +737,7 @@ def sync_order(db: Session, c: Client, cfg: dict, o: dict) -> str:
     start = date.fromisoformat(cfg["start"])
     oid = int(o["id"])
     wo = db.scalar(select(WooOrder).where(WooOrder.order_id == oid))
-    created = _dt(o.get("date_created"))
+    created = _when(o, "date_created")
     if wo is None:
         if created is None or created.date() < start:
             return "before_start"
@@ -683,7 +746,7 @@ def sync_order(db: Session, c: Client, cfg: dict, o: dict) -> str:
     f = factor(o.get("currency"), cfg)
     st = o.get("status") or ""
     num = o.get("number") or str(oid)
-    wo.number, wo.status, wo.created, wo.modified = str(num)[:32], st[:24], created, _dt(o.get("date_modified"))
+    wo.number, wo.status, wo.created, wo.modified = str(num)[:32], st[:24], created, _when(o, "date_modified")
     wo.total, wo.method, wo.synced_at = rial(o.get("total"), f), (o.get("payment_method_title") or "")[:64], local_now()
     inv = db.get(Invoice, wo.invoice_id) if wo.invoice_id else None
     if wo.state == "local_void" or (inv is not None and inv.status == "void" and wo.state == "booked"):
@@ -691,9 +754,10 @@ def sync_order(db: Session, c: Client, cfg: dict, o: dict) -> str:
             note(db, f"فاکتور سفارش سایت #{num} در سیستم باطل شده؛ تغییرات بعدی این سفارش ثبت نمی‌شود", "warn")
         wo.state = "local_void"
         return "local_void"
-    refunds = c.get(f"/orders/{oid}/refunds") if o.get("refunds") else []
+    # every refund (the website gives them 10 to a page)
+    refunds = c.all(f"/orders/{oid}/refunds") if o.get("refunds") else []
     pl = plan(o, refunds, f) if st in ACTIVE else None
-    wo.refunded = pl["refunded"] if pl else wo.refunded
+    wo.refunded = pl["refunded"] if pl else sum(abs(rial(r.get("total"), f)) for r in o.get("refunds") or [])
     if st in ACTIVE and pl["target"] == 0 and not pl["lines"]:
         st = "refunded"  # everything was given back
     if st in ACTIVE:
@@ -701,11 +765,11 @@ def sync_order(db: Session, c: Client, cfg: dict, o: dict) -> str:
             _book(db, wo, o, pl, refunds, f, cfg)
             return "booked"
         if pl["fp"] != wo.fp:  # changed on the website (items, partial refund): booked again as it is now
-            accounting.void_invoice(db, inv, reason=f"سفارش سایت #{num} در سایت تغییر کرد", payments="cancel")
-            _book(db, wo, o, pl, refunds, f, cfg)
+            web, kept = _undo(db, inv, f"سفارش سایت #{num} در سایت تغییر کرد")
+            _book(db, wo, o, pl, refunds, f, cfg, credits=kept, pa=db.get(PaymentAccount, web[0].payment_account_id) if web else None)
             note(db, f"سفارش سایت #{num} تغییر کرده بود و دوباره ثبت شد")
             return "rebooked"
-        paid_at = _dt(o.get("date_paid")) or (_dt(o.get("date_completed")) if st == "completed" else None)
+        paid_at = _paid_at(o)
         if paid_at and not wo.paid and inv.total > inv.paid:
             accounting.record_payment(db, payment_account=_account(db, cfg, o.get("payment_method") or ""), amount=inv.total - inv.paid,
                                       invoice=inv, reference=f"سفارش سایت #{num}", paid_at=min(max(paid_at, inv.issued_at), local_now()),
@@ -713,14 +777,28 @@ def sync_order(db: Session, c: Client, cfg: dict, o: dict) -> str:
             wo.paid = True
             return "paid"
         return "unchanged"
-    if st in DEAD:
+    # cancelled, refunded... or put back to "pending payment" (the website puts its goods back in stock then too)
+    if st in DEAD or (st == "pending" and inv is not None and inv.status != "void"):
         if inv is not None and inv.status != "void":
-            accounting.void_invoice(db, inv, reason=f"سفارش سایت #{num} در سایت {STATUS_FA.get(st, st)} شد",
-                                    payments="refund" if inv.paid > 0 else "cancel")
-            wo.state = "cancelled"
-            note(db, f"سفارش سایت #{num} {STATUS_FA.get(st, st)} شد؛ فاکتورش باطل{' و مبلغ آن برگشت داده' if inv.paid else ''} شد")
+            # the sale is undone on its own date; the website's money was received on its day and goes back on the
+            # day of each refund of the website (what no refund covers - cancelled without a refund there: today)
+            web, kept = _undo(db, inv, f"سفارش سایت #{num} در سایت {STATUS_FA.get(st, st)} شد")
+            paid = sum(p.amount for p in web)
+            if paid:
+                customer, pa, at = db.get(Customer, inv.customer_id), db.get(PaymentAccount, web[0].payment_account_id), min(p.paid_at for p in web)
+                rest = paid - _give_back(db, wo, customer, pa, refunds, at, num, f, cap=paid)
+                if rest > 0:
+                    dep = accounting.record_deposit(db, customer=customer, amount=rest, payment_account=pa, received_at=at, source=SOURCE,
+                                                    notes=f"مبلغ برگشتی سفارش سایت #{num} ({STATUS_FA.get(st, st)})")
+                    accounting.close_deposit(db, dep, "refund", pa)
+            else:
+                wo.refund_ids = sorted(set(wo.refund_ids or []) | {int(r["id"]) for r in refunds})
+            wo.state = "waiting" if st == "pending" else "cancelled"
+            note(db, f"سفارش سایت #{num} {STATUS_FA.get(st, st)} شد؛ فاکتورش باطل{' و مبلغ آن برگشت داده' if paid else ''} شد"
+                     + ("؛ پولی که در کلینیک برای آن گرفته شده بود اعتبار مشتری ماند (اگر پس داده‌اید، از صفحهٔ بیعانه‌ها استرداد بزنید)" if kept else ""),
+                 "warn" if kept else "info")
             return "cancelled"
-        if wo.state in ("", "waiting"):
+        if wo.state in ("", "waiting", "error"):
             wo.state = "skipped"
         return "skipped"
     if inv is None:
@@ -737,12 +815,23 @@ def import_orders(db: Session, c: Client, cfg: dict) -> dict:
         raise WooError("تاریخ شروع ثبت سفارش‌های سایت را در تنظیمات مشخص کنید")
     st = state(db)
     since = _dt(st.get("cursor")) or (datetime.fromisoformat(cfg["start"]) - timedelta(days=1))
-    params = {"orderby": "modified", "order": "asc", "dates_are_gmt": "true",
+    # in the order of their ids: an order changed while the pages are read keeps its place (in the order of change
+    # it would jump to the end and push another order into a page already read; orders changed in the same second
+    # have no fixed order either)
+    params = {"orderby": "id", "order": "asc", "dates_are_gmt": "true",
               "modified_after": (since - timedelta(minutes=10)).isoformat(timespec="seconds")}
+    orders = list({int(o["id"]): o for o in c.all("/orders", **params)}.values())  # a row read twice: once
+    changed = [m for m in (_dt(o.get("date_modified_gmt")) or _dt(o.get("date_modified")) for o in orders) if m]
+    # the next run reads again from here: the newest change read, but not after the website's clock when the reading
+    # began (an order changed meanwhile may have been read before the change), and not on if the list kept changing
+    cursor = max(changed, default=since)
+    if c.read_at:
+        cursor = min(cursor, c.read_at)
+    if not c.stable:
+        cursor = since
     out: dict[str, int] = defaultdict(int)
-    cursor, blocked = since, False
     methods = dict(st.get("methods") or {})
-    for o in c.all("/orders", **params):
+    for o in orders:
         if o.get("payment_method"):
             methods[o["payment_method"]] = o.get("payment_method_title") or o["payment_method"]
         try:
@@ -753,25 +842,29 @@ def import_orders(db: Session, c: Client, cfg: dict) -> dict:
             wo = db.scalar(select(WooOrder).where(WooOrder.order_id == int(o["id"])))
             if wo is not None and wo.note:
                 wo.note = ""
-        except (WooError, accounting.AccountingError) as exc:
+        except Exception as exc:  # noqa: BLE001 - one order that can't be booked must not stop the others
             db.rollback()
             out["error"] += 1
-            blocked = True
+            if isinstance(exc, (WooError, accounting.AccountingError)):
+                why = str(exc)
+            else:
+                log.exception("woo: order %s", o.get("id"))
+                why = f"اطلاعات این سفارش در سایت ناقص یا غیرعادی است؛ سفارش را در سایت باز و بررسی کنید ({type(exc).__name__}: {exc})"
             wo = db.scalar(select(WooOrder).where(WooOrder.order_id == int(o["id"])))
-            msg = f"سفارش سایت #{o.get('number') or o['id']} ثبت نشد: {exc}"
+            msg = f"سفارش سایت #{o.get('number') or o['id']} ثبت نشد: {why}"
             if wo is None:
                 wo = WooOrder(order_id=int(o["id"]), number=str(o.get("number") or o["id"])[:32], refund_ids=[])
                 db.add(wo)
-            if wo.note != str(exc)[:256]:
+            if wo.note != why[:256]:
                 note(db, msg, "error")
             wo.state = wo.state if wo.invoice_id else "error"
-            wo.status, wo.note = (o.get("status") or "")[:24], str(exc)[:256]
+            wo.status, wo.note = str(o.get("status") or "")[:24], why[:256]
             db.commit()
             if isinstance(exc, WooError) and "در دسترس" in str(exc):
                 raise
-        modified = _dt(o.get("date_modified_gmt")) or _dt(o.get("date_modified"))
-        if modified and not blocked:  # an order that failed is read again next time
-            cursor = max(cursor, modified)
+            # read again next time (from before its change)
+            cursor = min(cursor, _dt(o.get("date_modified_gmt")) or _dt(o.get("date_modified")) or since)
+    cursor = max(cursor, since)
     st = state(db)
     st["cursor"], st["methods"] = cursor.isoformat(timespec="seconds"), methods
     _save_state(db, st)

@@ -252,6 +252,58 @@ def test_audit_chain_stays_whole_with_parallel_writes_and_reports_every_break():
             assert out["checked"] == 40
 
 
+def test_old_bug_links_are_mended_once_but_real_edits_stay_reported(client):
+    from app.models import AuditLog, Setting, local_now
+    from app.services import settings_store
+    from app.services.audit import RECHAIN_FLAG, RECHAIN_MARK, _digest, audit, rechain_once, verify_audit_chain
+
+    # the shared database went through start-up: the flag is set, and a second run does nothing
+    with dbmod.SessionLocal() as db:
+        assert settings_store.get(db, RECHAIN_FLAG) == RECHAIN_MARK
+        assert rechain_once(db) == []
+
+    with _fresh_db() as make:
+        with make() as db:
+            def add(n, action="g2.rechain"):
+                for i in range(n):
+                    audit(db, action, "test", i)
+                    db.commit()
+            add(3)
+            # what the old bug wrote: two records of one request, both linked to the same earlier record
+            last = db.scalar(select(AuditLog).order_by(AuditLog.id.desc()).limit(1))
+            pair = [AuditLog(at=local_now(), actor="system", action="g2.old_bug", entity="test", entity_id=str(i), data={"i": i},
+                             prev_hash=last.hash) for i in range(2)]
+            for row in pair:
+                row.hash = _digest(row.prev_hash, row)
+                db.add(row)
+            db.commit()
+            add(7)
+            rows = db.scalars(select(AuditLog).order_by(AuditLog.id)).all()
+            assert len(rows) == 12
+            edited, deleted, after_deleted = rows[7], rows[9], rows[10]
+            edited.data = {"amount": 1}  # changed by hand: its content no longer matches its hash
+            db.delete(deleted)  # a record removed: the next one points to a record that is gone
+            db.commit()
+            before = verify_audit_chain(db)
+            assert before["breaks"] == [pair[1].id, edited.id, after_deleted.id]
+
+            mended = rechain_once(db)
+            assert mended == [pair[1].id, rows[5].id, rows[6].id]  # the bug's record and the ones after it, up to the edit
+            out = verify_audit_chain(db)
+            assert out["ok"] is False and out["breaks"] == [edited.id, after_deleted.id]  # real changes are still shown
+            assert out["checked"] == 12  # 11 left + the record of the mending itself
+            note = db.scalar(select(AuditLog).order_by(AuditLog.id.desc()).limit(1))
+            assert note.action == "audit.rechain" and note.data["mended"] == 3 and note.data["ids"] == mended
+            assert settings_store.get(db, RECHAIN_FLAG) == RECHAIN_MARK
+            assert rechain_once(db) == []  # only once
+            # even without the flag nothing more is mended: the edit and the deletion are never hidden
+            db.delete(db.get(Setting, RECHAIN_FLAG))
+            db.commit()
+            assert rechain_once(db) == []
+            assert verify_audit_chain(db)["breaks"] == [edited.id, after_deleted.id]
+            assert db.scalar(select(func.count(AuditLog.id)).where(AuditLog.action == "audit.rechain")) == 1
+
+
 # ---------------------------------------------------------------- AI permissions
 def test_ai_agent_cannot_move_money_but_keeps_its_read_tools(client, accounts):
     _user(client, "g2_ai", role="ai_agent", password="AgentPass1")
@@ -340,3 +392,36 @@ def test_assistant_only_proposes_changes_the_user_confirms(client, accounts, mon
     assert after[acc] - before[acc] == 1_234_560 and held() == 1
     tb = client.get("/api/ledger/trial-balance").json()
     assert tb["total_debit"] == tb["total_credit"]
+
+
+def test_assistant_tool_errors_show_no_sql(client, monkeypatch, caplog):
+    """A read tool that fails inside the database: the chat (and the model) get a short note, the log the details."""
+    from sqlalchemy.exc import OperationalError
+
+    from app.ai import claude
+    from app.ai.tools import CORE_TOOLS
+
+    def db_error(db, user, **kw):  # noqa: ANN001, ANN003, ANN202
+        raise OperationalError("SELECT password_hash FROM users WHERE id = ?", (1,), Exception("disk I/O error"))
+
+    def rule_error(db, user, **kw):  # noqa: ANN001, ANN003, ANN202
+        raise ValueError("مشتری پیدا نشد")
+
+    monkeypatch.setattr(next(t for t in CORE_TOOLS if t.name == "open_deposits"), "handler", db_error)
+    monkeypatch.setattr(next(t for t in CORE_TOOLS if t.name == "alerts"), "handler", rule_error)
+    replies = iter([
+        SimpleNamespace(stop_reason="tool_use", content=[SimpleNamespace(type="tool_use", id="e1", name="open_deposits", input={}),
+                                                         SimpleNamespace(type="tool_use", id="e2", name="alerts", input={})]),
+        SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="خطا")]),
+    ])
+    seen = []
+    monkeypatch.setattr(claude, "available", lambda: True)
+    monkeypatch.setattr(claude, "create", lambda **kw: seen.append(kw) or next(replies))
+    with caplog.at_level("ERROR", logger="hesabdar.ai"):
+        out = client.post("/api/ai/chat", json={"messages": [{"role": "user", "content": "بیعانه‌ها"}]}).json()
+    calls = {c["tool"]: c for c in out["tool_calls"]}
+    assert calls["open_deposits"]["ok"] is False and "SELECT" not in calls["open_deposits"]["error"]
+    assert calls["alerts"]["error"] == "مشتری پیدا نشد"  # a rule's own words are kept
+    sent = [m for m in seen[1]["messages"] if m["role"] == "user" and isinstance(m["content"], list)][-1]
+    assert all("SELECT" not in r["content"] for r in sent["content"])
+    assert any("open_deposits" in rec.getMessage() and rec.exc_info for rec in caplog.records)

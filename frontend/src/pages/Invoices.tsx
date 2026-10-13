@@ -459,6 +459,7 @@ export function InvoiceView({ id, onChange }: { id: number; onChange: () => void
         {data.status !== "void" && <div className="flex justify-between font-bold text-amber-600"><span>مانده</span><span className="num">{money(data.due)}</span></div>}
       </div>
       {data.notes && <div className="muted text-xs">توضیحات: {data.notes}</div>}
+      {data.due > 0 && data.status !== "void" && <OpenDeposits invoiceId={id} customerId={data.customer_id} onUsed={() => { reload(); onChange(); }} />}
       {data.due > 0 && data.status !== "void" && (
         <div className="grid grid-cols-12 gap-2">
           <select className="input col-span-6" value={pay.payment_account_id} onChange={(e) => setPay({ ...pay, payment_account_id: Number(e.target.value) })}>
@@ -495,6 +496,39 @@ export function InvoiceView({ id, onChange }: { id: number; onChange: () => void
           </div>
         ) : <button className="btn btn-sm text-rose-600" onClick={() => setVoiding(true)}>ابطال فاکتور</button>
       )}
+    </div>
+  );
+}
+
+/** The customer's open deposits / credit, to use on an invoice that was issued without them. */
+function OpenDeposits({ invoiceId, customerId, onUsed }: { invoiceId: number; customerId: number; onUsed: () => void }) {
+  const toast = useToast();
+  const { data, reload } = useApi<any[]>(`/api/deposits?customer_id=${customerId}&status=held`);
+  const [busy, setBusy] = useState(false);
+  if (!data?.length) return null;
+  async function use(d: any) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const r = await api<any>(`/api/invoices/${invoiceId}/apply-deposit`, { body: { deposit_id: d.id } });
+      toast(`${money(r.used)} از ${d.kind === "credit" ? "اعتبار" : "بیعانه"} کسر شد`);
+      reload();
+      onUsed();
+    } catch (e: any) {
+      toast(e.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="space-y-1 rounded-2xl bg-emerald-500/10 p-3 text-xs">
+      <div className="font-bold">این مشتری بیعانه/اعتبار باز دارد</div>
+      {data.map((d) => (
+        <div key={d.id} className="flex flex-wrap items-center justify-between gap-2">
+          <span><b className="num">{money(d.amount)}</b> · {d.kind === "credit" ? "اعتبار مشتری (برای هر خریدی)" : `بیعانه${d.service ? ` «${d.service}»` : ""} (فقط برای خدمات)`} · {formatJ(d.received_at, false)}</span>
+          <button className="btn btn-sm" disabled={busy} onClick={() => use(d)}>کسر از این فاکتور</button>
+        </div>
+      ))}
     </div>
   );
 }

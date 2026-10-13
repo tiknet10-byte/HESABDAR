@@ -47,7 +47,9 @@ Extract every customer row as JSON:
  "page_total": int|null, "currency": "toman"|"rial"}
 Use English digits. Keep Persian names as written. If unsure of a value use null."""
 
-PAY_WORDS = {"pos": ["کارتخوان", "پوز", "pos", "دستگاه"], "card": ["کارت به کارت", "کارت", "واریز", "انتقال"],
+MAX_BYTES = 20 * 1024 * 1024  # one upload (photo, PDF, text or CSV of book pages): about 20 MB at most
+
+PAY_WORDS = {"pos":["کارتخوان", "پوز", "pos", "دستگاه"], "card": ["کارت به کارت", "کارت", "واریز", "انتقال"],
              "cash": ["نقد", "نقدی", "کش"], "transfer": ["شبا", "پایا", "ساتنا"]}
 
 
@@ -218,9 +220,12 @@ class Plugin(BasePlugin):
         r = APIRouter()
 
         @r.post("/upload")
-        async def upload(file: UploadFile = File(...), currency: str = Form("toman"), db: Session = Depends(get_db),
-                         user=Depends(require("finance"))):
-            raw = await file.read()
+        def upload(file: UploadFile = File(...), currency: str = Form("toman"), db: Session = Depends(get_db),
+                   user=Depends(require("finance"))):
+            raw = file.file.read(MAX_BYTES + 1)  # a plain def: reading and the AI call run off the server's event loop
+            if len(raw) > MAX_BYTES:
+                raise HTTPException(400, "حجم این فایل بیشتر از ۲۰ مگابایت است. عکس صفحه را کم‌حجم‌تر بگیرید "
+                                         "یا هر چند صفحه را جدا بفرستید.")
             ctype = file.content_type or ""
             name = file.filename or "upload"
             provider = "text"
@@ -329,7 +334,7 @@ class Plugin(BasePlugin):
             q = select(ImportBatch).where(ImportBatch.kind == "sales_book", ImportBatch.status == "review")
             return [_batch(b, rows=False) for b in db.scalars(q)]
         return [AITool("sales_book_batches_pending", "Scanned sales-book pages waiting for review, with warning counts.",
-                       {"type": "object", "properties": {}}, pending, "finance")]
+                       {"type": "object", "properties": {}}, pending, "reports")]  # it only reads
 
 
 def _batch(b: ImportBatch, rows: bool = True) -> dict:

@@ -181,8 +181,11 @@ def delete_line(lid: int, db: Session = Depends(get_db), user=Depends(require("s
     l = db.get(ServiceLine, lid) or _404()
     for s in list(db.scalars(select(Service).where(Service.line_id == lid))):
         _remove_service(db, s)
+    # a line with sales, services, staff or anything in the books (deposits, forfeits) is archived, never erased
     used = db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.line_id == lid)) or \
-        db.scalar(select(func.count(Service.id)).where(Service.line_id == lid))
+        db.scalar(select(func.count(Service.id)).where(Service.line_id == lid)) or \
+        db.scalar(select(func.count(Staff.id)).where(Staff.line_id == lid)) or \
+        db.scalar(select(func.count(JournalLine.id)).where(JournalLine.line_id == lid))
     if used:
         l.is_active = False
     else:
@@ -491,7 +494,11 @@ def save_account_routing(body: RoutingIn, db: Session = Depends(get_db), user=De
 def delete_account(aid: int, db: Session = Depends(get_db), user=Depends(require("settings"))):
     """Delete a POS / card / bank account. If it already has transactions it is archived so the books stay intact."""
     a = db.get(PaymentAccount, aid) or _404()
-    used = any(db.scalar(select(func.count()).select_from(m).where(m.payment_account_id == aid)) for m in (Deposit, Payment, Expense))
+    from ..models import BankTransaction, CapitalMove, HoldingMove, SupplierPayment
+
+    used = any(db.scalar(select(func.count()).select_from(m).where(m.payment_account_id == aid))
+               for m in (Deposit, Payment, Expense, BankTransaction, SupplierPayment, CapitalMove, HoldingMove)) or \
+        bool(db.scalar(select(func.count(Deposit.id)).where(Deposit.refund_account_id == aid)))
     if a.ledger_account_id and db.scalar(select(func.count(JournalLine.id)).where(JournalLine.account_id == a.ledger_account_id)):
         used = True
     if used:
@@ -592,6 +599,10 @@ def update_account(aid: int, body: AccountIn, db: Session = Depends(get_db), use
         if v != "••••":
             merged[k] = v
     a.provider_config = merged
+    if a.ledger_account_id:  # its ledger account carries the same name (a later account may reuse the old name)
+        acc = db.get(LedgerAccount, a.ledger_account_id)
+        if acc is not None and acc.name != a.name:
+            acc.name = a.name
     audit(db, "account.update", "payment_account", a.id, {"name": a.name}, user=user)
     db.commit()
     return _account(a)

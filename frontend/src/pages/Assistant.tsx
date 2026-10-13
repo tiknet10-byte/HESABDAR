@@ -10,9 +10,30 @@ type Call = { tool: string; input?: Record<string, any>; ok?: boolean | null; co
 type Msg = { role: "user" | "assistant"; content: string; tools?: Call[] };
 const ACTIONS: Record<string, string> = { create_customer: "ساخت مشتری", register_deposit: "ثبت بیعانه", teach_service_alias: "یاد دادن نام دیگر یک خدمت" };
 const ARGS: Record<string, string> = {
-  full_name: "نام", mobile: "موبایل", instagram: "اینستاگرام", customer_id: "شماره مشتری", amount_rial: "مبلغ",
-  payment_account_id: "شماره حساب دریافت", service_id: "شماره خدمت", reference: "شماره پیگیری", note: "توضیح", alias: "نام دیگر",
+  full_name: "نام", mobile: "موبایل", instagram: "اینستاگرام", customer_id: "مشتری", amount_rial: "مبلغ",
+  payment_account_id: "حساب دریافت", service_id: "خدمت", reference: "شماره پیگیری", note: "توضیح", alias: "نام دیگر",
 };
+
+/** A proposal shows what it really points to (the customer's, account's and service's name), so the person can check
+ * it before pressing the button; a number alone could be any customer. */
+function ArgValue({ name, value }: { name: string; value: any }) {
+  const id = Number(value);
+  const cust = useApi<any>(name === "customer_id" && id > 0 ? `/api/customers/${id}` : null);
+  const accounts = useApi<any[]>(name === "payment_account_id" ? "/api/accounts" : null);
+  const services = useApi<any[]>(name === "service_id" ? "/api/services" : null);
+  if (name === "amount_rial") return <b>{money(id)}</b>;
+  const found =
+    name === "customer_id" ? cust.data && `${cust.data.full_name}${cust.data.mobile ? ` (${cust.data.mobile})` : ""}`
+    : name === "payment_account_id" ? accounts.data?.find((a) => a.id === id)?.name
+    : name === "service_id" ? services.data?.find((s) => s.id === id)?.name
+    : null;
+  if (found) return <b>{found}</b>;
+  if (["customer_id", "payment_account_id", "service_id"].includes(name)) {
+    const loading = cust.loading || accounts.loading || services.loading;
+    return <span className={loading ? "muted" : "text-rose-600"}>{loading ? "…" : `شماره ${String(value)} پیدا نشد`}</span>;
+  }
+  return <>{String(value)}</>;
+}
 const SUGGEST = [
   "فروش این ماه را با ماه قبل مقایسه کن و دلیل تغییرات را بگو",
   "کدام لاین سودآورتر است و چه پیشنهادی برای رشد داری؟",
@@ -110,7 +131,7 @@ export default function Assistant() {
                   <div key={k} className="mt-2 rounded-2xl border border-amber-400 bg-amber-500/10 p-3 text-xs leading-6">
                     <div className="font-bold">پیشنهاد دستیار: {ACTIONS[t.tool] ?? t.tool}</div>
                     {Object.entries(t.input ?? {}).map(([a, v]) => (
-                      <div key={a}><span className="muted">{ARGS[a] ?? a}: </span>{a === "amount_rial" ? money(Number(v)) : String(v)}</div>
+                      <div key={a}><span className="muted">{ARGS[a] ?? a}: </span><ArgValue name={a} value={v} /></div>
                     ))}
                     {t.done ? (
                       <div className="mt-1 flex items-center gap-1 font-bold text-emerald-600"><Check size={14} />انجام شد</div>

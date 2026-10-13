@@ -219,7 +219,8 @@ function SiteProducts({ onChange }: { onChange: () => void }) {
     if (!window.confirm(question)) return;
     try {
       const r = await api("/api/woo/stock/align", { body });
-      toast(r.error ? r.error : `موجودی ${faDigits(r.queued)} کالا در سایت برابر سیستم شد`, r.error ? "error" : undefined);
+      const err = r.error || r.sync?.error || (r.sync?.stock?.failed ? `${faDigits(r.sync.stock.failed)} مورد به سایت نرسید؛ دلیلش در «صف ارسال» نوشته شده است` : "");
+      toast(err ? err : r.sync?.busy ? `موجودی ${faDigits(r.queued)} کالا در صف ارسال است و در هماهنگی بعدی خودکار به سایت می‌رود` : `موجودی ${faDigits(r.queued)} کالا در سایت برابر سیستم شد`, err ? "error" : undefined);
       reload();
       onChange();
     } catch (e: any) {
@@ -254,7 +255,7 @@ function SiteProducts({ onChange }: { onChange: () => void }) {
                 <td className="num">{r.manage_stock ? num(r.site_stock ?? 0) : <span className="text-amber-600">مدیریت موجودی خاموش</span>}</td>
                 <td className="min-w-48">
                   {linking === r.woo_id ? <ProductPicker onChange={(p) => link(r.woo_id, p.id)} /> : r.product
-                    ? <span><span className="num muted">{r.product.code}</span> {r.product.name}</span>
+                    ? <span><span className="num muted">{r.product.code}</span> {r.product.name} <button className="mr-1 text-[10px] text-violet-600 hover:underline dark:text-violet-300" title="اگر به کالای اشتباهی وصل شده، کالای درست را انتخاب کنید" onClick={() => setLinking(r.woo_id)}>تغییر</button></span>
                     : <button className="text-violet-600 hover:underline dark:text-violet-300" onClick={() => setLinking(r.woo_id)}>وصل نیست - انتخاب محصول</button>}
                 </td>
                 <td className={`num ${r.stock_differs ? "font-bold text-amber-700 dark:text-amber-300" : ""}`}>{r.product ? num(r.product.stock_qty) : "—"}

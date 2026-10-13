@@ -250,11 +250,16 @@ class Plugin(BasePlugin):
                     for t in db.scalars(q)]
 
         @r.post("/transactions/{tx_id}/ignore")
-        def ignore(tx_id: int, db: Session = Depends(get_db), _=Depends(require("finance"))):
+        def ignore(tx_id: int, db: Session = Depends(get_db), user=Depends(require("finance"))):
+            from ....services.audit import audit
+
             tx = db.get(BankTransaction, tx_id)
             if not tx:
                 raise HTTPException(404)
+            if tx.status != "unmatched":  # one that already paid a receipt / deposit stays as it is
+                raise HTTPException(400, "فقط تراکنشی که به چیزی وصل نیست را می‌شود نادیده گرفت")
             tx.status = "ignored"
+            audit(db, "bank_tx.ignore", "bank_transaction", tx.id, {"amount": tx.amount}, user=user)
             db.commit()
             return {"ok": True}
 
@@ -273,8 +278,9 @@ class Plugin(BasePlugin):
 
     def ai_tools(self) -> list[AITool]:
         def unmatched(db, user, limit: int = 50):  # noqa: ANN001, ANN202
-            q = select(BankTransaction).where(BankTransaction.status == "unmatched").order_by(BankTransaction.occurred_at.desc()).limit(limit)
+            q = (select(BankTransaction).where(BankTransaction.status == "unmatched").order_by(BankTransaction.occurred_at.desc())
+                 .limit(max(1, min(int(limit or 50), 200))))
             return [{"id": t.id, "amount": t.amount, "direction": t.direction, "at": t.occurred_at.isoformat(),
                      "reference": t.reference, "description": t.description} for t in db.scalars(q)]
         return [AITool("unmatched_bank_transactions", "Bank transactions not yet matched to any deposit, payment or receipt.",
-                       {"type": "object", "properties": {"limit": {"type": "integer"}}}, unmatched, "finance")]
+                       {"type": "object", "properties": {"limit": {"type": "integer"}}}, unmatched, "reports")]  # it only reads

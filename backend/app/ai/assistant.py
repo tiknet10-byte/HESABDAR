@@ -7,6 +7,7 @@ assistant that understands a few common questions, so the UI always works.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,8 @@ from ..core.security import has_permission
 from ..services import reports, settings_store
 from . import claude
 from .tools import READ_ONLY, invoke, schema, tools_for
+
+log = logging.getLogger("hesabdar.ai")
 
 SYSTEM = """You are the accounting & business assistant of a beauty salon ("{salon}").
 Today is {today} (Gregorian). Users speak Persian; answer in fluent, concise Persian.
@@ -69,8 +72,14 @@ def chat(db: Session, user, messages: list[dict]) -> dict:
                 calls.append({"tool": block.name, "input": block.input, "ok": True})
             except Exception as exc:  # report errors back to the model
                 db.rollback()
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(exc), "is_error": True})
-                calls.append({"tool": block.name, "input": block.input, "ok": False, "error": str(exc)})
+                # a wrong argument / not allowed / a rule of the books: its own words; anything else (a database
+                # error with SQL and values) only in the log
+                known = isinstance(exc, (ValueError, KeyError, TypeError, PermissionError))
+                msg = str(exc) if known else f"internal error ({type(exc).__name__})"
+                if not known:
+                    log.error("assistant tool %s failed", block.name, exc_info=exc)
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": msg, "is_error": True})
+                calls.append({"tool": block.name, "input": block.input, "ok": False, "error": msg})
         convo.append({"role": "user", "content": results})
     return {"reply": "پاسخ کامل نشد؛ لطفاً سؤال را دقیق‌تر بپرسید.", "tool_calls": calls, "mode": "ai"}
 

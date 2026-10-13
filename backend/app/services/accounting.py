@@ -113,9 +113,22 @@ def _next_child_code(db: Session, parent: str) -> str:
 
 
 def cash_account_for(db: Session, pa: PaymentAccount) -> LedgerAccount:
+    """Each POS / card / bank account / cash box has its own 11xx ledger account, never shared: a new account with
+    the name of an older one (even an archived one) gets a fresh ledger account, so their money is never mixed."""
     if pa.ledger_account_id:
         return db.get(LedgerAccount, pa.ledger_account_id)
-    acc = _child(db, CASH_PARENT, pa.name, "asset")
+    acc = db.scalar(select(LedgerAccount).where(LedgerAccount.parent_code == CASH_PARENT, LedgerAccount.name == pa.name).limit(1))
+    if acc is not None:
+        linked = db.scalar(select(PaymentAccount.id).where(PaymentAccount.ledger_account_id == acc.id, PaymentAccount.id != pa.id).limit(1))
+        booked = db.scalar(select(JournalLine.id).where(JournalLine.account_id == acc.id).limit(1))
+        if linked or booked:
+            acc = None
+    if acc is None:
+        taken = set(db.scalars(select(LedgerAccount.name).where(LedgerAccount.parent_code == CASH_PARENT)))
+        name = pa.name if pa.name not in taken else f"{pa.name} (#{pa.id})"
+        acc = LedgerAccount(code=_next_child_code(db, CASH_PARENT), name=name, type="asset", parent_code=CASH_PARENT)
+        db.add(acc)
+        db.flush()
     pa.ledger_account_id = acc.id
     return acc
 
@@ -230,6 +243,9 @@ def delete_customers(db: Session, customers: list[Customer]) -> int:
     ids = [c.id for c in customers]
     if not ids:
         return 0
+    from .customer_merge import forget
+
+    forget(db, ids)  # loyalty points / «not the same person» answers kept by id must not pass to a later customer
     for m in (InboundReceipt, ConversationMessage):
         db.execute(update(m).where(m.customer_id.in_(ids)).values(customer_id=None))
     if hasattr(ConversationState, "customer_id"):
@@ -629,6 +645,55 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
     audit(db, "invoice.issue", "invoice", inv.id, {"number": inv.number, "total": inv.total}, user=user)
     bus.emit("invoice.issued", {"id": inv.id, "customer_id": customer.id, "total": inv.total}, db=db)
     return inv
+
+
+def apply_deposit(db: Session, inv: Invoice, dep: Deposit, user=None) -> int:  # noqa: ANN001
+    """Use a customer's open deposit / credit on an invoice issued earlier (e.g. it was not ticked then).
+    Same rules as when issuing: a service deposit pays only the invoice's services (net of what deposits already
+    paid there), a credit pays anything still due; what is left stays open. Returns the amount used."""
+    from sqlalchemy import update
+
+    if inv.status == "void":
+        raise AccountingError("فاکتور باطل شده است")
+    if dep.customer_id != inv.customer_id:
+        raise AccountingError("این بیعانه مال مشتری دیگری است")
+    if dep.status != "held":
+        raise AccountingError("این بیعانه دیگر باز نیست")
+    due = inv.total - inv.paid
+    if not is_credit(dep):
+        services = sum((i.net_amount if i.net_amount is not None else i.amount) for i in inv.items if not i.product_id)
+        used = sum(d.amount for d in db.scalars(select(Deposit).where(Deposit.applied_invoice_id == inv.id, Deposit.status == "applied"))
+                   if not is_credit(d))
+        due = min(due, services - used)
+        if due <= 0:
+            raise AccountingError("بیعانه فقط مبلغ خدمات را می‌پردازد و خدمات این فاکتور پرداخت شده است" if services
+                                  else "بیعانه فقط برای خدمات است؛ این فاکتور خدمتی ندارد")
+    if due <= 0:
+        raise AccountingError("این فاکتور مانده‌ای ندارد")
+    amount = min(dep.amount, due)
+    db.flush()
+    # paid += amount only if it still fits (a payment at the same moment can't make it more than the total)
+    if not db.execute(update(Invoice).where(Invoice.id == inv.id, Invoice.status != "void", Invoice.paid + amount <= Invoice.total)
+                      .values(paid=Invoice.paid + amount).execution_options(synchronize_session=False)).rowcount:
+        raise AccountingError("این فاکتور همین الان تغییر کرده است؛ صفحه را تازه کنید")
+    if not _claim(db, dep, "held", "applied"):
+        raise AccountingError("این بیعانه همین الان استفاده شده است")
+    if dep.amount > amount:  # the rest stays open, same service / appointment / staff
+        db.add(Deposit(customer_id=dep.customer_id, amount=dep.amount - amount, payment_account_id=dep.payment_account_id,
+                       received_at=dep.received_at, reference=dep.reference, source=dep.source, kind=dep.kind,
+                       service_id=dep.service_id, appointment_id=dep.appointment_id, staff_id=dep.staff_id,
+                       service_guess=dep.service_guess or {}, notes=f"باقیمانده بیعانه #{dep.id}"))
+        dep.amount = amount
+    post(db, f"تسویه بیعانه با فاکتور {inv.number}", [
+        Leg(account(db, DEPOSITS), debit=amount, customer_id=inv.customer_id),
+        Leg(account(db, AR), credit=amount, customer_id=inv.customer_id),
+    ], "deposit_apply", dep.id)
+    dep.applied_invoice_id = inv.id
+    db.refresh(inv, ["paid", "status"])
+    _refresh_status(inv)
+    audit(db, "deposit.apply", "deposit", dep.id, {"invoice": inv.id, "amount": amount}, user=user)
+    bus.emit("deposit.applied", {"id": dep.id, "invoice_id": inv.id, "amount": amount}, db=db)
+    return amount
 
 
 def _refresh_status(inv: Invoice) -> None:

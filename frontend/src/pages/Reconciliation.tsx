@@ -129,7 +129,7 @@ export default function Reconciliation() {
       <Tabs value={tab} onChange={setTab} items={[{ value: "receipts", label: "رسیدهای مشتریان" }, { value: "bank", label: "تراکنش‌های بانک" }]} />
       {tab === "receipts" ? (
         <Card pad={false}>
-          <div className="p-4"><Tabs value={status} onChange={setStatus} items={[{ value: "", label: "همه" }, { value: "pending", label: "در انتظار" }, { value: "matched", label: "تطبیق (بی‌نام)" }, { value: "mismatch", label: "مغایرت" }, { value: "registered", label: "ثبت‌شده" }]} /></div>
+          <div className="p-4"><Tabs value={status} onChange={setStatus} items={[{ value: "", label: "همه" }, { value: "pending", label: "در انتظار" }, { value: "matched", label: "تطبیق (منتظر تأیید)" }, { value: "mismatch", label: "مغایرت" }, { value: "registered", label: "ثبت‌شده" }]} /></div>
           <div className="overflow-x-auto">
             {!receipts.data ? <Loading /> : r.length === 0 ? <Empty text="رسیدی دریافت نشده" /> : (
               <table className="table">

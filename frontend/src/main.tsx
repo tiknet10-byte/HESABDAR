@@ -61,10 +61,10 @@ function App() {
     api<User>("/api/auth/me").then(setUser).catch(() => setToken(null)).finally(() => setReady(true));
   }, []);
   useEffect(() => {
-    const h = () => setUser(null);
+    const h = () => logout(); // logged out by the server (401): clear the same things as the logout button
     window.addEventListener("hesabdar:logout", h);
     return () => window.removeEventListener("hesabdar:logout", h);
-  }, []);
+  }, [logout]);
 
   const toast = useCallback((text: string, kind: Toast["kind"] = "ok") => {
     const id = Date.now() + Math.random();

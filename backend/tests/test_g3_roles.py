@@ -214,3 +214,74 @@ def test_upload_restore_is_upgraded_and_audited(client):
         # a wrong file is refused and nothing is restored
         bad = client.post("/api/backups/upload-restore", files={"file": ("x.hbk", b"not a backup", "application/octet-stream")})
         assert bad.status_code == 400
+
+
+def test_restoring_a_backup_from_before_the_fix_mends_its_audit_links(client):
+    """A backup of 1.19 can hold records the old bug linked to the wrong earlier record: restoring it mends them once
+    (as the first start of 1.20.0 does), so Settings > Security does not say "tampered"."""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    from app.models import AuditLog, Setting
+    from app.services.audit import RECHAIN_FLAG, _digest
+
+    client.post("/api/customers", json={"full_name": "مشتری زنجیره", "mobile": "09151030007"})
+    with _own_db() as live:
+        old = live.parent / "chain.db"
+        backup_mod._copy_db(live, old)
+        eng = create_engine(f"sqlite:///{old}")
+        with Session(eng) as db:
+            last, before = db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(2)).all()
+            last.prev_hash = before.prev_hash  # the old bug: linked to the same record as the one before it
+            last.hash = _digest(last.prev_hash, last)
+            flag = db.get(Setting, RECHAIN_FLAG)
+            if flag is not None:
+                db.delete(flag)  # a database of 1.19 never had the flag
+            db.commit()
+            bad_id = last.id
+        eng.dispose()
+        r = client.post("/api/backups/upload-restore", files={"file": ("g3-chain.hbk", _hbk(old.read_bytes()), "application/octet-stream")})
+        assert r.status_code == 200 and "warning" not in r.json(), r.text
+        v = client.get("/api/audit/verify").json()
+        assert v["ok"], v
+        log = client.get("/api/audit", params={"limit": 10}).json()
+        assert any(a["action"] == "audit.rechain" and bad_id in a["data"]["ids"] for a in log)
+
+
+def test_restored_backup_without_a_plugins_row_gives_it_its_first_start_state(client):
+    from app.core.db import SessionLocal
+    from app.models import PluginState
+
+    with _own_db() as live:
+        old = live.parent / "noplugin.db"
+        backup_mod._copy_db(live, old)
+        with closing(sqlite3.connect(old)) as con:
+            con.execute("DELETE FROM plugin_states WHERE name = 'messaging_receipts'")  # a backup from before this plugin
+            con.commit()
+        manager.enabled["messaging_receipts"] = True  # on here, now
+        r = client.post("/api/backups/upload-restore", files={"file": ("g3-noplugin.hbk", _hbk(old.read_bytes()), "application/octet-stream")})
+        assert r.status_code == 200 and "warning" not in r.json(), r.text
+        assert manager.enabled["messaging_receipts"] is False  # off, as on a new install (not the old in-memory choice)
+        with SessionLocal() as db:
+            st = db.get(PluginState, "messaging_receipts")
+            assert st is not None and st.enabled is False  # the page and the database agree
+        assert next(p for p in client.get("/api/plugins").json() if p["name"] == "messaging_receipts")["enabled"] is False
+
+
+# ---------------------------------------------------------------- AI chat errors
+def test_ai_chat_error_shows_a_code_not_the_details(client, monkeypatch, caplog):
+    import re
+
+    from app.ai import assistant
+
+    def boom(db, user, messages):  # noqa: ANN001, ANN202
+        raise RuntimeError("(sqlite3.OperationalError) SELECT password_hash FROM users WHERE id = 1")
+
+    monkeypatch.setattr(assistant, "chat", boom)
+    with caplog.at_level("ERROR", logger="hesabdar.system"):
+        r = client.post("/api/ai/chat", json={"messages": [{"role": "user", "content": "سلام"}]})
+    assert r.status_code == 502
+    detail = r.json()["detail"]
+    assert "SELECT" not in detail and "password" not in detail and "sqlite" not in detail
+    code = re.search(r"کد ([0-9a-f]{6})", detail).group(1)
+    assert any(code in rec.getMessage() and rec.exc_info for rec in caplog.records)  # the details are in the log

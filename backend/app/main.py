@@ -68,6 +68,9 @@ def init_db() -> None:
 
         tizpardaz.backfill_docs(db)  # Tizpardaz rows brought over before invoices were kept: their invoices, sellers linked
         db.commit()
+        from .services.audit import rechain_once
+
+        rechain_once(db)  # once: audit records an old bug linked to the wrong record (no false "tampered" warning)
 
 
 # indexes for the queries that grow with the data (lists, reports, dashboards); created if missing on start-up

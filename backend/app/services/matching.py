@@ -177,6 +177,14 @@ def expire_pending_receipts(db: Session) -> int:
                         f"{r.sender} رسید {toman(r.amount)} فرستاده ولی واریز آن در بانک پیدا نشد",
                         level="danger", ref_type="receipt", ref_id=r.id)
             count += 1
+    # matched only on amount and time: they hold a bank credit until a person confirms them; remind once
+    for r in db.scalars(select(InboundReceipt).where(InboundReceipt.status == "matched", InboundReceipt.customer_id.is_not(None))):
+        if local_now() - r.created_at > grace and not (r.parsed or {}).get("reminded"):
+            r.parsed = {**(r.parsed or {}), "reminded": True}  # a new dict, so the change is saved
+            raise_alert(db, "receipt_needs_review", "رسید منتظر تأیید",
+                        f"رسید {toman(r.amount)} از {r.sender} با واریز بانک جور شده ولی هنوز کسی «ثبت» یا «رد» نزده است",
+                        level="warning", ref_type="receipt", ref_id=r.id)
+            count += 1
     return count
 
 

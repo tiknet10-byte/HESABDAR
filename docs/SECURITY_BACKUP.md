@@ -2,11 +2,30 @@
 
 ## Security
 * Passwords hashed with **Argon2**; minimum strength enforced; account lock after 5 failed logins (15 min).
+  Every refused login gets **one answer** (401, "wrong user name or password"), whether the name is unknown, the
+  password is wrong, the account is locked or the user is inactive, and takes about the same time, so nobody can
+  find out which user names exist. Tries sent at the same moment are counted one by one (they still lock).
+* **Unlocking a user**: the owner presses «باز کردن قفل» next to the user in *Settings → «پرسنل و کاربران»* (saving the user
+  opens it too). If the owner is the one locked out, run `python manage.py unlock <username>` in the program folder,
+  or wait 15 minutes.
 * **JWT** access tokens (8 h). Roles: owner, admin, accountant, receptionist, staff, ai_agent — each API
   route checks a permission (`read, write, finance, reports, settings, users, backup, plugins`).
-  Receptionists cannot see financial reports; only the owner can restore backups or manage users.
+  Receptionists and staff cannot see financial reports or the day's takings; only the owner can restore backups or
+  manage users. The `ai_agent` role reads and adds customers / deposits but cannot move money (see `AI.md`).
+* **Logins end at once** when a password changes (by the user or by the owner) or a user is deactivated: every token
+  carries the user's `token_version`, which goes up then. The device that changed its own password stays logged in.
+* **Host check (DNS rebinding)**: the program answers only when opened as `localhost`, `127.0.0.1` or another IP
+  address (e.g. the PC's address on the clinic network). A server opened with a domain name, a reverse proxy that
+  passes a host name, or webhooks from Meta through a tunnel need that name in `HESABDAR_ALLOWED_HOSTS`
+  (in `backend/.env` or the environment; comma separated, e.g. `hesabdar.example.com,salon-pc`; `*` turns the check
+  off). Otherwise the answer is 400. The local Windows install (opened at 127.0.0.1) needs nothing.
+* Unexpected errors (and AI chat errors) show only a short code on screen (e.g. «کد 3fa91c»); the details are in
+  `backend/data/logs/hesabdar.log` under that code.
 * **Tamper-evident audit log**: every write is recorded with a SHA-256 hash chained to the previous record;
-  *Settings → Security* verifies the chain.
+  *Settings → Security* verifies the chain (`/api/audit/verify` lists every broken record). Before 1.20.0 two records written together
+  could be linked to the same earlier record (a bug, not tampering); on the first start of 1.20.0 those links are
+  mended once (`audit.rechained` setting, an `audit.rechain` record lists them). A record whose content was changed
+  or that points to a deleted record is never mended and stays reported.
 * Card numbers are never stored in full (first 6 + last 4 only). Plugin secrets are masked in API responses.
 * Webhooks are signed, and an unsigned call is refused (401):
   * bank-SMS and SMS forwarders: `X-Hesabdar-Signature` = HMAC-SHA256 of the raw body with `HESABDAR_WEBHOOK_SECRET`;

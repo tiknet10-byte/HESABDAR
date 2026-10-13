@@ -172,8 +172,9 @@ function TradeHistoryList({ rows, costs }: { rows: any[]; costs: boolean }) {
   const [doc, setDoc] = useState<number | null>(null);
   const sales = rows.filter((h) => h.kind === "sale" || h.kind === "sale_return");
   const sign = (h: any) => (h.kind === "sale_return" ? -1 : 1);
+  const net = (h: any) => h.net_amount ?? h.amount; // after its share of the invoice's discount (as in the product report)
   const qty = sales.reduce((t, h) => t + sign(h) * h.qty, 0);
-  const revenue = sales.reduce((t, h) => t + sign(h) * h.amount, 0);
+  const revenue = sales.reduce((t, h) => t + sign(h) * net(h), 0);
   const cost = sales.reduce((t, h) => t + sign(h) * (h.cost ?? 0), 0);
   return (
     <details open={!rows.length || rows.length < 30}>
@@ -189,8 +190,8 @@ function TradeHistoryList({ rows, costs }: { rows: any[]; costs: boolean }) {
               <td>{H_KINDS[h.kind] ?? h.kind}<span className="muted"> · {H_SOURCE[h.source] ?? h.source}{h.doc_no ? ` · سند ${h.doc_no}` : ""}</span></td>
               <td>{h.customer ?? h.party ?? ""}</td>
               <td className="num">{num(h.qty)}</td>
-              <td className="num">{h.amount != null ? money(h.amount, false) : "—"}</td>
-              {costs && <td className="num">{h.kind === "sale" || h.kind === "sale_return" ? money(sign(h) * (h.amount - (h.cost ?? 0)), false) : ""}</td>}
+              <td className="num">{h.amount != null ? <>{money(net(h), false)}{net(h) !== h.amount && <div className="muted text-[10px]">پیش از تخفیف فاکتور: {money(h.amount, false)}</div>}</> : "—"}</td>
+              {costs && <td className="num">{h.kind === "sale" || h.kind === "sale_return" ? money(sign(h) * (net(h) - (h.cost ?? 0)), false) : ""}</td>}
             </tr>
           ))}</tbody>
         </table>

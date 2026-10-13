@@ -3,7 +3,8 @@
 It behaves like WooCommerce where it matters here: orders take goods out of the stock (processing / on-hold /
 completed), cancelling puts them back, refunds can restock, money is strings in the store currency, dates come
 as site-local (the website's own time zone) and GMT, lists are paged with X-WP-Total / X-WP-TotalPages,
-`modified_after` filters orders, `orderby` / `order` sort them, products keep `meta_data`.
+`modified_after` filters orders, `orderby` / `order` sort them, products keep `meta_data`, answers carry the
+website's clock (Date header).
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import json
 import re
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from urllib.parse import parse_qs
 
 import httpx
@@ -46,6 +48,9 @@ class FakeWoo:
         self.lose_put = 0  # the next N stock changes are saved, but their answer never arrives (timeout)
         self.on_orders_page: Callable[[int], None] | None = None  # called before a page of orders is served
         self.on_put: Callable[[int], None] | None = None  # called (with the product id) before a product is changed
+        self.clock_shift = timedelta(0)  # the website's clock in its answers (Date header) = now + this
+        self.redirect_http = False  # a badly set website: every https request is sent on to plain http
+        self.insecure = 0  # requests that reached the website over plain http
         self.calls: list[tuple[str, str]] = []
 
     def _id(self) -> int:
@@ -168,16 +173,21 @@ class FakeWoo:
             return base64.b64decode(auth[6:]).decode() == f"{self.key}:{self.secret}"
         return False
 
-    @staticmethod
-    def _page(items: list, q: dict) -> httpx.Response:
+    def _page(self, items: list, q: dict) -> httpx.Response:
         per, page = int(q.get("per_page", 10)), int(q.get("page", 1))
         chunk = items[(page - 1) * per: page * per]
         pages = max(1, -(-len(items) // per))
-        return httpx.Response(200, json=chunk, headers={"X-WP-Total": str(len(items)), "X-WP-TotalPages": str(pages)})
+        clock = datetime.now(timezone.utc) + self.clock_shift
+        return httpx.Response(200, json=chunk, headers={"X-WP-Total": str(len(items)), "X-WP-TotalPages": str(pages),
+                                                        "Date": format_datetime(clock, usegmt=True)})
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if self.down:
             raise httpx.ConnectError("down", request=request)
+        if request.url.scheme == "http":
+            self.insecure += 1
+        elif self.redirect_http:
+            return httpx.Response(301, headers={"Location": str(request.url.copy_with(scheme="http"))})
         q = {k: v[0] for k, v in parse_qs(request.url.query.decode()).items()}
         path = request.url.path.split("/wp-json/wc/v3", 1)[-1]
         self.calls.append((request.method, path))
@@ -216,8 +226,10 @@ class FakeWoo:
             if q.get("modified_after"):
                 after = datetime.fromisoformat(q["modified_after"])
                 rows = [o for o in rows if datetime.fromisoformat(o["date_modified_gmt"]) > after]
-            by = {"id": lambda o: o["id"], "modified": lambda o: (o["date_modified_gmt"], o["id"])}.get(
-                q.get("orderby", "date"), lambda o: (o["date_created_gmt"], o["id"]))
+            # like MySQL, orders with the same date have no fixed order: it may differ from one page to the next
+            tie = 1 if int(q.get("page", 1)) % 2 else -1
+            by = {"id": lambda o: o["id"], "modified": lambda o: (o["date_modified_gmt"], tie * o["id"])}.get(
+                q.get("orderby", "date"), lambda o: (o["date_created_gmt"], tie * o["id"]))
             rows.sort(key=by, reverse=q.get("order", "desc") == "desc")
             return self._page(rows, q)
         m = re.fullmatch(r"/orders/(\d+)/refunds", path)

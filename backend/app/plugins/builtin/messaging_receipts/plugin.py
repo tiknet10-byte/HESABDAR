@@ -35,6 +35,7 @@ from ....core.db import SessionLocal, get_db
 from ....core.security import verify_signature
 from ....models import BankTransaction, ConversationMessage, ConversationState, Customer, InboundReceipt, PaymentAccount, local_now
 from ....services import accounting, learning, matching, settings_store
+from ....services.audit import audit
 from ....services.receipt_parser import looks_like_receipt, parse_receipt
 from ....services.textutil import normalize_mobile
 from ...base import AITool, BasePlugin
@@ -168,7 +169,15 @@ def handle_incoming(db: Session, channel: str, sender: str, text: str = "", imag
         mobile = sender if channel != "instagram" else None
         insta = sender if channel == "instagram" else None
         mobile_in_text = normalize_mobile(next((w for w in text.split() if normalize_mobile(w)), None))
-        customer, created = accounting.find_or_create_customer(db, name, mobile or mobile_in_text, insta, source=f"chat_{channel}")
+        owner = accounting.find_customer(db, mobile_in_text) if insta and mobile_in_text else None
+        if owner is not None and (owner.instagram or "") != insta.lstrip("@").lower():
+            # a mobile typed in an Instagram chat proves nothing: this account is never tied to the customer who owns
+            # that number (their receipts and name stay theirs); a new customer is made, staff can merge them later
+            customer, created = accounting.find_or_create_customer(db, name.replace(mobile_in_text, "").strip() or name, None, insta,
+                                                                   source=f"chat_{channel}")
+            customer.notes = f"{customer.notes or ''}\nموبایلی که در چت نوشت: {mobile_in_text} (مال مشتری دیگری است؛ بررسی شود)".strip()
+        else:
+            customer, created = accounting.find_or_create_customer(db, name, mobile or mobile_in_text, insta, source=f"chat_{channel}")
         if created and mobile_in_text and mobile_in_text in name:  # never rename a customer we already had
             customer.full_name = name.replace(mobile_in_text, "").strip() or customer.full_name
         rid = (st.data or {}).get("receipt_id")
@@ -330,7 +339,9 @@ class Plugin(BasePlugin):
             if not verify_signature(raw, request.headers.get("X-Hesabdar-Signature")):
                 raise HTTPException(401, "invalid signature")
             body = IncomingIn.model_validate_json(raw)
-            return handle_incoming(db, "sms", body.sender, body.text, _image(body), body.image_type, plugin.ctx.config)
+            img = _image(body)
+            return await asyncio.to_thread(handle_incoming, db, "sms", body.sender, body.text, img, body.image_type,
+                                           plugin.ctx.config)  # off the event loop, like the other webhooks
 
         @r.get("/webhook/whatsapp")
         def wa_verify(mode: str = Query(alias="hub.mode", default=""), token: str = Query(alias="hub.verify_token", default=""),
@@ -342,7 +353,7 @@ class Plugin(BasePlugin):
         async def meta_payload(request: Request) -> dict:
             """Only Meta may post here: the body must carry its signature made with the App Secret of the settings."""
             raw = await request.body()
-            secret = plugin.ctx.config.get("app_secret")
+            secret = str(plugin.ctx.config.get("app_secret") or "").strip()  # a space copied with it would refuse all
             if not secret:
                 raise HTTPException(401, "App Secret متا در تنظیمات افزونه وارد نشده است")
             if not meta_signature_ok(raw, request.headers.get("X-Hub-Signature-256"), secret):
@@ -419,10 +430,12 @@ class Plugin(BasePlugin):
             return {"status": x.status, "deposit_id": x.deposit_id}
 
         @r.post("/receipts/{rid}/reject")
-        def reject(rid: int, db: Session = Depends(get_db), _=Depends(require("finance"))):
+        def reject(rid: int, db: Session = Depends(get_db), user=Depends(require("finance"))):
             x = db.get(InboundReceipt, rid) or _404()
             if x.deposit_id:
                 raise HTTPException(400, "این رسید ثبت شده و بیعانه دارد؛ اگر اشتباه بوده، بیعانه را از صفحه بیعانه‌ها برگردانید")
+            audit(db, "receipt.reject", "receipt", x.id, {"amount": x.amount, "status": x.status,
+                                                          "bank_transaction_id": x.bank_transaction_id}, user=user)
             x.status = "rejected"
             tx = db.get(BankTransaction, x.bank_transaction_id) if x.bank_transaction_id else None
             if tx is not None and tx.matched_type == "receipt" and tx.matched_id == x.id:

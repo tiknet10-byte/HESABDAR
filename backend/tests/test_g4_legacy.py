@@ -280,3 +280,24 @@ def test_an_automatic_code_still_finds_the_same_person(client):
     r3 = client.post(f"/api/import/legacy/{pv3['id']}/commit", json={}).json()["result"]
     assert r3["customers_new"] == 0 and not r3.get("codes_moved")
     assert len(client.get(f"/api/appointments?customer_id={nagar['id']}&status=done").json()) == 1
+
+
+def test_undo_forgets_the_automatic_codes_of_the_customers_it_removed(client):
+    """(review) A removed customer's record number can be given to the next customer (SQLite reuses it): its
+    automatic code must not make that next person "automatic" - their real code would then be moved away."""
+    from app.core.db import SessionLocal
+    from app.models import ImportBatch
+
+    pv = _post(client, "c3.xlsx", _xlsx([["نام مشتری", "موبایل"], ["ژیلا بی‌کد جی‌چهار", "09151040821"],
+                                          ["مینو بی‌کد جی‌چهار", "09151040822"]]), "customers").json()
+    client.post(f"/api/import/legacy/{pv['id']}/commit", json={})
+    jila, minoo = _customer(client, "09151040821"), _customer(client, "09151040822")
+    # Minoo pays a deposit here, so she stays when the file is taken back; Jila goes
+    acc = client.get("/api/accounts").json()[0]["id"]
+    r = client.post("/api/deposits", json={"customer_id": minoo["id"], "amount": 1_000_000, "payment_account_id": acc})
+    assert r.status_code == 200, r.text
+    assert client.post(f"/api/import/legacy/{pv['id']}/undo").status_code == 200
+    assert client.get(f"/api/customers/{jila['id']}").status_code == 404
+    with SessionLocal() as db:
+        auto = db.get(ImportBatch, pv["id"]).summary["auto_codes"]
+    assert auto == {str(minoo["id"]): minoo["code"]}  # Minoo's number is still one given here, Jila's is forgotten

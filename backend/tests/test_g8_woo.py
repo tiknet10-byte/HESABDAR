@@ -1,12 +1,13 @@
 """Website shop (WooCommerce) audit: secrets, missed orders, stock sent twice, dates, refunds, COD, links."""
 import logging
-from datetime import date, datetime, timedelta
+import threading
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.db import SessionLocal
-from app.models import Deposit, JournalEntry, JournalLine, PaymentAccount, Product
+from app.models import Deposit, Invoice, JournalEntry, JournalLine, PaymentAccount, Product
 from app.services import woo
 from tests.fake_woo import FakeWoo
 
@@ -42,9 +43,9 @@ def done(client):
     client.put("/api/woo/config", json={"enabled": False})
 
 
-def _connect(client, shop, start: date | None = None) -> int:
+def _connect(client, shop, start: date | None = None, url: str = "g8shop.example.com") -> int:
     gw = client.post("/api/accounts", json={"kind": "gateway", "name": f"درگاه گ۸ {shop.ids}"}).json()["id"]
-    r = client.put("/api/woo/config", json={"url": "g8shop.example.com", "key": shop.key, "secret": shop.secret, "enabled": True,
+    r = client.put("/api/woo/config", json={"url": url, "key": shop.key, "secret": shop.secret, "enabled": True,
                                             "start": (start or date.today() - timedelta(days=5)).isoformat(), "account_id": gw,
                                             "method_accounts": {}})
     assert r.status_code == 200, r.text
@@ -103,6 +104,25 @@ def test_key_and_secret_never_reach_the_log_or_the_browser(client, caplog, done)
     for path in ("/api/woo/config", "/api/woo/status", "/api/woo/log", "/api/woo/orders", "/api/woo/outbox", "/api/woo/products"):
         body = client.get(path).text
         assert shop.secret not in body and shop.key not in body, path
+
+
+def test_the_key_is_never_sent_to_a_plain_http_address(client, done):
+    shop = _store(header_auth=False)  # a host that needs the key in the address ...
+    _connect(client, shop)
+    shop.redirect_http = True  # ... and a website that sends every request on to http://
+    r = client.post("/api/woo/sync").json()
+    assert "https" in r["error"] and shop.insecure == 0
+    assert client.post("/api/woo/test").json()["ok"] is False and shop.insecure == 0
+
+
+def test_a_wrong_key_is_not_put_in_the_address(client, done):
+    shop = _store()
+    _connect(client, shop, url="g8key.example.com")
+    assert client.get("/api/woo/config").json()["config"]["auth"] == "basic"
+    shop.secret = "cs_changed_on_the_website"  # the key was deleted / made again on the website
+    r = client.post("/api/woo/sync").json()
+    assert "اشتباه" in r["error"]
+    assert client.get("/api/woo/config").json()["config"]["auth"] == "basic"  # still sent in the header, not the address
 
 
 def test_bad_settings_are_a_clear_message_not_a_crash(client, done):
@@ -239,10 +259,32 @@ def test_cash_on_delivery_is_paid_when_the_order_is_completed(client, shop):
     _sync(client)
     inv_id = _orders(client)[o["id"]]["invoice_id"]
     assert client.get(f"/api/invoices/{inv_id}").json()["paid"] == 0 and _moves(gw) == []
+    shop._touch(o)  # e.g. a note added on the website while the courier is on the way: read again, still not paid
+    assert _sync(client)["orders"].get("unchanged") == 1
+    assert client.get(f"/api/invoices/{inv_id}").json()["paid"] == 0 and _moves(gw) == []
     shop.set_status(o["id"], "completed")
+    done_at = datetime.now()
     assert _sync(client)["orders"].get("paid") == 1
     assert client.get(f"/api/invoices/{inv_id}").json()["paid"] == 5_000_000
-    assert sum(v for _, v in _moves(gw)) == 5_000_000
+    [(at, v)] = _moves(gw)
+    assert v == 5_000_000 and abs(at - done_at) < timedelta(minutes=2)  # on the day the courier brought it
+    _balanced(client)
+
+
+def test_a_payment_confirmed_later_is_dated_by_the_clinic_clock(client, done):
+    here = datetime.now().astimezone().utcoffset()
+    shop = _store(site_offset=here - timedelta(hours=5))  # the website's clock shows 5 hours earlier than the clinic
+    sp = shop.add_product("کرم گ۸ کارت", "G8-BACS-1", 150_000, stock=10)
+    gw = _connect(client, shop)
+    o = shop.add_order([(sp, 2)], status="on-hold", paid=False, phone="09151080012", first="کارت", last="به‌کارت", method="bacs",
+                       method_title="کارت به کارت", created=datetime.now() - timedelta(days=2))
+    _sync(client)
+    assert _moves(gw) == []
+    shop.set_status(o["id"], "processing", paid=True)  # the transfer is confirmed now
+    paid_at = datetime.now()
+    assert _sync(client)["orders"].get("paid") == 1
+    [(at, v)] = _moves(gw)
+    assert v == 3_000_000 and abs(at - paid_at) < timedelta(minutes=2)  # not 5 hours earlier
     _balanced(client)
 
 
@@ -267,6 +309,213 @@ def test_two_syncs_at_once_do_not_run_together(client, shop):
         assert client.post("/api/woo/sync").json()["busy"] is True
     finally:
         woo._lock.release()
+
+
+def test_the_sync_button_during_the_periodic_job_does_not_book_an_order_twice(client, shop):
+    sp = shop.add_product("کرم گ۸ هم‌زمانی", "G8-RACE-1", 100_000, stock=10)
+    _connect(client, shop)
+    _sync(client)
+    o = shop.add_order([(sp, 1)], phone="09151080019", first="هم‌زمانی", last="گ۸")
+    entered, release = threading.Event(), threading.Event()
+
+    def hold(page: int) -> None:  # the periodic job is reading the orders ...
+        shop.on_orders_page = None
+        entered.set()
+        release.wait(10)
+    shop.on_orders_page = hold
+
+    def periodic() -> None:
+        with SessionLocal() as db:
+            woo.run_sync(db)
+    t = threading.Thread(target=periodic)
+    t.start()
+    try:
+        assert entered.wait(10)
+        assert client.post("/api/woo/sync").json()["busy"] is True  # ... when someone presses the button
+    finally:
+        release.set()
+        t.join(10)
+    _sync(client)
+    with SessionLocal() as db:
+        n = db.scalar(select(func.count(Invoice.id)).where(Invoice.notes.like(f"سفارش سایت #{o['number']}%")))
+    assert n == 1 and _orders(client)[o["id"]]["state"] == "booked"
+
+
+def test_an_order_put_back_to_pending_payment_is_taken_back(client, shop):
+    sp = shop.add_product("کرم گ۸ برگشت به انتظار", "G8-PEND-1", 100_000, stock=10)
+    p = _product(client, "کرم گ۸ برگشت به انتظار", "G8-PEND-1", qty=10)
+    gw = _connect(client, shop)
+    o = shop.add_order([(sp, 2)], status="on-hold", paid=False, phone="09151080018", first="انتظار", last="گ۸", method="bacs")
+    _sync(client)
+    first = _orders(client)[o["id"]]["invoice_id"]
+    assert client.get(f"/api/products/{p['id']}").json()["stock_qty"] == 8
+    shop.set_status(o["id"], "pending")  # the website takes the order back (and puts its goods back in its stock)
+    assert _sync(client)["orders"].get("cancelled") == 1
+    assert client.get(f"/api/invoices/{first}").json()["status"] == "void" and _orders(client)[o["id"]]["state"] == "waiting"
+    assert client.get(f"/api/products/{p['id']}").json()["stock_qty"] == 10
+    shop.set_status(o["id"], "processing", paid=True)  # paid after all: sold again
+    assert _sync(client)["orders"].get("booked") == 1
+    inv = client.get(f"/api/invoices/{_orders(client)[o['id']]['invoice_id']}").json()
+    assert inv["id"] != first and inv["total"] == inv["paid"] == 2_000_000
+    assert client.get(f"/api/products/{p['id']}").json()["stock_qty"] == 8 and sum(v for _, v in _moves(gw)) == 2_000_000
+    _balanced(client)
+
+
+def test_an_order_deleted_while_the_pages_are_read_does_not_hide_another(client, shop, monkeypatch):
+    monkeypatch.setattr(woo, "PER_PAGE", 1)
+    sp = shop.add_product("سرم گ۸ حذفی", "G8-DEL-1", 100_000, stock=50)
+    _connect(client, shop)
+    _sync(client)
+    old = (datetime.now() - timedelta(days=2)).replace(microsecond=0)
+    orders = [shop.add_order([(sp, 1)], phone=f"0915108{1300 + i}", first="حذفی", last=f"گ۸ {i}", created=old + timedelta(minutes=i))
+              for i in range(3)]
+    for i, o in enumerate(orders):
+        shop._touch(o, old + timedelta(minutes=i))
+
+    def delete_first(page: int) -> None:  # the first order is deleted on the website just after it was read
+        if page == 2 and shop.on_orders_page:
+            shop.on_orders_page = None
+            del shop.orders[orders[0]["id"]]
+    shop.on_orders_page = delete_first
+    _sync(client)
+    got = _orders(client)
+    assert [got.get(o["id"], {}).get("state") for o in orders[1:]] == ["booked", "booked"]
+
+
+def test_new_orders_arriving_while_the_pages_are_read_do_not_hold_the_reading_back(client, shop, monkeypatch):
+    monkeypatch.setattr(woo, "PER_PAGE", 1)
+    sp = shop.add_product("سرم گ۸ شلوغ", "G8-BUSY-1", 100_000, stock=50)
+    _connect(client, shop)
+    _sync(client)
+    old = (datetime.now() - timedelta(days=2)).replace(microsecond=0)
+    orders = [shop.add_order([(sp, 1)], phone=f"0915108{1400 + i}", first="شلوغ", last=f"گ۸ {i}", created=old + timedelta(minutes=i))
+              for i in range(3)]
+    for i, o in enumerate(orders):
+        shop._touch(o, old + timedelta(minutes=i))
+    new = []
+
+    def busy(page: int) -> None:  # a busy website: a new order comes in during every reading
+        if page == 2 and len(new) < 3:
+            new.append(shop.add_order([(sp, 1)], phone=f"0915108{1410 + len(new)}", first="شلوغ", last="تازه"))
+    shop.on_orders_page = busy
+    _sync(client)
+    shop.on_orders_page = None
+    got = _orders(client)
+    assert [got.get(o["id"], {}).get("state") for o in orders + new] == ["booked"] * (3 + len(new))
+    with SessionLocal() as db:
+        cursor = datetime.fromisoformat(woo.state(db)["cursor"])
+    assert cursor > (old + timedelta(minutes=2)).astimezone(timezone.utc).replace(tzinfo=None)  # the next run starts later
+
+
+def test_orders_changed_in_the_same_second_are_all_read(client, shop, monkeypatch):
+    monkeypatch.setattr(woo, "PER_PAGE", 2)
+    sp = shop.add_product("سرم گ۸ هم‌زمان", "G8-TIE-1", 100_000, stock=50)
+    _connect(client, shop)
+    _sync(client)
+    same = (datetime.now() - timedelta(days=1)).replace(microsecond=0)
+    orders = [shop.add_order([(sp, 1)], phone=f"0915108{1200 + i}", first="هم‌زمان", last=f"گ۸ {i}", created=same - timedelta(minutes=5 - i))
+              for i in range(5)]
+    for o in orders:  # e.g. a bulk status change on the website: all changed in the same second
+        shop._touch(o, same)
+    _sync(client)
+    got = _orders(client)
+    assert [got.get(o["id"], {}).get("state") for o in orders] == ["booked"] * 5
+
+
+def test_an_order_changed_during_a_long_reading_is_read_again(client, shop, monkeypatch):
+    monkeypatch.setattr(woo, "PER_PAGE", 1)
+    sp = shop.add_product("ژل گ۸ طولانی", "G8-LONG-1", 100_000, stock=50)
+    _connect(client, shop)
+    _sync(client)
+    old = (datetime.now() - timedelta(days=2)).replace(microsecond=0)
+    a = shop.add_order([(sp, 1)], phone="09151080013", first="طولانی", last="الف", created=old)
+    b = shop.add_order([(sp, 1)], phone="09151080014", first="طولانی", last="ب", created=old + timedelta(minutes=1))
+    shop._touch(a, old + timedelta(minutes=1))
+    shop._touch(b, old + timedelta(minutes=2))
+    _sync(client)
+    # a slow reading that began 40 minutes ago (the website's clock): after A was read, A was cancelled (30 minutes
+    # ago) and B changed (5 minutes ago, read with this change)
+    now = datetime.now().replace(microsecond=0)
+    shop.clock_shift = -timedelta(minutes=40)
+
+    def change(page: int) -> None:
+        if page == 2 and shop.on_orders_page:
+            shop.on_orders_page = None
+            shop.set_status(a["id"], "cancelled")
+            shop._touch(a, now - timedelta(minutes=30))
+            shop._touch(b, now - timedelta(minutes=5))
+    shop.on_orders_page = change
+    _sync(client)
+    shop.clock_shift = timedelta(0)
+    assert _orders(client)[a["id"]]["state"] == "booked"  # read before it was cancelled ...
+    _sync(client)
+    assert _orders(client)[a["id"]]["state"] == "cancelled"  # ... so it is read again on the next run
+
+
+def test_money_goes_back_on_the_account_it_came_in_on_and_on_the_refunds_day(client, shop):
+    sp = shop.add_product("کرم گ۸ حساب", "G8-ACC-1", 100_000, stock=10)
+    gw = _connect(client, shop)
+    created = (datetime.now() - timedelta(days=3)).replace(microsecond=0)
+    o = shop.add_order([(sp, 3)], phone="09151080015", first="حساب", last="درگاه", created=created)
+    _sync(client)
+    paid_at = created + timedelta(minutes=2)
+    assert _moves(gw) == [(paid_at, 3_000_000)]
+    # later the owner chooses another account for website orders
+    gw2 = client.post("/api/accounts", json={"kind": "gateway", "name": f"درگاه دوم گ۸ {shop.ids}"}).json()["id"]
+    assert client.put("/api/woo/config", json={"account_id": gw2}).status_code == 200
+    # one piece given back yesterday; today the order is cancelled (the rest given back today, without a refund on the site)
+    yday = (datetime.now() - timedelta(days=1)).replace(microsecond=0)
+    shop.refund(o["id"], 100_000, [(o["line_items"][0]["id"], 1, 100_000)], at=yday)
+    assert _sync(client)["orders"].get("rebooked") == 1
+    inv = client.get(f"/api/invoices/{_orders(client)[o['id']]['invoice_id']}").json()
+    assert inv["total"] == 2_000_000 and inv["paid"] == 2_000_000
+    shop.set_status(o["id"], "cancelled")
+    today = datetime.now()
+    assert _sync(client)["orders"].get("cancelled") == 1
+    assert _sync(client)["orders"].get("cancelled") is None  # once
+    moves = _moves(gw)
+    assert sum(v for _, v in moves) == 0 and _moves(gw2) == []
+    assert sum(v for at, v in moves if at <= paid_at) == 3_000_000  # received on the order's day ...
+    out = [(at, v) for at, v in moves if at > paid_at]
+    assert [v for _, v in out] == [-1_000_000, -2_000_000]  # ... given back on the refund's day, the rest today
+    assert out[0][0] == yday and abs(out[1][0] - today) < timedelta(minutes=2)
+    assert client.get(f"/api/invoices/{inv['id']}").json()["status"] == "void"
+    _balanced(client)
+
+
+def test_money_taken_at_the_clinic_for_a_website_order_is_never_lost(client, shop):
+    sp = shop.add_product("کرم گ۸ صندوق", "G8-CASH-1", 200_000, stock=10)
+    gw = _connect(client, shop)
+    cash = client.post("/api/accounts", json={"kind": "cash", "name": f"صندوق گ۸ {shop.ids}"}).json()["id"]
+    when = datetime.now() - timedelta(days=1)
+    a = shop.add_order([(sp, 2)], status="on-hold", paid=False, phone="09151080016", first="صندوق", last="الف", method="bacs", created=when)
+    b = shop.add_order([(sp, 1)], status="on-hold", paid=False, phone="09151080017", first="صندوق", last="ب", method="bacs", created=when)
+    _sync(client)
+    got = _orders(client)
+    for o, amount in ((a, 4_000_000), (b, 2_000_000)):  # the customers paid at the clinic («دریافت بدهی»)
+        r = client.post(f"/api/invoices/{got[o['id']]['invoice_id']}/payments", json={"payment_account_id": cash, "amount": amount})
+        assert r.status_code == 200, r.text
+    # A: changed on the website (one piece instead of two), then marked paid there
+    li = a["line_items"][0]
+    li["quantity"], li["subtotal"], li["total"], a["total"] = 1, "200000.00", "200000.00", "200000.00"
+    shop._touch(a)
+    assert _sync(client)["orders"].get("rebooked") == 1
+    inv_a = client.get(f"/api/invoices/{_orders(client)[a['id']]['invoice_id']}").json()
+    assert inv_a["total"] == 2_000_000 and inv_a["paid"] == 2_000_000  # paid by the money taken at the clinic
+    shop.set_status(a["id"], "processing", paid=True)
+    _sync(client)
+    assert client.get(f"/api/invoices/{inv_a['id']}").json()["paid"] == 2_000_000
+    # B: cancelled on the website
+    shop.set_status(b["id"], "cancelled")
+    assert _sync(client)["orders"].get("cancelled") == 1
+    # the money of the clinic is still in its cash box; what is not used stays the customers' credit; no gateway money
+    assert sum(v for _, v in _moves(cash)) == 6_000_000 and _moves(gw) == []
+    with SessionLocal() as db:
+        held = {d.customer_id: (d.amount, d.kind) for d in db.scalars(select(Deposit).where(
+            Deposit.customer_id.in_([inv_a["customer_id"], _orders(client)[b["id"]]["customer_id"]]), Deposit.status == "held"))}
+    assert held == {inv_a["customer_id"]: (2_000_000, "credit"), _orders(client)[b["id"]]["customer_id"]: (2_000_000, "credit")}
+    assert any("اعتبار مشتری ماند" in x["message"] for x in client.get("/api/woo/log").json())
+    _balanced(client)
 
 
 # ---------------------------------------------------------------------------------------------- stock
@@ -335,3 +584,29 @@ def test_a_product_linked_by_hand_stays_linked(client, shop):
     assert client.post("/api/woo/products/link", json={"woo_id": sp, "product_id": None}).json()["ok"]
     _sync(client)
     assert next(r for r in client.get("/api/woo/products").json()["rows"] if r["woo_id"] == sp)["product"] is None
+
+
+def test_a_product_unlinked_by_hand_is_not_linked_again_by_its_sku(client, shop):
+    sp = shop.add_product("کرم گ۸ جداشده", "G8-UNL-1", 100_000, stock=5)
+    p = _product(client, "کرم گ۸ جداشده", "G8-UNL-1", qty=5)
+    _connect(client, shop)
+    _sync(client)
+    assert next(r for r in client.get("/api/woo/products").json()["rows"] if r["woo_id"] == sp)["product"]["id"] == p["id"]
+    assert client.post("/api/woo/products/link", json={"woo_id": sp, "product_id": None}).json()["ok"]
+    _sync(client)
+    assert next(r for r in client.get("/api/woo/products").json()["rows"] if r["woo_id"] == sp)["product"] is None
+
+
+def test_another_website_gets_its_own_currency(client, done):
+    shop = _store()  # toman
+    _connect(client, shop)
+    _sync(client)
+    # moved to another website whose prices are in Rial; synced without pressing "test" first
+    other = _store(currency="IRR")
+    sp = other.add_product("سرم گ۸ ریالی", "G8-IRR-1", 2_500_000, stock=3)
+    r = client.put("/api/woo/config", json={"url": "g8other.example.com", "key": other.key, "secret": other.secret})
+    assert r.status_code == 200 and r.json()["config"]["unit"] == ""
+    _sync(client)
+    assert client.get("/api/woo/config").json()["config"]["unit"] == "IRR"
+    row = next(r for r in client.get("/api/woo/products").json()["rows"] if r["woo_id"] == sp)
+    assert row["site_price"] == 2_500_000  # not 25,000,000 (read as toman)

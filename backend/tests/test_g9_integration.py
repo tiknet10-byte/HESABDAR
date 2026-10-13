@@ -20,6 +20,7 @@ from app.models import (
 )
 from app.plugins.manager import manager
 from app.services import capital, customer_merge, inventory, maintenance
+from app.services.audit import audit, verify_audit_chain
 from app.seed import seed_base
 
 
@@ -55,6 +56,7 @@ def _fill(db: Session) -> dict:
     c1, c2 = Customer(full_name="مشتری g9 یک", mobile="09151090101"), Customer(full_name="مشتری g9 دو", mobile="09151090102")
     product = Product(code="g9-1", name="کالای g9", stock_qty=4, stock_value=400, unit_cost=100, last_purchase_cost=100,
                       last_sale_price=150, last_sale_at=now, last_online_price=160, last_online_at=now)
+    svc.learned_avg_price, svc.learned_count = 150, 5  # learned from the sales below
     db.add_all([staff, c1, c2, product])
     db.flush()
     inv = Invoice(number="G9-1", customer_id=c1.id, issued_at=now, subtotal=150, total=150, paid=150)
@@ -104,7 +106,7 @@ def _fill(db: Session) -> dict:
     db.commit()
     empty = [t.name for t in Base.metadata.sorted_tables if not _count(db, t.name)]
     assert not empty, f"the test data must reach every table: {empty}"
-    return {"c1": c1.id, "c2": c2.id, "product": product.id, "holding": hold.id, "supplier": supplier.id}
+    return {"c1": c1.id, "c2": c2.id, "product": product.id, "holding": hold.id, "supplier": supplier.id, "service": svc.id}
 
 
 def _tables(models) -> set[str]:
@@ -150,6 +152,8 @@ def test_reset_transactions_on_a_database_with_data_in_every_table():
         p, h = db.get(Product, ids["product"]), db.get(Holding, ids["holding"])
         assert (p.stock_qty, p.stock_value, p.unit_cost, p.last_sale_price, p.last_online_price) == (0, 0, None, None, None)
         assert (h.qty_m, h.cost, h.market_price) == (0, 0, 700)  # nothing held; the name and the day's price stay
+        s = db.get(Service, ids["service"])  # no price learned from sales that are gone (it would warn about new prices)
+        assert (s.learned_avg_price, s.learned_count, s.is_active) == (None, 0, True)
         assert db.get(Supplier, ids["supplier"]).customer_id == ids["c2"]  # the seller stays linked to the person
         kinds = set(db.scalars(select(KnowledgeItem.kind)))
         assert "loyalty" not in kinds and {"customer_not_same", "token_service"} <= kinds
@@ -198,15 +202,17 @@ def test_factory_reset_on_a_database_with_data_in_every_table():
         for p in manager.plugins.values():  # the owner had set them up (tokens...) before the reset
             p.ctx.config = {**p.ctx.config, "g9_token": "قدیمی"}
         maintenance.reset(db, "factory")
+        audit(db, "admin.reset", "database", "factory")  # as the reset endpoint does: the audit trail starts again
         defaults = {n: p.status != "concept" and p.enabled_by_default for n, p in manager.plugins.items()}
         # not saved yet: the running plugins are untouched (a failed reset changes nothing)
         assert all(p.ctx.config.get("g9_token") == "قدیمی" for p in manager.plugins.values())
         db.commit()
+        assert verify_audit_chain(db) == {"ok": True, "checked": 1}
         assert all("g9_token" not in p.ctx.config for p in manager.plugins.values())
         assert {n: manager.enabled[n] for n in defaults} == defaults
         assert {s.name: s.enabled for s in db.scalars(select(PluginState))} == defaults  # g9_plugin is gone
         for t in {t.name for t in Base.metadata.sorted_tables}:
-            want = seeded.get(t, len(defaults) if t == "plugin_states" else 1 if t == "users" else 0)
+            want = seeded.get(t, len(defaults) if t == "plugin_states" else 1 if t in ("users", "audit_logs") else 0)
             assert _count(db, t) == want, t
         # the whole chart at once, as after a start: inventory, supplier payables, product sales, gold/currency
         codes = set(db.scalars(select(LedgerAccount.code)))
@@ -315,6 +321,38 @@ def test_database_page_counts_the_newer_tables(client):
     for t in ("products", "purchases", "suppliers", "trade_docs", "woo_orders", "capital_moves", "holdings"):
         assert t in st["stats"], t
     assert "سرمایه" in st["scopes"]["transactions"] and "سفارش‌های سایت" in st["scopes"]["transactions"]
+
+
+def test_users_page_calls_lock_unlock_edit_and_own_password(client):
+    """What the users table in Settings calls: the «قفل» badge, «باز کردن قفل», the edit window, «رمز عبور من»."""
+    from datetime import timedelta
+
+    from app.models import User, local_now
+
+    r = client.post("/api/auth/users", json={"username": "g9-lock-user", "full_name": "همکار g9", "password": "G9secret1",
+                                              "role": "receptionist"})
+    assert r.status_code == 200, r.text
+    uid = r.json()["id"]
+    with SessionLocal() as db:  # closed after wrong passwords
+        db.get(User, uid).locked_until = local_now() + timedelta(minutes=10)
+        db.commit()
+    row = next(x for x in client.get("/api/auth/users").json() if x["id"] == uid)
+    assert row["locked"] is True
+    assert client.post(f"/api/auth/users/{uid}/unlock").json()["locked"] is False
+    assert next(x for x in client.get("/api/auth/users").json() if x["id"] == uid)["locked"] is False
+    # their own password, from «رمز عبور من»: the answer carries the new login of this device
+    tok = client.post("/api/auth/login", json={"username": "g9-lock-user", "password": "G9secret1"}).json()["access_token"]
+    mine = {"Authorization": f"Bearer {tok}"}
+    r = client.post("/api/auth/change-password", json={"current_password": "G9secret1", "new_password": "G9secret2"}, headers=mine)
+    assert r.status_code == 200, r.text
+    assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {r.json()['access_token']}"}).json()["id"] == uid
+    assert client.get("/api/auth/me", headers=mine).status_code == 401  # the old login ends
+    # the edit window (owner): new password and not active any more
+    body = {"username": "g9-lock-user", "full_name": "همکار g9", "role": "staff", "is_active": False, "password": "G9secret3"}
+    r = client.put(f"/api/auth/users/{uid}", json=body)
+    assert r.status_code == 200, r.text
+    assert (r.json()["role"], r.json()["is_active"], "access_token" in r.json()) == ("staff", False, False)
+    assert client.post("/api/auth/login", json={"username": "g9-lock-user", "password": "G9secret3"}).status_code == 401
 
 
 def test_unknown_scope_is_refused():

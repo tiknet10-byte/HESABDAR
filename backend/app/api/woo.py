@@ -104,7 +104,7 @@ def link(body: LinkIn, db: Session = Depends(get_db), user=Depends(require("sett
     p = db.get(Product, body.product_id) if body.product_id else None
     if body.product_id and p is None:
         raise HTTPException(404, "محصول پیدا نشد")
-    wp.product_id = p.id if p else None
+    woo.link_product(db, wp, p)  # remembered: the next reading of the website keeps it
     if p and wp.sku and not p.sku:
         p.sku = wp.sku
     audit(db, "woo.link", "product", body.product_id, {"woo_id": wp.id}, user=user)

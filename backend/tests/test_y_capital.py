@@ -317,3 +317,58 @@ def test_two_requests_cannot_pay_or_void_twice(client, accounts, services):
     full = client.get(f"/api/invoices/{inv['id']}").json()
     assert full["status"] == "void" and sum(p["amount"] for p in full["payments"]) == 0  # paid once, refunded once
     tb(client)
+
+
+def test_accounts_with_a_reused_name_never_share_money_and_safe_deletes(client):
+    from app.core.db import SessionLocal
+    from app.models import BankTransaction
+
+    old = client.post("/api/accounts", json={"kind": "cash", "name": "صندوق دوم تست", "opening_balance": 5000}).json()
+    assert client.delete(f"/api/accounts/{old['id']}").json()["archived"] is True  # it has money: archived
+    new = client.post("/api/accounts", json={"kind": "cash", "name": "صندوق دوم تست"}).json()
+    bal = {a["id"]: a for a in client.get("/api/accounts/balances").json()}
+    assert bal[new["id"]]["ledger_account_id"] != bal[old["id"]]["ledger_account_id"]
+    assert bal[new["id"]]["balance"] == 0 and bal[old["id"]]["balance"] == 5000
+    # renamed, then a new account takes the old name: still separate
+    a = client.post("/api/accounts", json={"kind": "pos", "name": "کارتخوان قدیم تست", "opening_balance": 7000}).json()
+    client.put(f"/api/accounts/{a['id']}", json={"kind": "pos", "name": "کارتخوان تازه‌نام تست"})
+    b = client.post("/api/accounts", json={"kind": "pos", "name": "کارتخوان قدیم تست"}).json()
+    bal = {x["id"]: x for x in client.get("/api/accounts/balances").json()}
+    assert bal[b["id"]]["balance"] == 0 and bal[a["id"]]["balance"] == 7000
+    tb(client)
+    # an account that has only bank-sync transactions is archived, not a crash
+    c = client.post("/api/accounts", json={"kind": "bank", "name": "بانک تست همگام"}).json()
+    with SessionLocal() as db:
+        db.add(BankTransaction(payment_account_id=c["id"], external_id="test-sync-1", amount=1000, direction="in", source="manual",
+                               status="unmatched", occurred_at=datetime.now()))
+        db.commit()
+    r = client.delete(f"/api/accounts/{c['id']}")
+    assert r.status_code == 200 and r.json()["archived"] is True
+    # a line that has staff is archived, not a crash
+    line = client.post("/api/lines", json={"name": "لاین با پرسنل تست"}).json()
+    client.post("/api/staff", json={"full_name": "پرسنل لاین تست", "line_id": line["id"]})
+    r = client.delete(f"/api/lines/{line['id']}")
+    assert r.status_code == 200 and r.json()["archived"] is True
+
+
+def test_open_deposit_used_later_on_an_issued_invoice(client, accounts, services):
+    cash = accounts["صندوق نقدی"]
+    svc = services["کاشت ناخن"]
+    prod = client.post("/api/products", json={"name": "کالای بیعانه بعدی", "sale_price": 2_000_000}).json()
+    dep = client.post("/api/deposits", json={"customer_name": "بیعانه بعدی", "customer_mobile": "09159990008", "amount": 5_000_000,
+                                             "payment_account_id": cash, "service_id": svc["id"]}).json()
+    inv = client.post("/api/invoices", json={"customer_id": dep["customer_id"],  # deposit not ticked
+                                             "items": [{"service_id": svc["id"], "unit_price": 3_000_000},
+                                                       {"product_id": prod["id"], "quantity": 1, "unit_price": 2_000_000}]}).json()
+    assert inv["paid"] == 0
+    r = client.post(f"/api/invoices/{inv['id']}/apply-deposit", json={"deposit_id": dep["id"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["used"] == 3_000_000 and r.json()["paid"] == 3_000_000  # only the service part
+    held = client.get(f"/api/deposits?customer_id={dep['customer_id']}&status=held").json()
+    assert [d["amount"] for d in held] == [2_000_000]
+    # the rest of the deposit can't pay the product
+    assert client.post(f"/api/invoices/{inv['id']}/apply-deposit", json={"deposit_id": held[0]["id"]}).status_code == 400
+    other = client.post("/api/customers", json={"full_name": "دیگری بیعانه", "mobile": "09159990009"}).json()
+    inv2 = client.post("/api/invoices", json={"customer_id": other["id"], "items": [{"service_id": svc["id"], "unit_price": 1_000}]}).json()
+    assert client.post(f"/api/invoices/{inv2['id']}/apply-deposit", json={"deposit_id": held[0]["id"]}).status_code == 400
+    tb(client)

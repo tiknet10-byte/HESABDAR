@@ -35,6 +35,7 @@ from ..models import (
     Product,
     PurchaseItem,
     Service,
+    Staff,
     StockMove,
     Supplier,
     TradeDoc,
@@ -389,6 +390,11 @@ def preview_products(db: Session, rows: list[list[object]], mapping: dict[str, i
                            .group_by(Appointment.service_id)).all())
     pkeys = [(p, name_key(p.name)) for p in products]
     skeys = [(s, name_key(s.name)) for s in services]
+    # products that took their code from an earlier Tizpardaz file: that code is Tizpardaz's own (even if renamed here)
+    from_tp: set[int] = set()
+    for b in db.scalars(select(ImportBatch).where(ImportBatch.kind == "tp_products", ImportBatch.status == "committed")):
+        cr = (b.summary or {}).get("created") or {}
+        from_tp.update(int(x) for x in [*cr.get("products", []), *(cr.get("snapshots") or {})])
     parsed = []
     for n, r in enumerate(rows, start=1):
         code = to_en_digits(_text(_get(r, mapping, "code"))).strip()
@@ -409,8 +415,9 @@ def preview_products(db: Session, rows: list[list[object]], mapping: dict[str, i
             row["warnings"].append("SKU ندارد")
         cands, default = [], "new"
         linked = by_code.get(code)
-        # the same code is the same product only with the same SKU or name (both programs number products 1, 2, 3...)
-        if linked is not None and (sku and (linked.sku or "").lower() == sku.lower() or name_key(linked.name) == k):
+        # the same code is the same product only with the same SKU or name, or when an earlier Tizpardaz file gave it
+        # that code (both programs number products 1, 2, 3...)
+        if linked is not None and (linked.id in from_tp or sku and (linked.sku or "").lower() == sku.lower() or name_key(linked.name) == k):
             cands, default = [_pbrief(linked)], f"p:{linked.id}"
             row["status"] = "linked"
         else:
@@ -1096,9 +1103,12 @@ def undo(db: Session, batch: ImportBatch) -> dict:
     c = (batch.summary or {}).get("created", {})
     out = defaultdict(int)
     docs_left, hist_products = set(), set()  # invoices that keep items of other files, products whose history changes
+    owner: dict[str, int | None] = {}  # Chehreh sales moved to a product -> whose they are now (a merge moves them)
     for hid in c.get("history", []):
         h = db.get(TradeHistory, hid)
         if h:
+            if h.source == "chehreh":
+                owner[h.fp] = h.customer_id
             docs_left.add(h.doc_id)
             hist_products.add(h.product_id)
             db.delete(h)
@@ -1109,14 +1119,18 @@ def undo(db: Session, batch: ImportBatch) -> dict:
             db.delete(doc)
             out["docs"] += 1
     db.flush()
-    from ..models import Purchase
+    from ..models import Purchase, SupplierPayment
     for pid in c.get("purchases", []):  # sellers' balances, unless something was already paid on them
         pur = db.get(Purchase, pid)
-        if pur and pur.paid == 0 and not pur.items:
-            for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(("purchase", "purchase_void")), JournalEntry.ref_id == pid)):
-                db.delete(e)
-            db.delete(pur)
-            out["payables"] += 1
+        if pur is None:
+            continue
+        if pur.paid or pur.items or db.scalar(select(SupplierPayment.id).where(SupplierPayment.purchase_id == pid).limit(1)):
+            out["payables_kept"] += 1
+            continue
+        for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type.in_(("purchase", "purchase_void")), JournalEntry.ref_id == pid)):
+            db.delete(e)
+        db.delete(pur)
+        out["payables"] += 1
     db.flush()
     for sid in c.get("suppliers", []):
         sup = db.get(Supplier, sid)
@@ -1127,7 +1141,11 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         src = db.get(ImportBatch, a["batch"]) if a.get("batch") else None
         if src is not None and src.status != "committed":  # its Chehreh file was taken back meanwhile: it stays gone
             continue
-        appt = Appointment(customer_id=a["customer_id"], service_id=a["service_id"], staff_id=a["staff_id"],
+        cid = owner.get(f"chehreh|appt|{a['id']}", a["customer_id"])
+        if cid is None or db.get(Customer, cid) is None:  # nobody to give it back to
+            continue
+        appt = Appointment(customer_id=cid, service_id=a["service_id"] if db.get(Service, a["service_id"] or 0) else None,
+                           staff_id=a["staff_id"] if db.get(Staff, a["staff_id"] or 0) else None,
                            start_at=datetime.fromisoformat(a["start_at"]), quoted_price=a["quoted_price"], notes=a["notes"],
                            status=a["status"], duration_minutes=a["duration_minutes"])
         db.add(appt)

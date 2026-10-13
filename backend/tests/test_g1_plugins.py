@@ -236,15 +236,20 @@ def test_instagram_sender_cannot_rename_an_existing_customer(client, receipts_on
     c = _customer(client, "G1 نام واقعی", "09151010013")
     client.post(SIM, json={"channel": "instagram", "sender": "g1.someone", "text": "رسید کارت به کارت موفق مبلغ 1,240,010 ریال"})
     r = client.post(SIM, json={"channel": "instagram", "sender": "g1.someone", "text": "هکر 09151010013"}).json()
-    assert r["customer_id"] == c["id"]
-    assert client.get(f"/api/customers/{c['id']}").json()["full_name"] == "G1 نام واقعی"
+    # a mobile typed in the chat is no proof: the Instagram account is NOT tied to the customer who owns that number
+    assert r["customer_id"] != c["id"]
+    owner = client.get(f"/api/customers/{c['id']}").json()
+    assert owner["full_name"] == "G1 نام واقعی" and not owner.get("instagram")
+    other = client.get(f"/api/customers/{r['customer_id']}").json()
+    assert other["full_name"] == "هکر" and other["instagram"] == "g1.someone" and "09151010013" in other["notes"]
+    assert _get(InboundReceipt, r["receipt_id"]).customer_id == r["customer_id"]
     # «ثبت» on a receipt whose sender is known needs no name again (no empty new customer is made)
     n = _count(InboundReceipt)
     assert n
     before = client.get("/api/customers").json()["total"]
     client.post(f"/api/plugins/messaging_receipts/receipts/{r['receipt_id']}/assign", json={})
     assert client.get("/api/customers").json()["total"] == before
-    assert _get(InboundReceipt, r["receipt_id"]).customer_id == c["id"]
+    assert _get(InboundReceipt, r["receipt_id"]).customer_id == r["customer_id"]
 
 
 def test_receipt_file_name_never_comes_from_the_sender(client, receipts_on):
@@ -446,3 +451,71 @@ def test_scan_of_today_works_before_noon_and_future_rows_are_refused(client, mon
     # discard works once, only while the page waits for review
     assert client.post(f"/api/plugins/sales_book_ocr/batches/{b['id']}/discard").json() == {"ok": True}
     assert client.post(f"/api/plugins/sales_book_ocr/batches/{b['id']}/discard").status_code == 400
+
+
+# ---------------------------------------------------------------- review follow-ups
+def _login_as(client, name: str, role: str) -> TestClient:
+    r = client.post("/api/auth/users", json={"username": name, "password": "Passw0rd1", "role": role})
+    assert r.status_code == 200, r.text
+    c = TestClient(app)
+    c.headers["Authorization"] = "Bearer " + c.post("/api/auth/login", json={"username": name, "password": "Passw0rd1"}).json()["access_token"]
+    return c
+
+
+def test_plugin_read_tools_are_reports_tools_the_ai_agent_keeps(client):
+    from app.ai.tools import READ_ONLY, all_tools
+
+    perms = {t.name: t.permission for t in all_tools()}
+    assert perms["unmatched_bank_transactions"] == "reports" and perms["sales_book_batches_pending"] == "reports"
+    assert "finance" not in READ_ONLY  # a 'finance' tool would move money: the chat may only propose it
+    ai = _login_as(client, "g1_ai_agent", "ai_agent")
+    names = {t["name"] for t in ai.get("/api/ai/tools").json()}
+    assert {"unmatched_bank_transactions", "sales_book_batches_pending"} <= names
+    for tool in ("unmatched_bank_transactions", "sales_book_batches_pending"):
+        r = ai.post(f"/api/ai/tools/{tool}", json={"arguments": {}})
+        assert r.status_code == 200 and isinstance(r.json(), list), r.text
+    assert len(ai.post("/api/ai/tools/unmatched_bank_transactions", json={"arguments": {"limit": 10**9}}).json()) <= 200
+    rec = _login_as(client, "g1_reception", "receptionist")  # money lists stay with the owner, manager and accountant
+    assert rec.post("/api/ai/tools/unmatched_bank_transactions", json={"arguments": {}}).status_code == 403
+
+
+def test_scan_upload_runs_off_the_event_loop_and_refuses_huge_files(client, monkeypatch):
+    import inspect
+
+    route = next(r for r in manager.plugins["sales_book_ocr"].router.routes if getattr(r, "path", "") == "/upload")
+    assert not inspect.iscoroutinefunction(route.endpoint)
+    monkeypatch.setattr(ocr_plugin, "MAX_BYTES", 200)
+    before = _count(ImportBatch)
+    big = ("x" * 201).encode()
+    r = client.post("/api/plugins/sales_book_ocr/upload", files={"file": ("g1-big.txt", big, "text/plain")}, data={"currency": "toman"})
+    assert r.status_code == 400 and "مگابایت" in r.json()["detail"]
+    assert _count(ImportBatch) == before
+    ok = _upload(client, "پگاه اسکنی | 09151010017 | کوتاهی مو | 200,000 | کارتخوان")  # a page under the limit still works
+    assert ok["rows"][0]["total"] == 2_000_000
+    client.post(f"/api/plugins/sales_book_ocr/batches/{ok['id']}/discard")
+
+
+def test_reject_is_recorded_and_sms_webhook_and_secret_with_spaces_work(client, receipts_on):
+    from app.models import AuditLog
+
+    # the SMS forwarder's webhook (signed) still books the receipt, now off the event loop
+    body = json.dumps({"sender": "09151010018", "text": "رسید کارت به کارت موفق مبلغ 4,440,010 ریال"}).encode()
+    h = {"X-Hesabdar-Signature": sign_payload(body, "hook-secret"), "Content-Type": "application/json"}
+    r = TestClient(app).post("/api/plugins/messaging_receipts/webhook/sms", content=body, headers=h)
+    assert r.status_code == 200 and r.json()["receipt_id"], r.text
+    rid = r.json()["receipt_id"]
+    assert client.post(f"/api/plugins/messaging_receipts/receipts/{rid}/reject").json() == {"ok": True}
+    with SessionLocal() as db:
+        row = db.scalar(select(AuditLog).where(AuditLog.action == "receipt.reject", AuditLog.entity_id == str(rid)))
+        assert row is not None and row.actor == "owner" and row.data["amount"] == 4_440_010
+    assert _get(InboundReceipt, rid).status == "rejected"
+
+    # an App Secret pasted with a space or a new line still checks Meta's signature
+    cfg = dict(manager.plugins["messaging_receipts"].ctx.config)
+    try:
+        assert client.put("/api/plugins/messaging_receipts", json={"config": {**cfg, "app_secret": f"  {SECRET}\n"}}).status_code == 200
+        raw = _wa("989151010019", "سلام")
+        ok = TestClient(app).post(WA, content=raw, headers={"Content-Type": "application/json", "X-Hub-Signature-256": _sig(raw)})
+        assert ok.status_code == 200 and ok.json() == {"handled": 1}
+    finally:
+        client.put("/api/plugins/messaging_receipts", json={"config": {**cfg, "app_secret": SECRET}})

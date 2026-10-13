@@ -12,7 +12,7 @@ import { toLocalIso } from "../lib/jalali";
 import { type ReactNode, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Badge, Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Tabs } from "../components/ui";
-import { api, download } from "../lib/api";
+import { api, download, setToken } from "../lib/api";
 import { ACCOUNT_KINDS, jdatetime, money, num, ROLES, unitLabel } from "../lib/format";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
 
@@ -697,6 +697,39 @@ function StaffAndUsers() {
   const saveAll = async () => { for (const id of dirtyIds) await save(id); };
   const [u, setU] = useState({ username: "", full_name: "", password: "", role: "receptionist" });
   const canEdit = can(user, "settings"); // staff are added / changed by the owner / admin only (as the server)
+  const [editU, setEditU] = useState<any>(null);
+  const [pw, setPw] = useState({ current_password: "", new_password: "" });
+  async function unlock(x: any) {
+    try {
+      await api(`/api/auth/users/${x.id}/unlock`, { method: "POST" });
+      toast(`قفل حساب ${x.full_name || x.username} باز شد`);
+      users.reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  }
+  async function saveUser() {
+    try {
+      const r = await api(`/api/auth/users/${editU.id}`, { method: "PUT", body: { username: editU.username, full_name: editU.full_name ?? "",
+        role: editU.role, is_active: editU.is_active, password: editU.password || null } });
+      if (r.access_token) setToken(r.access_token); // own new password: this device stays logged in
+      toast("کاربر ذخیره شد");
+      setEditU(null);
+      users.reload();
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  }
+  async function changeMyPassword() {
+    try {
+      const r = await api("/api/auth/change-password", { body: pw });
+      setToken(r.access_token); // other devices logged in with the old password are logged out, this one stays
+      setPw({ current_password: "", new_password: "" });
+      toast("رمز عبور شما عوض شد");
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  }
   return (
     <div className="space-y-4">
       <Card title="پرسنل" actions={dirtyIds.length > 0 ? <button className="btn btn-primary btn-sm" onClick={saveAll}><Save size={14} />ذخیره همه ({num(dirtyIds.length)})</button> : null}>
@@ -750,7 +783,17 @@ function StaffAndUsers() {
       </Card>
       {can(user, "users") && (
         <Card title="کاربران سیستم و سطح دسترسی">
-          <table className="table"><tbody>{(users.data ?? []).map((x) => <tr key={x.id}><td className="font-semibold">{x.full_name || x.username}</td><td dir="ltr">{x.username}</td><td><Badge>{ROLES[x.role]}</Badge></td><td>{x.is_active ? "فعال" : "غیرفعال"}</td></tr>)}</tbody></table>
+          <table className="table"><tbody>{(users.data ?? []).map((x) => (
+            <tr key={x.id}>
+              <td className="font-semibold">{x.full_name || x.username}</td><td dir="ltr">{x.username}</td><td><Badge>{ROLES[x.role]}</Badge></td>
+              <td className="whitespace-nowrap">{x.is_active ? "فعال" : "غیرفعال"}
+                {x.locked && <span className="badge mr-1.5 bg-rose-500/15 text-rose-600 dark:text-rose-400" title="چند بار پشت سر هم رمز اشتباه زده شد؛ چند دقیقه بسته است">قفل</span>}</td>
+              <td className="whitespace-nowrap text-left">
+                {x.locked && <button className="btn btn-sm" onClick={() => unlock(x)}>باز کردن قفل</button>}
+                <button className="btn btn-ghost btn-sm" onClick={() => setEditU({ ...x, password: "" })} title="ویرایش، غیرفعال کردن یا رمز تازه"><Pencil size={15} /></button>
+              </td>
+            </tr>
+          ))}</tbody></table>
           <div className="mt-3 grid gap-2 sm:grid-cols-5">
             <input className="input" placeholder="نام" value={u.full_name} onChange={(e) => setU({ ...u, full_name: e.target.value })} />
             <input className="input" dir="ltr" placeholder="username" value={u.username} onChange={(e) => setU({ ...u, username: e.target.value })} />
@@ -758,8 +801,38 @@ function StaffAndUsers() {
             <select className="input" value={u.role} onChange={(e) => setU({ ...u, role: e.target.value })}>{Object.entries(ROLES).filter(([k]) => k !== "owner").map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
             <button className="btn btn-primary" onClick={async () => { try { await api("/api/auth/users", { body: u }); toast("کاربر ساخته شد"); setU({ username: "", full_name: "", password: "", role: "receptionist" }); users.reload(); } catch (e: any) { toast(e.message, "error"); } }}>افزودن</button>
           </div>
+          <Modal open={!!editU} onClose={() => setEditU(null)} title={`کاربر ${editU?.full_name || editU?.username || ""}`}>
+            {editU && (
+              <div className="space-y-3">
+                <Field label="نام"><input className="input" value={editU.full_name ?? ""} onChange={(e) => setEditU({ ...editU, full_name: e.target.value })} /></Field>
+                {editU.id !== user?.id && <>
+                  <Field label="نقش (سطح دسترسی)">
+                    <select className="input" value={editU.role} onChange={(e) => setEditU({ ...editU, role: e.target.value })}>
+                      {Object.entries(ROLES).filter(([k]) => k !== "owner" || editU.role === "owner").map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                    </select>
+                  </Field>
+                  <label className="flex items-start gap-2 text-sm">
+                    <input type="checkbox" className="mt-1" checked={editU.is_active} onChange={(e) => setEditU({ ...editU, is_active: e.target.checked })} />
+                    <span>فعال<span className="muted block text-xs">اگر همکار دیگر با شما کار نمی‌کند، تیک را بردارید تا دیگر نتواند وارد شود (سوابقش می‌ماند).</span></span>
+                  </label>
+                </>}
+                <Field label="رمز تازه" hint="فقط اگر رمز را فراموش کرده یا باید عوض شود؛ خالی = همان رمز قبلی. ذخیره، قفل حساب را هم باز می‌کند.">
+                  <input className="input" type="password" dir="ltr" autoComplete="new-password" value={editU.password} onChange={(e) => setEditU({ ...editU, password: e.target.value })} />
+                </Field>
+                <button className="btn btn-primary w-full" onClick={saveUser}><Save size={15} />ذخیره</button>
+              </div>
+            )}
+          </Modal>
         </Card>
       )}
+      <Card title="رمز عبور من">
+        <div className="grid gap-2 sm:grid-cols-3">
+          <input className="input" type="password" dir="ltr" autoComplete="current-password" placeholder="رمز فعلی" value={pw.current_password} onChange={(e) => setPw({ ...pw, current_password: e.target.value })} />
+          <input className="input" type="password" dir="ltr" autoComplete="new-password" placeholder="رمز تازه" value={pw.new_password} onChange={(e) => setPw({ ...pw, new_password: e.target.value })} />
+          <button className="btn" disabled={!pw.current_password || !pw.new_password} onClick={changeMyPassword}><KeyRound size={15} />تغییر رمز</button>
+        </div>
+        <p className="muted mt-2 text-xs">بعد از تغییر رمز، دستگاه‌های دیگری که با رمز قبلی وارد شده‌اند خارج می‌شوند؛ همین دستگاه وارد می‌ماند.</p>
+      </Card>
     </div>
   );
 }

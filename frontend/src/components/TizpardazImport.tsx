@@ -87,6 +87,7 @@ export default function TizpardazImport() {
       const r = await api(`/api/import/tizpardaz/${b.id}/undo`, { method: "POST" });
       const kept = [
         [r.balances_kept, "بدهی که (بخشی از) آن دریافت شده"], [r.credits_kept, "اعتبار که مصرف شده"],
+        [r.payables_kept, "طلب فروشنده که (بخشی از) آن پرداخت شده"],
         [r.moves_kept, "موجودی کالا که بعداً فروش یا گردش داشته"], [r.products_kept, "کالا که بعداً استفاده شده"],
         [r.codes_kept, "کد کالا که حالا مال کالای دیگری است"],
       ].filter(([n]) => n > 0).map(([n, l]) => `${faDigits(n)} ${l}`);

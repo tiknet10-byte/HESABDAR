@@ -802,6 +802,24 @@ def pay_invoice(iid: int, body: PayIn, db: Session = Depends(get_db), user=Depen
     return _inv(i)
 
 
+class ApplyDepositIn(BaseModel):
+    deposit_id: int
+
+
+@router.post("/invoices/{iid}/apply-deposit")
+def apply_deposit(iid: int, body: ApplyDepositIn, db: Session = Depends(get_db), user=Depends(require("write"))):
+    """Use the customer's open deposit / credit on this invoice (one that was not ticked when it was issued)."""
+    i = _get(db, Invoice, iid, "فاکتور")
+    d = _get(db, Deposit, body.deposit_id, "بیعانه")
+    try:
+        used = accounting.apply_deposit(db, i, d, user=user)
+    except AccountingError as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return {**_inv(i), "used": used}
+
+
 @router.post("/invoices/{iid}/void")
 def void(iid: int, reason: str = "", payments: str = "cancel", db: Session = Depends(get_db), user=Depends(require("void"))):
     i = _get(db, Invoice, iid, "فاکتور")

@@ -44,7 +44,7 @@ function Review({ id, onDone }: { id: number; onDone: () => void }) {
         <div className="mt-4 flex gap-2">
           <button className="btn btn-primary" disabled={busy} onClick={async () => {
             setBusy(true);
-            try { const r = await api(`/api/plugins/sales_book_ocr/batches/${id}/commit`, { method: "POST" }); toast(`${r.invoices.length} فاکتور ثبت شد`); onDone(); } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
+            try { const r = await api(`/api/plugins/sales_book_ocr/batches/${id}/commit`, { method: "POST" }); toast(`${r.invoices.length} فاکتور ثبت شد${r.left_open?.length ? `؛ ${r.left_open.length} فاکتور مانده دارد (بیعانه‌ای که در دفتر نوشته شده خودکار کسر نمی‌شود؛ آن را از صفحهٔ فاکتور تسویه کنید)` : ""}`, r.left_open?.length ? "error" : undefined); onDone(); } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
           }}><CheckCircle2 size={16} />تأیید و ثبت در حسابداری</button>
           <button className="btn" onClick={async () => { await api(`/api/plugins/sales_book_ocr/batches/${id}/discard`, { method: "POST" }); onDone(); }}>کنار گذاشتن</button>
         </div>

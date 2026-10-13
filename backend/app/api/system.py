@@ -123,7 +123,7 @@ def money_returned(start: date | None = None, end: date | None = None, db: Sessi
     return reports.money_returned(db, start, end)
 
 
-DAY_MONEY = ("sales", "money", "money_total", "money_in", "money_out", "by_account")
+DAY_MONEY = ("sales", "money", "money_total", "money_in", "money_out", "by_account", "returns_total")
 
 
 @router.get("/dashboard/day")
@@ -170,8 +170,14 @@ class InvokeIn(BaseModel):
 def ai_chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(current_user)):
     try:
         return assistant.chat(db, user, body.messages[-30:])
-    except Exception as exc:  # surface AI/network problems as a friendly message
-        raise HTTPException(502, f"خطا در ارتباط با هوش مصنوعی: {exc}") from exc
+    except Exception as exc:  # a friendly message; the details (they may hold SQL or data) go only to the log
+        import secrets
+
+        code = secrets.token_hex(3)
+        log.error("ai chat failed [%s]", code, exc_info=exc)
+        net = type(exc).__module__.split(".")[0] in ("anthropic", "httpx", "httpcore")
+        hint = "اتصال اینترنت و کلید هوش مصنوعی را در تنظیمات بررسی کنید" if net else "اگر تکرار شد، این کد را به پشتیبانی بگویید"
+        raise HTTPException(502, f"دستیار هوش مصنوعی الان جواب نداد (کد {code}). دوباره امتحان کنید؛ {hint}.") from exc
 
 
 @router.get("/ai/tools")
@@ -310,16 +316,11 @@ def _after_restore(name: str, out: dict, user) -> dict:  # noqa: ANN001
     at start-up), use its plugin on/off and settings, and record the restore in its audit trail."""
     from ..core.db import SessionLocal
     from ..main import init_db
-    from ..models import PluginState
 
     try:
         init_db()
+        manager.reload_state()  # the backup's plugin on/off and settings (a plugin it does not know: as on a first start)
         with SessionLocal() as db:
-            for pname, plugin in manager.plugins.items():
-                st = db.get(PluginState, pname)
-                if st is not None:  # a plugin the backup does not know keeps its current state until the next start
-                    plugin.ctx.config = {**plugin.default_config, **(st.config or {})}
-                    manager.enabled[pname] = st.enabled
             audit(db, "backup.restore", "backup", name, out, user=user, actor=user.username)
             db.commit()
     except Exception:  # noqa: BLE001 - the data is back; a restart finishes the rest

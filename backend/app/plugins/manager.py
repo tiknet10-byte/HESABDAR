@@ -54,6 +54,15 @@ class PluginManager:
 
     # state -------------------------------------------------------------------
     def sync_state(self) -> None:
+        """At start: read the plugins' state, then connect their event handlers (once)."""
+        self.reload_state()
+        for name, plugin in self.plugins.items():
+            for event, handler in plugin.events.items():
+                bus.subscribe(event, self._guard(name, handler))
+
+    def reload_state(self) -> None:
+        """Every plugin's on/off and settings from the database (at start, and after a backup is restored); a plugin
+        the database does not know yet gets its first-start state."""
         with SessionLocal() as db:
             for name, plugin in self.plugins.items():
                 st = db.get(PluginState, name)
@@ -64,9 +73,6 @@ class PluginManager:
                 plugin.ctx.config = {**plugin.default_config, **(st.config or {})}
                 self.enabled[name] = st.enabled
             db.commit()
-        for name, plugin in self.plugins.items():
-            for event, handler in plugin.events.items():
-                bus.subscribe(event, self._guard(name, handler))
 
     def _guard(self, name: str, handler):  # noqa: ANN001, ANN202
         def wrapped(event: str, payload: dict) -> None:

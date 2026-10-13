@@ -34,9 +34,14 @@ no longer used — that ends its existing tokens at once.
 | Tool | Permission |
 |---|---|
 | search_customers, customer_profile, list_services, open_deposits, alerts, reconciliation_status, guess_service | read |
+| plugins: customer_receipts_to_review (messaging_receipts), loyalty_points (loyalty) | read |
 | financial_summary, revenue_timeseries, revenue_forecast, business_insights, payment_accounts | reports |
+| plugins: unmatched_bank_transactions (bank_sync), sales_book_batches_pending (sales_book_ocr) | reports |
 | create_customer, register_deposit | write |
 | teach_service_alias | settings |
+
+A tool that only reads takes `read` or `reports` (the chat runs those by itself); `finance` means moving money, so a
+tool with any other permission is always a proposal the user confirms in the chat.
 
 `GET /api/ai/knowledge-export` exports the service catalog and everything learned, for syncing into an
 external AI memory / RAG store.

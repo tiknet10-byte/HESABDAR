@@ -207,7 +207,9 @@ def product_detail(pid: int, db: Session = Depends(get_db), user=Depends(require
                      "doc_id": h.doc_id,
                      "customer_id": h.customer_id, "customer": names.get(h.customer_id) if h.customer_id else None,
                      "qty": h.qty, "unit_price": h.unit_price if costs or not bought else None,
-                     "amount": h.amount if costs or not bought else None, "cost": h.cost if costs else None})
+                     "amount": h.amount if costs or not bought else None, "cost": h.cost if costs else None,
+                     # after its share of the invoice's discount (what the product report counts)
+                     "net_amount": (h.net_amount if h.net_amount is not None else h.amount) if costs or not bought else None})
     return {**_p(p, costs), "moves": card[::-1], "history": hist}
 
 
@@ -295,7 +297,7 @@ def _doc(d: dict, costs: bool) -> dict:
     money = ("items_total", "total", "paid", "discount", "additions")
     out = {**d, **dict.fromkeys(money)}
     if "items" in d:
-        out["items"] = [{**i, "unit_price": None, "amount": None, "cost": None, "profit": None} for i in d["items"]]
+        out["items"] = [{**i, "unit_price": None, "amount": None, "net_amount": None, "cost": None, "profit": None} for i in d["items"]]
         out["extras"] = []
     return out
 

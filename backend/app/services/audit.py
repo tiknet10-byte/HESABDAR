@@ -62,6 +62,39 @@ def verify_audit_chain(db: Session) -> dict:
     return {"ok": True, "checked": count}
 
 
+RECHAIN_FLAG = "audit.rechained"  # set once the links broken by the old bug are mended (the release that did it)
+RECHAIN_MARK = "1.20.0"
+
+
+def rechain_once(db: Session) -> list[int]:
+    """Once per database (at start): before 1.20.0 two records written in one request (or two requests at the same
+    moment) were both linked to the same earlier record, so Settings showed "tampered" with nothing changed.
+    Only such a record is linked again: its own content still matches its hash and it points to a record that
+    exists. A record whose content was changed, or that points to a deleted record, stays reported."""
+    from . import settings_store
+
+    if settings_store.get(db, RECHAIN_FLAG):
+        return []
+    write_lock(db)
+    known = {""}  # the hashes the records had before (what a record wrongly linked to)
+    prev = ""
+    mended: list[int] = []
+    for row in db.scalars(select(AuditLog).order_by(AuditLog.id)):
+        old = row.hash
+        if row.prev_hash != prev and row.prev_hash in known and _digest(row.prev_hash, row) == row.hash:
+            row.prev_hash = prev
+            row.hash = _digest(prev, row)
+            mended.append(row.id)
+        known.add(old)
+        prev = row.hash
+    db.flush()
+    settings_store.set_value(db, RECHAIN_FLAG, RECHAIN_MARK)
+    if mended:  # recorded in the chain itself: what was linked again, and when
+        audit(db, "audit.rechain", "audit", "", {"mended": len(mended), "ids": mended[:200], "release": RECHAIN_MARK})
+    db.commit()
+    return mended
+
+
 def raise_alert(db: Session, kind: str, title: str, message: str = "", level: str = "warning",
                 ref_type: str | None = None, ref_id: int | None = None) -> Alert:
     alert = Alert(kind=kind, title=title, message=message, level=level, ref_type=ref_type, ref_id=ref_id)
