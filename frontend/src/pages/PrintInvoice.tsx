@@ -71,7 +71,7 @@ export default function PrintInvoice() {
         <div className="mr-auto w-64 space-y-1 text-sm">
           {inv.discount > 0 && <div className="flex justify-between"><span>تخفیف</span><span className="num">− {money(inv.discount)}</span></div>}
           <div className="flex justify-between border-t border-black pt-1 font-extrabold"><span>جمع کل</span><span className="num">{money(inv.total)}</span></div>
-          {inv.deposits.map((d: any) => <div key={d.id} className="flex justify-between"><span>بیعانه ({formatJ(d.received_at, false)})</span><span className="num">− {money(d.amount)}</span></div>)}
+          {inv.deposits.map((d: any) => <div key={d.id} className="flex justify-between"><span>{d.kind === "credit" ? "اعتبار مشتری" : "بیعانه"} ({formatJ(d.received_at, false)})</span><span className="num">− {money(d.amount)}</span></div>)}
           {inv.payments.map((p: any) => <div key={p.id} className="flex justify-between"><span>{p.amount < 0 ? "استرداد" : "پرداخت"} · {accounts[p.account_id] ?? ""}</span><span className="num">{money(Math.abs(p.amount))}</span></div>)}
           {inv.status !== "void" && <div className="flex justify-between font-bold"><span>مانده</span><span className="num">{money(inv.due)}</span></div>}
           <div className="pt-1 text-center text-xs">وضعیت: {STATUS[inv.status] ?? inv.status}</div>

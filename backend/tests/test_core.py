@@ -79,7 +79,9 @@ def test_receipt_bot_and_bank_matching(client, accounts):
     r2 = client.post("/api/plugins/messaging_receipts/simulate", json={"channel": "whatsapp", "sender": sender, "text": "نگار کریمی"}).json()
     assert r2["customer_id"] and r2["receipt_status"] == "pending"
     # bank SMS arrives on the salon phone via signed webhook -> auto match & register deposit
-    body = json.dumps({"text": "بانک ملی\nواریز: +3,000,000\nپیگیری: 555666\n1405/07/11 10:21",
+    cfg = next(p for p in client.get("/api/plugins").json() if p["name"] == "bank_sync")["config"]
+    assert client.put("/api/plugins/bank_sync", json={"config": {**cfg, "bank_senders": "BMI, 9830003"}}).status_code == 200
+    body = json.dumps({"text": "بانک ملی\nواریز: +3,000,000\nپیگیری: 555666\n1405/07/11 10:21", "sender": "bmi",
                        "payment_account_id": accounts["کارت بانک ملی (مدیر)"]}).encode()
     bad = client.post("/api/plugins/bank_sync/webhook/bank-sms", content=body, headers={"X-Hesabdar-Signature": "nope"})
     assert bad.status_code == 401

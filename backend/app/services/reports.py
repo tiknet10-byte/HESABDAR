@@ -294,8 +294,8 @@ def agenda(db: Session, now: datetime | None = None) -> dict:
     overdue = count(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
                     .join(Appointment, Appointment.id == Deposit.appointment_id)
                     .where(Deposit.status == "held", Appointment.start_at < day))
-    no_appt = count(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
-                    .where(Deposit.status == "held", Deposit.appointment_id.is_(None)))
+    no_appt = count(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))  # credits need no booking
+                    .where(Deposit.status == "held", Deposit.appointment_id.is_(None), func.coalesce(Deposit.kind, "") != "credit"))
     unpaid = count(select(func.count(Invoice.id), func.coalesce(func.sum(Invoice.total - Invoice.paid), 0))
                    .where(Invoice.status.in_(("issued", "partial"))))
     past_open = db.scalar(select(func.count(Appointment.id)).where(Appointment.status == "booked", Appointment.start_at < day)) or 0

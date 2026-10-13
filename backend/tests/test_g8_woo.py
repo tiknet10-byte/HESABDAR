@@ -687,6 +687,10 @@ def test_website_shipping_is_product_sales_and_no_service_deposit_pays_it(client
     after = {r["code"]: r for r in client.get("/api/ledger/trial-balance").json()["rows"]}
     sales = after["4200"]["balance"] - (before["4200"]["balance"] if "4200" in before else 0)
     assert sales == inv["total"] == 1_200_000  # 100,000 + 20,000 toman, all product sales
+    day = inv["issued_at"][:10]
+    rep = client.get(f"/api/reports/products?start={day}&end={day}").json()
+    extra = next(r for r in rep["products"] if r["id"] is None and "ارسال" in r["name"])
+    assert extra["revenue"] >= 200_000 and extra["cogs"] == 0  # the shipping is in the products report too
     assert inv["due"] == 1_200_000  # not paid yet: the service deposit still can't pay the product or its shipping
     r = client.post(f"/api/invoices/{inv['id']}/apply-deposit", json={"deposit_id": dep["id"]})
     assert r.status_code == 400 and "خدمت" in r.json()["detail"]

@@ -58,6 +58,9 @@ def init_db() -> None:
         from .services.accounting import classify_credits
 
         classify_credits(db)  # customers' money kept with us that is not a service deposit: a credit (pays anything)
+        from .services.accounting import separate_shared_cash_accounts
+
+        separate_shared_cash_accounts(db)  # same-name payment accounts that shared one ledger account before 1.20
         from .services import inventory
 
         inventory.ensure_chart(db)  # inventory, supplier payables, product revenue, cost of goods sold

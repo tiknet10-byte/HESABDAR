@@ -8,7 +8,7 @@ Signed webhooks use HMAC-SHA256 of the raw body with `HESABDAR_WEBHOOK_SECRET`
 | Source | How |
 |---|---|
 | Bank / open-banking API | In *Settings → POS & cards* pick provider `generic_http` and give `{"url", "token", "items_path", "fields"}`. Synced every 15 minutes. For a specific bank/aggregator, add a `BankProvider` subclass. |
-| Bank SMS on the salon phone | Install an SMS-forwarder app on the phone that receives bank SMS; forward to `POST /api/plugins/bank_sync/webhook/bank-sms` with JSON `{"text": "...", "sender": "..."}` and the signature header. |
+| Bank SMS on the salon phone | Install an SMS-forwarder app on the phone that receives bank SMS; forward to `POST /api/plugins/bank_sync/webhook/bank-sms` with JSON `{"text": "...", "sender": "..."}` and the signature header. **Enter the bank's SMS sender(s)** (number or name, comma-separated) in the bank plugin settings: only SMS from them become bank money; anything else is ignored, and with no sender set every SMS is refused (an alert tells the owner). |
 | Statement file | Upload the CSV exported from internet banking (Persian or English column names are detected). |
 
 ## Customer receipts (`messaging_receipts`) — beta

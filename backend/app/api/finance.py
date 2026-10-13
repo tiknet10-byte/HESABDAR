@@ -360,6 +360,9 @@ class DepositCloseIn(BaseModel):
     appointment: str = "auto"  # its booked appointment: auto (cancel unless another open deposit holds it) | cancel | keep
 
 
+NOT_CREDIT = func.coalesce(Deposit.kind, "") != "credit"  # a customer credit is not a service deposit
+
+
 def _dep(d: Deposit, name: str | None = None, db: Session | None = None) -> dict:
     out = {"id": d.id, "customer_id": d.customer_id, "customer": name, "amount": d.amount, "status": d.status,
            "payment_account_id": d.payment_account_id, "service_id": d.service_id, "appointment_id": d.appointment_id,
@@ -410,8 +413,8 @@ def deposits_search(q: str = "", status: str = "held", sort: str = "received_des
         stmt = stmt.where(or_(fa_like(Customer.full_name, q), Customer.legacy_code == code, Customer.mobile.like(f"%{mob or code}%"),
                               Deposit.reference.like(f"%{code}%"), fa_like(Deposit.notes, q)))
     now = local_now()
-    if filter == "no_appointment":
-        stmt = stmt.where(Deposit.appointment_id.is_(None))
+    if filter == "no_appointment":  # service deposits waiting for a booking (a customer credit needs none)
+        stmt = stmt.where(Deposit.appointment_id.is_(None), NOT_CREDIT)
     elif filter == "upcoming":
         stmt = stmt.where(appt.c.start_at >= now, appt.c.status == "booked")
     elif filter == "overdue":  # appointment time passed but the deposit is still open (no invoice yet / no-show?)
@@ -458,7 +461,7 @@ def deposits_search(q: str = "", status: str = "held", sort: str = "received_des
                                   .join(Appointment, Appointment.id == Deposit.appointment_id)
                                   .where(Deposit.status == "held", Appointment.start_at < now)).one()
     noappt_n, noappt_sum = db.execute(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
-                                      .where(Deposit.status == "held", Deposit.appointment_id.is_(None))).one()
+                                      .where(Deposit.status == "held", Deposit.appointment_id.is_(None), NOT_CREDIT)).one()
     # received this (Jalali) month: real money only (not balances brought over, void credits or website refunds)
     from ..services.jalali import month_start
     from ..services.reports import REAL_DEPOSIT
@@ -466,7 +469,8 @@ def deposits_search(q: str = "", status: str = "held", sort: str = "received_des
     month_n, month_sum = db.execute(select(func.count(Deposit.id), func.coalesce(func.sum(Deposit.amount), 0))
                                     .where(Deposit.received_at >= month_start(now), REAL_DEPOSIT,
                                            Deposit.source != "woocommerce")).one()
-    return {"total": total, "amount": int(amount), "items": items,
+    # the sum of a period's deposits is a report too (reception sees the list and the count)
+    return {"total": total, "amount": int(amount) if has_permission(user.role, "reports") else None, "items": items,
             "stats": {"held": [held_n, int(held_sum)], "overdue": [over_n, int(over_sum)], "no_appointment": [noappt_n, int(noappt_sum)],
                       # money received in the month is a report (reception sees the count only)
                       "month": [month_n, int(month_sum) if has_permission(user.role, "reports") else None]}}

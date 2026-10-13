@@ -454,7 +454,7 @@ export function InvoiceView({ id, onChange }: { id: number; onChange: () => void
       <div className="space-y-1 rounded-2xl p-3" style={{ background: "var(--surface)" }}>
         {data.discount > 0 && <div className="flex justify-between"><span className="muted">تخفیف</span><span className="num">− {money(data.discount)}</span></div>}
         <div className="flex justify-between font-bold"><span>جمع فاکتور</span><span className="num">{money(data.total)}</span></div>
-        {data.deposits.map((d: any) => <div key={d.id} className="flex justify-between text-emerald-600"><span>بیعانه ({formatJ(d.received_at, false)})</span><span className="num">{money(d.amount)}</span></div>)}
+        {data.deposits.map((d: any) => <div key={d.id} className="flex justify-between text-emerald-600"><span>{d.kind === "credit" ? "اعتبار مشتری" : "بیعانه"} ({formatJ(d.received_at, false)})</span><span className="num">{money(d.amount)}</span></div>)}
         {data.payments.map((p: any) => <div key={p.id} className={`flex justify-between ${p.amount < 0 ? "text-rose-600" : ""}`}><span className="muted">{p.amount < 0 ? "استرداد · " : ""}{accName(p.account_id)}</span><span className="num">{money(p.amount)}</span></div>)}
         {data.status !== "void" && <div className="flex justify-between font-bold text-amber-600"><span>مانده</span><span className="num">{money(data.due)}</span></div>}
       </div>
@@ -485,7 +485,7 @@ export function InvoiceView({ id, onChange }: { id: number; onChange: () => void
                 <div className="text-xs font-bold">وجه دریافتی ({money(cashPaid)}):</div>
                 <label className="flex items-center gap-2 text-xs"><input type="radio" checked={payBack === "cancel"} onChange={() => setPayBack("cancel")} />فاکتور اشتباه ثبت شده بود؛ این پول واقعاً دریافت نشده (دریافت در همان تاریخ خودش لغو می‌شود)</label>
                 <label className="flex items-center gap-2 text-xs"><input type="radio" checked={payBack === "refund"} onChange={() => setPayBack("refund")} />پول دریافت شده بود و امروز به مشتری برگردانده شد (از همان حساب)</label>
-                <label className="flex items-center gap-2 text-xs"><input type="radio" checked={payBack === "deposit"} onChange={() => setPayBack("deposit")} />نزد سالن بماند و بیعانهٔ باز مشتری شود</label>
+                <label className="flex items-center gap-2 text-xs"><input type="radio" checked={payBack === "deposit"} onChange={() => setPayBack("deposit")} />نزد سالن بماند و اعتبار مشتری شود (برای هر خرید بعدی، خدمت یا محصول)</label>
               </div>
             )}
             <input className="input" placeholder="دلیل ابطال (اختیاری)" value={reason} onChange={(e) => setReason(e.target.value)} />

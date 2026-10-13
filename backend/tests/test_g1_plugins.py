@@ -327,7 +327,9 @@ def test_instagram_pictures_only_from_meta_servers(client, receipts_on, monkeypa
 # ---------------------------------------------------------------- bank SMS
 def test_bank_sms_sent_again_is_not_new_money(client, monkeypatch):
     anon = TestClient(app)
-    body = json.dumps({"text": "واریز 2,000,010 ریال"}).encode()  # no date, no tracking number
+    cfg = next(p for p in client.get("/api/plugins").json() if p["name"] == "bank_sync")["config"]
+    client.put("/api/plugins/bank_sync", json={"config": {**cfg, "bank_senders": "BMI, 9830003"}})
+    body = json.dumps({"text": "واریز 2,000,010 ریال", "sender": "+98 9830003"}).encode()  # no date, no tracking number
     h = {"X-Hesabdar-Signature": sign_payload(body, "hook-secret"), "Content-Type": "application/json"}
     url = "/api/plugins/bank_sync/webhook/bank-sms"
     r1 = anon.post(url, content=body, headers=h).json()
@@ -527,3 +529,30 @@ def test_reject_is_recorded_and_sms_webhook_and_secret_with_spaces_work(client, 
         assert ok.status_code == 200 and ok.json() == {"handled": 1}
     finally:
         client.put("/api/plugins/messaging_receipts", json={"config": {**cfg, "app_secret": SECRET}})
+
+
+def test_only_the_banks_own_sms_is_bank_money(client, monkeypatch):
+    """A customer's own «واریز» text (forwarded too, or replayed) must never become a bank transaction."""
+    from app.plugins.builtin.bank_sync import plugin as bp
+
+    anon = TestClient(app)
+    url = "/api/plugins/bank_sync/webhook/bank-sms"
+    cfg = next(p for p in client.get("/api/plugins").json() if p["name"] == "bank_sync")["config"]
+
+    def post(sender):
+        body = json.dumps({"text": "واریز: +3,330,010 ریال پیگیری: 51019901", "sender": sender}).encode()
+        return anon.post(url, content=body, headers={"X-Hesabdar-Signature": sign_payload(body, "hook-secret"),
+                                                     "Content-Type": "application/json"})
+    # no bank sender set yet: everything is refused and the owner is told once how to fix it
+    client.put("/api/plugins/bank_sync", json={"config": {**cfg, "bank_senders": ""}})
+    monkeypatch.setattr(bp, "_no_senders_alert", [None])
+    alerts = len(client.get("/api/alerts").json())
+    assert post("BMI").status_code == 403 and post("BMI").status_code == 403
+    assert len(client.get("/api/alerts").json()) == alerts + 1
+    client.put("/api/plugins/bank_sync", json={"config": {**cfg, "bank_senders": "BMI, +98 9830003"}})
+    before = _count(BankTransaction, BankTransaction.amount == 3_330_010)
+    r = post("09159770002")  # a customer's mobile
+    assert r.status_code == 200 and r.json().get("ignored")
+    assert _count(BankTransaction, BankTransaction.amount == 3_330_010) == before
+    assert post("bmi").json()["created"] is True  # the bank itself (name in any case)
+    assert _count(BankTransaction, BankTransaction.amount == 3_330_010) == before + 1

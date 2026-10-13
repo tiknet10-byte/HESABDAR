@@ -177,6 +177,37 @@ def parse_statement_csv(content: str) -> list[dict]:
     return rows
 
 
+def _sender_key(sender: str) -> str:
+    """A sender as the phone shows it, compared loosely: «+98 9123…», «0912…» and «BMI» / «bmi» are the same."""
+    s = to_en_digits(str(sender or "")).strip().lower().replace(" ", "").replace("-", "")
+    digits = s.lstrip("+")
+    if digits.isdigit():
+        for p in ("0098", "98", "0"):
+            if digits.startswith(p) and len(digits) - len(p) >= 7:
+                return digits[len(p):]
+        return digits
+    return s
+
+
+_no_senders_alert: list = [None]
+
+
+def _warn_no_senders() -> None:
+    from ....models import local_now
+    from ....services.audit import raise_alert
+
+    now = local_now()
+    if _no_senders_alert[0] is not None and now - _no_senders_alert[0] < timedelta(days=1):
+        return
+    _no_senders_alert[0] = now
+    with SessionLocal() as db:
+        raise_alert(db, "bank_sms_no_senders", "پیامک‌های بانک ثبت نمی‌شوند",
+                    "برای امنیت، فقط پیامکی که از شماره/نام خود بانک آمده واریز حساب می‌شود (نه پیامکی که هر کسی بفرستد). در «تنظیمات ← "
+                    "افزونه‌ها ← همگام‌سازی بانک» فرستندهٔ پیامک‌های بانک را وارد کنید (همان شماره یا نامی که بالای پیامک بانک دیده می‌شود).",
+                    level="danger")
+        db.commit()
+
+
 class SmsIn(BaseModel):
     text: str
     sender: str | None = None
@@ -190,11 +221,14 @@ class Plugin(BasePlugin):
     version = "1.0.0"
     category = "integration"
     config_schema = {"type": "object", "properties": {
-        "sync_interval_minutes": {"type": "integer", "title": "فاصله همگام‌سازی (دقیقه)", "default": 15}}}
-    default_config = {"sync_interval_minutes": 15}
+        "sync_interval_minutes": {"type": "integer", "title": "فاصله همگام‌سازی (دقیقه)", "default": 15},
+        "bank_senders": {"type": "string", "title": "فرستندهٔ پیامک‌های بانک (شماره یا نام، با ویرگول جدا)",
+                         "description": "فقط پیامک این فرستنده‌ها واریز بانک حساب می‌شود؛ مثلاً: 9830003, BMI, +98200004567"}}}
+    default_config = {"sync_interval_minutes": 15, "bank_senders": ""}
 
     def setup(self) -> None:
         r = APIRouter()
+        plugin = self
 
         @r.get("/providers")
         def providers(_=Depends(require("finance"))):
@@ -222,6 +256,12 @@ class Plugin(BasePlugin):
             if not verify_signature(raw, request.headers.get("X-Hesabdar-Signature")):
                 raise HTTPException(401, "invalid signature")
             body = SmsIn.model_validate_json(raw)
+            allowed = {_sender_key(x) for x in str(plugin.ctx.config.get("bank_senders") or "").replace("،", ",").split(",") if x.strip()}
+            if not allowed:  # anyone's SMS (a customer's fake «واریز» text) must never become bank money
+                _warn_no_senders()
+                raise HTTPException(403, "فرستندهٔ پیامک‌های بانک در تنظیمات افزونهٔ بانک وارد نشده است")
+            if _sender_key(body.sender or "") not in allowed:
+                return {"ok": False, "ignored": "not a bank sender"}  # e.g. a customer's message forwarded too
             return ingest_bank_sms(db, body.text, body.sender, body.payment_account_id)
 
         @r.post("/import-statement")

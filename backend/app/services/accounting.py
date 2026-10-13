@@ -365,6 +365,72 @@ def is_credit(dep: Deposit) -> bool:
     return dep.kind == "credit"
 
 
+def separate_shared_cash_accounts(db: Session) -> int:
+    """Before 1.20 two payment accounts with the same name (e.g. two POS called «کارتخوان ملت») shared one 11xx
+    ledger account, so each showed the other's money too. Once, at start: every such account gets its own ledger
+    account, and the lines of its own documents (payments, deposits and their refunds, expenses, supplier payments,
+    opening balance, counts, capital and gold moves) move with it. Returns how many accounts were separated."""
+    from collections import defaultdict
+
+    from ..models import CapitalMove, HoldingMove, SupplierPayment
+
+    by_ledger: dict[int, list[PaymentAccount]] = defaultdict(list)
+    for pa in db.scalars(select(PaymentAccount).where(PaymentAccount.ledger_account_id.is_not(None)).order_by(PaymentAccount.id)):
+        by_ledger[pa.ledger_account_id].append(pa)
+    moved_n, unknown = 0, 0
+    for acc_id, pas in by_ledger.items():
+        if len(pas) < 2:
+            continue
+        new_acc = {}
+        for pa in pas[1:]:
+            acc = LedgerAccount(code=_next_child_code(db, CASH_PARENT), name=f"{pa.name} (#{pa.id})", type="asset",
+                                parent_code=CASH_PARENT)
+            db.add(acc)
+            db.flush()
+            pa.ledger_account_id = acc.id
+            new_acc[pa.id] = acc.id
+            moved_n += 1
+
+        def owner(e: JournalEntry, ln: JournalLine) -> int | None:  # the payment account a cash line belongs to
+            rt = (e.ref_type or "").removesuffix("_void")
+            obj = None
+            if rt == "payment":
+                obj = db.get(Payment, e.ref_id)
+            elif rt == "expense":
+                obj = db.get(Expense, e.ref_id)
+            elif rt == "supplier_payment":
+                obj = db.get(SupplierPayment, e.ref_id)
+            elif rt == "capital":
+                obj = db.get(CapitalMove, e.ref_id)
+            elif rt == "holding":
+                obj = db.get(HoldingMove, e.ref_id)
+            elif rt in ("opening_balance", "balance_adjust"):
+                return e.ref_id
+            elif rt == "deposit":
+                dep = db.get(Deposit, e.ref_id)
+                if dep is not None:
+                    return dep.payment_account_id if ln.debit else (dep.refund_account_id or dep.payment_account_id)
+            return getattr(obj, "payment_account_id", None)
+
+        for ln, e in db.execute(select(JournalLine, JournalEntry).join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+                                .where(JournalLine.account_id == acc_id)).all():
+            who = owner(e, ln)
+            if who in new_acc:
+                ln.account_id = new_acc[who]
+            elif who is None:
+                unknown += 1  # e.g. a staff payout: stays on the first account
+    if moved_n:
+        from .audit import raise_alert
+
+        audit(db, "accounts.separated", "payment_account", "", {"accounts": moved_n, "unassigned_lines": unknown})
+        raise_alert(db, "accounts_separated", "حساب‌های هم‌نام از هم جدا شدند",
+                    f"{moved_n} حساب (کارتخوان/کارت/بانک/صندوق) با نام تکراری تا حالا یک حساب دفتری مشترک داشتند و موجودی هم را نشان "
+                    "می‌دادند. حالا هر کدام حساب جدای خودش را دارد. لطفاً موجودی این حساب‌ها را یک بار در «دفاتر حسابداری» ببینید"
+                    + (" (چند ردیف مثل پرداخت به پرسنل روی حساب اول ماند)." if unknown else "."), level="warning")
+    db.flush()
+    return moved_n
+
+
 def classify_credits(db: Session) -> int:
     """Open money kept for customers that is not a service deposit becomes a credit (once, at start): balances
     brought over from Tizpardaz (product software), money of a voided invoice kept for the customer, website refunds."""
@@ -374,6 +440,19 @@ def classify_credits(db: Session) -> int:
         Deposit.source.in_(("void_credit", "woocommerce")),
         (Deposit.source == "import") & Deposit.notes.like("%تیزپرداز%"))).values(kind="credit")
         .execution_options(synchronize_session=False)).rowcount or 0
+    # the rest of a split credit ("باقیمانده بیعانه #id") is a credit too, however many times it was split again
+    import re
+
+    while True:
+        kinds = dict(db.execute(select(Deposit.id, Deposit.kind)).all())
+        rest = [(d, int(m.group(1))) for d, notes in db.execute(select(Deposit.id, Deposit.notes).where(
+                Deposit.kind.is_(None), Deposit.notes.like("باقیمانده بیعانه #%"))).all()
+                if (m := re.match(r"باقیمانده بیعانه #(\d+)", notes or ""))]
+        ids = [d for d, parent in rest if kinds.get(parent) == "credit"]
+        if not ids:
+            break
+        n += db.execute(update(Deposit).where(Deposit.id.in_(ids)).values(kind="credit")
+                        .execution_options(synchronize_session=False)).rowcount or 0
     db.flush()
     return n
 

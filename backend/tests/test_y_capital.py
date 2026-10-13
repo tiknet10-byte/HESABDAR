@@ -411,3 +411,35 @@ def test_product_report_keeps_a_sale_in_its_month_and_the_return_on_its_day(clie
     assert mine(d, d) == (1_000_000, 400_000, 1)  # the sale stays on its own day
     assert mine(today, today) == (-1_000_000, -400_000, -1)  # the return is today
     assert mine(d, today) == (0, 0, 0)
+
+
+def test_same_name_accounts_that_shared_a_ledger_account_are_separated(client, services):
+    """As 1.19 left it: two POS with the same name on one 11xx account. At start each gets its own, with its money."""
+    from app.core.db import SessionLocal
+    from app.models import PaymentAccount
+    from app.services import accounting
+
+    svc = services["کاشت ناخن"]
+    a = client.post("/api/accounts", json={"kind": "pos", "name": "کارتخوان هم‌نام قدیمی تست"}).json()
+    b = client.post("/api/accounts", json={"kind": "pos", "name": "کارتخوان هم‌نام قدیمی تست ۲"}).json()
+    with SessionLocal() as db:  # b points at a's ledger account, as the old version did for two equal names
+        db.get(PaymentAccount, b["id"]).ledger_account_id = db.get(PaymentAccount, a["id"]).ledger_account_id
+        db.commit()
+    for acc, price in ((a, 3_000_000), (b, 2_000_000)):
+        client.post("/api/invoices", json={"customer_name": "هم‌نام تست", "customer_mobile": "09159990012",
+                                           "items": [{"service_id": svc["id"], "unit_price": price}],
+                                           "payments": [{"payment_account_id": acc["id"], "amount": price}]})
+    client.post("/api/expenses", json={"category": "سایر", "amount": 500_000, "payment_account_id": b["id"]})
+    dep = client.post("/api/deposits", json={"customer_name": "هم‌نام تست", "customer_mobile": "09159990012", "amount": 400_000,
+                                             "payment_account_id": b["id"]}).json()
+    client.post(f"/api/deposits/{dep['id']}/close", json={"action": "refund", "refund_account_id": a["id"]})
+    bal = {x["id"]: x["balance"] for x in client.get("/api/accounts/balances").json()}
+    assert bal[a["id"]] == bal[b["id"]]  # one shared account: both show the same mixed money
+    with SessionLocal() as db:
+        assert accounting.separate_shared_cash_accounts(db) == 1
+        db.commit()
+        assert accounting.separate_shared_cash_accounts(db) == 0  # once
+    bal = {x["id"]: x["balance"] for x in client.get("/api/accounts/balances").json()}
+    assert bal[a["id"]] == 3_000_000 - 400_000  # its sale, and the deposit refund paid from it
+    assert bal[b["id"]] == 2_000_000 - 500_000 + 400_000  # its sale, its expense, the deposit received on it
+    tb(client)

@@ -528,8 +528,9 @@ def product_profit(db: Session, start: date | None = None, end: date | None = No
     undo = _undo()
 
     def base(when):  # noqa: ANN001, ANN202
+        # products, and a website order's shipping / tax / fee rows: part of the product sale (booked on 4200)
         q = (select(InvoiceItem, when, Invoice.channel).select_from(InvoiceItem).join(Invoice, Invoice.id == InvoiceItem.invoice_id)
-             .where(InvoiceItem.product_id.is_not(None)))
+             .where(or_(InvoiceItem.product_id.is_not(None), InvoiceItem.kind == "extra")))
         if channel in ("online", "in_person"):
             q = q.where(Invoice.channel == "online") if channel == "online" else q.where(or_(Invoice.channel.is_(None), Invoice.channel == "in_person"))
         return q
@@ -553,9 +554,10 @@ def product_profit(db: Session, start: date | None = None, end: date | None = No
         rev = k * (it.net_amount if it.net_amount is not None else it.amount)
         c = sold_cost[it.id] if k > 0 else -back_cost[it.id]
         p = products.get(it.product_id)
-        r = per.setdefault(it.product_id, {"id": it.product_id, "code": p.code if p else None, "sku": p.sku if p else None,
-                                           "name": p.name if p else it.description, "qty": 0, "revenue": 0, "cogs": 0, "profit": 0,
-                                           "online": 0, "estimated": False})
+        r = per.setdefault(it.product_id or "extra", {"id": it.product_id, "code": p.code if p else None, "sku": p.sku if p else None,
+                                                      "name": p.name if p else "هزینه‌های سفارش سایت (ارسال، مالیات، کارمزد)"
+                                                      if it.kind == "extra" else it.description,
+                                                      "qty": 0, "revenue": 0, "cogs": 0, "profit": 0, "online": 0, "estimated": False})
         for bucket in (r, tot, months.setdefault(_jm(at), {"key": _jm(at), "qty": 0, "revenue": 0, "cogs": 0, "profit": 0}),
                        chans.setdefault(ch or "in_person", {"channel": ch or "in_person", "qty": 0, "revenue": 0, "cogs": 0, "profit": 0})):
             bucket["qty"] += k * it.quantity

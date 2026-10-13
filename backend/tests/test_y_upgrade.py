@@ -26,6 +26,17 @@ with TestClient(app) as c:
     c.post("/api/deposits", json={"customer_name": "مشتری ارتقا", "customer_mobile": "09159991111", "amount": 50000,
                                   "payment_account_id": cash, "notes": "ماندهٔ بستانکار تیزپرداز"})
 from app.core.db import SessionLocal
+from app.models import Deposit
+with SessionLocal() as db:  # 1.19 split a partly used credit: the rest has only "باقیمانده بیعانه #id" in its notes
+    d = db.query(Deposit).first()
+    rest = Deposit(customer_id=d.customer_id, amount=20000, payment_account_id=d.payment_account_id, received_at=d.received_at,
+                   source="import", notes=f"باقیمانده بیعانه #{d.id}")
+    db.add(rest)
+    db.flush()
+    db.add(Deposit(customer_id=d.customer_id, amount=5000, payment_account_id=d.payment_account_id, received_at=d.received_at,
+                   source="import", notes=f"باقیمانده بیعانه #{rest.id}"))
+    db.commit()
+from app.core.db import SessionLocal
 from app.models import Deposit, Product
 from app.services import settings_store
 with SessionLocal() as db:  # as an older version left it
@@ -69,6 +80,7 @@ def test_start_on_an_older_database(tmp_path):
         ledger_1300 = con.execute("SELECT COALESCE(SUM(l.debit - l.credit), 0) FROM journal_lines l JOIN ledger_accounts a "
                                   "ON a.id = l.account_id WHERE a.code = '1300'").fetchone()[0]
         assert con.execute("SELECT SUM(stock_value) FROM products").fetchone()[0] == ledger_1300 == 200_000
-        assert con.execute("SELECT kind FROM deposits").fetchone()[0] == "credit"  # a Tizpardaz balance is a credit
+        # a Tizpardaz balance is a credit, and so is what is left of it after it was split (twice)
+        assert [k for (k,) in con.execute("SELECT kind FROM deposits ORDER BY id")] == ["credit", "credit", "credit"]
     finally:
         con.close()

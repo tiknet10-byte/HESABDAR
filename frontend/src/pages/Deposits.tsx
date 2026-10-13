@@ -429,7 +429,7 @@ export default function Deposits() {
         </div>
         {data && (
           <div className="flex flex-wrap items-center justify-between gap-2 border-t p-3 text-sm" style={{ borderColor: "var(--border)" }}>
-            <span className="muted">{num(data.total)} بیعانه · جمع <b className="num">{money(data.amount)}</b></span>
+            <span className="muted">{num(data.total)} بیعانه{data.amount != null && <> · جمع <b className="num">{money(data.amount)}</b></>}</span>
             {pages > 1 && (
               <div className="flex items-center gap-2">
                 <button className="btn btn-sm" disabled={page === 0} onClick={() => setPage(page - 1)}>قبلی</button>

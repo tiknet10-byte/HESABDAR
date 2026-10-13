@@ -514,7 +514,7 @@ function Profit() {
             <table className="table [&_td]:px-2.5 [&_th]:px-2.5">
               <thead><tr><th>کد</th><th>محصول</th><th>تعداد</th><th>فروش</th><th>بهای تمام‌شده</th><th>سود ناخالص</th><th>حاشیه</th></tr></thead>
               <tbody>{rows.map((r: any) => (
-                <tr key={r.id ?? 0}>
+                <tr key={r.id ?? r.name}>
                   <td className="num text-sky-600">{r.code}</td>
                   <td><span className="font-semibold">{r.name}</span>{r.online > 0 && <span className="muted text-xs"> · {num(r.online)} آنلاین</span>}{r.history ? <span className="muted text-xs"> · {num(r.history)} از سوابق</span> : null}{r.estimated && <span className="badge mr-1 bg-amber-500/15 text-amber-700">تخمینی</span>}</td>
                   <td className="num">{num(r.qty)}</td><td className="num">{money(r.revenue, false)}</td><td className="num">{r.unknown_cost ? <span className="text-amber-600">نامعلوم</span> : money(r.cogs, false)}</td>
