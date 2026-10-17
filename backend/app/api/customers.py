@@ -4,7 +4,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import Integer, String, case, cast, func, or_, select
+from sqlalchemy import Integer, String, case, cast, func, or_, select, union
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
@@ -63,10 +63,18 @@ def _activity():  # noqa: ANN202
             .subquery())
     hist = (select(hist.c.cid.label("cid"), func.sum(hist.c.amt).label("amt"), func.sum(hist.c.n).label("n"), func.max(hist.c.last).label("last"))
             .group_by(hist.c.cid).subquery())
+    # visits: the days with anything bought (an invoice here, a visit of the previous software, a product brought over),
+    # each day once - as the customer file counts them
+    days = union(select(Invoice.customer_id.label("cid"), func.date(Invoice.issued_at).label("d")).where(Invoice.status != "void"),
+                 select(Appointment.customer_id, func.date(Appointment.start_at)).where(Appointment.status == "done",
+                                                                                         Appointment.invoice_id.is_(None)),
+                 select(TradeHistory.customer_id, func.date(TradeHistory.at)).where(TradeHistory.kind.in_(("sale", "sale_return")),
+                                                                                     TradeHistory.customer_id.is_not(None))).subquery()
+    vis = select(days.c.cid.label("cid"), func.count().label("n")).group_by(days.c.cid).subquery()
     spent = func.coalesce(inv.c.amt, 0) + func.coalesce(hist.c.amt, 0)
-    visits = func.coalesce(inv.c.n, 0) + func.coalesce(hist.c.n, 0)
+    visits = func.coalesce(vis.c.n, 0)
     last = func.max(func.coalesce(inv.c.last, hist.c.last), func.coalesce(hist.c.last, inv.c.last))
-    return inv, hist, held, spent, visits, last
+    return inv, hist, held, spent, visits, last, vis
 
 
 SORTS = {"recent", "code", "name", "spent", "last_visit", "visits", "debt"}
@@ -82,7 +90,7 @@ def _debt(db: Session):  # noqa: ANN202
 @router.get("")
 def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "code", filter: str = "",  # noqa: A002
                    db: Session = Depends(get_db), _=Depends(require("read"))):
-    inv, hist, held, spent, visits, last = _activity()
+    inv, hist, held, spent, visits, last, vis = _activity()
     debt = _debt(db)
     # people we buy from: linked to a supplier, or the seller of a purchase invoice brought over
     seller = or_(Customer.id.in_(select(Supplier.customer_id).where(Supplier.customer_id.is_not(None))),
@@ -92,7 +100,7 @@ def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "
                    func.coalesce(held.c.amt, 0).label("held"), visits.label("visits"), last.label("last"), func.coalesce(debt.c.amt, 0),
                    seller.label("seller"))
             .outerjoin(inv, inv.c.cid == Customer.id).outerjoin(hist, hist.c.cid == Customer.id).outerjoin(held, held.c.cid == Customer.id)
-            .outerjoin(debt, debt.c.cid == Customer.id))
+            .outerjoin(debt, debt.c.cid == Customer.id).outerjoin(vis, vis.c.cid == Customer.id))
     if q:
         like = f"%{q}%"
         mob = normalize_mobile(q)

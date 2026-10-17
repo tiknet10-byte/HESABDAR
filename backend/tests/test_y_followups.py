@@ -261,3 +261,66 @@ def test_orders_of_another_website_are_never_reported_deleted(client, shop):
     assert not out.get("gone", {}).get("deleted")
     assert not [x for x in shop.calls if x[1].startswith("/orders/")]
     assert all(_orders(client)[x["id"]]["status"] != "deleted" for x in (a, b))
+
+
+def test_a_visit_day_is_counted_once_in_the_list_as_in_the_customer_file(client, accounts):
+    """An invoice, a visit set done by hand in an older version and a product sale brought over, all on one day: one
+    visit in the customers list, as in the customer file; another day makes two."""
+    from app.models import Appointment, TradeHistory
+
+    line = client.post("/api/lines", json={"name": "خط روز مراجعه"}).json()
+    svc = client.post("/api/services", json={"line_id": line["id"], "name": "خدمت روز مراجعه", "base_price": 3_000_000}).json()
+    day = datetime.combine(TODAY - timedelta(days=6), time(10))
+    inv = client.post("/api/invoices", json={"customer_name": "مشتری روز مراجعه", "customer_mobile": "09151200112",
+                                             "issued_at": day.replace(hour=11).isoformat(),
+                                             "items": [{"service_id": svc["id"], "unit_price": 3_000_000}],
+                                             "payments": [{"payment_account_id": accounts["صندوق نقدی"], "amount": 3_000_000}]}).json()
+    cid = inv["customer_id"]
+    with _db() as db:
+        db.add_all([Appointment(customer_id=cid, service_id=svc["id"], start_at=day, status="done", quoted_price=3_000_000, notes=""),
+                    TradeHistory(source="tizpardaz", kind="sale", at=day.replace(hour=17), customer_id=cid, description="کرم",
+                                 qty=1, unit_price=500_000, amount=500_000, fp=f"y-visit-{cid}")])
+        db.commit()
+
+    def both():  # noqa: ANN202
+        row = next(x for x in client.get("/api/customers", params={"q": "09151200112"}).json()["items"] if x["id"] == cid)
+        file = client.get(f"/api/customers/{cid}").json()
+        return row["visits"], len({h["date"][:10] for h in file["history"]}), row["total_spent"]
+
+    assert both() == (1, 1, 3_500_000)  # the hand-done visit carries no money
+    with _db() as db:
+        db.add(TradeHistory(source="tizpardaz", kind="sale", at=day - timedelta(days=2), customer_id=cid, description="کرم",
+                            qty=1, unit_price=500_000, amount=500_000, fp=f"y-visit2-{cid}"))
+        db.commit()
+    assert both() == (2, 2, 4_000_000)
+
+
+def test_an_order_read_before_this_version_is_still_found_in_the_trash(client, shop):
+    """An order booked before the website was recorded (1.20.1 and older) is looked up too: when the website shows the
+    same order (number and date placed) in its trash, it is undone; an order of another website with the same id is
+    never touched, and never reported deleted."""
+    from app.models import WooOrder
+
+    sp = shop.add_product("کرم نسخهٔ قبل", "Y-TRASH-6", 100_000, stock=10)
+    _product(client, "کرم نسخهٔ قبل", "Y-TRASH-6", qty=10)
+    _connect(client, shop, url="y-trash-6.example.com")
+    same = shop.add_order([(sp, 1)], phone="09151200113", first="الف", last="نسخهٔ قبل")
+    other = shop.add_order([(sp, 1)], phone="09151200114", first="ب", last="نسخهٔ قبل")
+    _sync(client)
+    with _db() as db:  # as an upgraded database holds them: no website; `other` looks like another website's order
+        db.query(WooOrder).filter(WooOrder.order_id.in_([same["id"], other["id"]])).update({"site": None}, synchronize_session=False)
+        db.query(WooOrder).filter(WooOrder.order_id == other["id"]).update({"number": "9999"}, synchronize_session=False)
+        db.commit()
+    shop.trash(same["id"])
+    shop.trash(other["id"])
+    _gone_check_due()
+    out = _sync(client, catalog=False)
+    now = _orders(client)
+    assert out["gone"].get("cancelled") == 1 and now[same["id"]]["state"] == "cancelled"
+    assert now[other["id"]]["state"] == "booked" and now[other["id"]]["status"] != "deleted"
+    with _db() as db:
+        assert db.query(WooOrder).filter(WooOrder.order_id == same["id"]).one().site == "y-trash-6.example.com"
+        assert db.query(WooOrder).filter(WooOrder.order_id == other["id"]).one().site is None
+    shop.orders.pop(other["id"])  # gone for good: still not reported (it may be of another website)
+    _gone_check_due()
+    assert not _sync(client, catalog=False)["gone"].get("deleted")

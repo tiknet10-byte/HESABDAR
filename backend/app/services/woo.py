@@ -26,7 +26,7 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.security import decrypt_secret, encrypt_secret
@@ -913,12 +913,26 @@ def check_gone(db: Session, c: Client, cfg: dict) -> dict:
     leaves the trash out of it), so they are looked up by id now and then: the booked orders of the last weeks.
     One in the trash is undone like a cancelled one; one deleted for good is only reported (what happened to its
     money can't be seen any more): its invoice stays until a person voids it."""
-    since = local_now() - timedelta(days=GONE_DAYS)
-    # only this website's orders (one read before this version, or from a website connected before, is never asked for)
+    since, key = local_now() - timedelta(days=GONE_DAYS), site_key(cfg["url"])
+    # this website's orders; one read before the website was recorded (before 1.20.2) is looked up too, but is taken for
+    # this website's only when the website shows the same order (number and date placed) - it may be of a website
+    # connected before - and it is never reported deleted
     q = (select(WooOrder).join(Invoice, Invoice.id == WooOrder.invoice_id)
          .where(WooOrder.state == "booked", Invoice.status != "void", WooOrder.created >= since, WooOrder.status != "deleted",
-                WooOrder.site == site_key(cfg["url"])))
+                or_(WooOrder.site == key, WooOrder.site.is_(None))))
     rows = {wo.order_id: wo for wo in db.scalars(q)}
+    legacy = {oid for oid, wo in rows.items() if wo.site is None}
+
+    def mine(oid: int, o: dict) -> bool:
+        wo = rows[oid]
+        if oid not in legacy:
+            return True
+        if str(o.get("number") or o.get("id"))[:32] == (wo.number or "") and _when(o, "date_created") == wo.created:
+            wo.site = key  # the same order: it is this website's
+            legacy.discard(oid)
+            return True
+        return False
+
     ids, out = sorted(rows), defaultdict(int)
     trashed: dict[int, dict] = {}
     listed: set[int] = set()
@@ -928,12 +942,17 @@ def check_gone(db: Session, c: Client, cfg: dict) -> dict:
             chunk = ids[i:i + PER_PAGE]
             ask = ",".join(map(str, chunk))
             for o in c.all("/orders", status="trash", include=ask):
-                if int(o["id"]) in rows and o.get("status") == "trash":
+                if int(o["id"]) in rows and o.get("status") == "trash" and mine(int(o["id"]), o):
                     trashed[int(o["id"])] = o
-            found = {int(o["id"]) for o in c.all("/orders", include=ask, _fields="id")}  # only the ids: a light answer
+            # a light answer: only what tells the orders apart
+            shown = c.all("/orders", include=ask, _fields="id,number,date_created,date_created_gmt")
+            found = {int(o["id"]) for o in shown}
             exact = exact and found <= set(chunk)
             listed |= found
-        missing = [oid for oid in ids if oid not in trashed and oid not in listed] if exact else []
+            for o in shown:
+                if int(o["id"]) in legacy:
+                    mine(int(o["id"]), o)
+        missing = [oid for oid in ids if oid not in trashed and oid not in listed and oid not in legacy] if exact else []
         for oid in missing[:GONE_CONFIRM]:
             try:
                 o = c.get(f"/orders/{oid}")
@@ -960,7 +979,7 @@ def check_gone(db: Session, c: Client, cfg: dict) -> dict:
         out["error"] = 1
         st = state(db)
         if st.get("gone_error") != str(exc)[:200]:
-            note(db, f"بررسی سفارش‌های سطل زبالهٔ سایت این بار انجام نشد (یک ساعت بعد دوباره): {exc}", "warn")
+            note(db, f"بررسی سفارش‌های سطل زبالهٔ سایت این بار انجام نشد (در هماهنگی‌های بعدی دوباره امتحان می‌شود): {exc}", "warn")
             st["gone_error"] = str(exc)[:200]
             _save_state(db, st)
             db.commit()
@@ -968,6 +987,7 @@ def check_gone(db: Session, c: Client, cfg: dict) -> dict:
         st = state(db)
         if st.pop("gone_error", None) is not None:
             _save_state(db, st)
+    db.commit()  # the websites found for orders read before 1.20.2
     for oid, o in trashed.items():
         try:
             with db.begin_nested():
@@ -1018,12 +1038,16 @@ def run_sync(db: Session, force_catalog: bool = False) -> dict:
                 if gone_at is None or local_now() - gone_at > GONE_EVERY:
                     try:
                         out["gone"] = check_gone(db, c, cfg)
-                    except Exception:  # noqa: BLE001 - the trash check never stops the stock being sent to the website
+                    except Exception as exc:  # noqa: BLE001 - the trash check never stops the stock being sent to the website
                         db.rollback()
                         log.exception("woo: trash check")
                         out["gone"] = {"error": 1}
                         st = state(db)
                         st["gone_at"] = local_now().isoformat(timespec="seconds")  # tried again in an hour, not every run
+                        why = f"{type(exc).__name__}: {exc}"[:200]
+                        if st.get("gone_error") != why:  # written in the website's log once
+                            note(db, f"بررسی سفارش‌های سطل زبالهٔ سایت انجام نشد ({why})؛ در هماهنگی‌های بعدی دوباره امتحان می‌شود", "warn")
+                            st["gone_error"] = why
                         _save_state(db, st)
                         db.commit()
                 out["stock"] = push_stock(db, c, cfg)
