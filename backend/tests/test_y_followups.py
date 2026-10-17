@@ -80,15 +80,18 @@ def test_appointment_done_only_by_its_invoice(client):
     assert client.put(f"/api/appointments/{a['id']}", json={"status": "done"}).status_code == 400
     assert client.get(f"/api/appointments/{a['id']}").json()["status"] == "booked"
     at = datetime.combine(TODAY - timedelta(days=4), time(10))
-    with _db() as db:  # one set 'done' by hand before this version, one brought over from the previous software
+    with _db() as db:  # one set 'done' by hand before this version (the newer visit), one brought over from the previous software
         db.add_all([Appointment(customer_id=c["id"], service_id=svc["id"], start_at=at, status="done", quoted_price=7_000_000, notes=""),
-                    Appointment(customer_id=c["id"], service_id=svc["id"], start_at=at, status="done", quoted_price=2_000_000,
-                                notes=f"{IMPORT_NOTE} - فیش 7")])
+                    Appointment(customer_id=c["id"], service_id=svc["id"], start_at=at - timedelta(days=3), status="done",
+                                quoted_price=2_000_000, notes=f"{IMPORT_NOTE} - فیش 7")])
         db.commit()
     row = next(x for x in client.get("/api/customers", params={"q": "09151200102"}).json()["items"] if x["id"] == c["id"])
-    assert row["spent_old"] == 2_000_000
+    assert row["spent_old"] == 2_000_000 == row["total_spent"]  # money: only the previous software's receipt
     file = client.get(f"/api/customers/{c['id']}").json()
     assert sorted(h["amount"] or 0 for h in file["history"]) == [0, 2_000_000]
+    # visits: both, in the list as in the customer file (the hand-done one is a visit without money)
+    assert row["visits"] == len({h["date"][:10] for h in file["history"]}) == 2
+    assert row["last_visit"][:10] == file["history"][0]["date"][:10] == at.date().isoformat()
     use = next(x for x in client.get("/api/services/usage").json() if x.get("service_id", x.get("id")) == svc["id"])
     assert (use["old"], use["old_amount"]) == (1, 2_000_000)
 
@@ -113,7 +116,7 @@ def test_an_order_put_in_the_websites_trash_is_undone(client, shop):
     undone like a cancelled one (its money goes back once); one deleted for good is reported, its invoice kept."""
     sp = shop.add_product("کرم سطل زباله", "Y-TRASH-1", 200_000, stock=10)
     p = _product(client, "کرم سطل زباله", "Y-TRASH-1", qty=10)
-    gw = _connect(client, shop)
+    gw = _connect(client, shop, url="y-trash-1.example.com")
     keep = shop.add_order([(sp, 1)], phone="09151200103", first="سفارش", last="ماندنی")
     gone = shop.add_order([(sp, 2)], phone="09151200104", first="سفارش", last="زباله")
     wiped = shop.add_order([(sp, 3)], phone="09151200105", first="سفارش", last="پاک‌شده")
@@ -151,7 +154,7 @@ def test_a_website_that_ignores_the_id_list_is_not_asked_order_by_order(client, 
     guessed from what is missing: no order is asked for one by one, none is reported deleted."""
     sp = shop.add_product("کرم بدون فیلتر", "Y-TRASH-2", 100_000, stock=10)
     _product(client, "کرم بدون فیلتر", "Y-TRASH-2", qty=10)
-    _connect(client, shop)
+    _connect(client, shop, url="y-trash-2.example.com")
     a = shop.add_order([(sp, 1)], phone="09151200106", first="الف", last="بی‌فیلتر")
     shop.add_order([(sp, 1)], status="pending", paid=False, phone="09151200107", first="ب", last="بی‌فیلتر")  # not booked here
     _sync(client)
@@ -185,3 +188,76 @@ def test_refund_rows_that_name_no_order_row_are_shared_over_the_products_rows():
     assert sum(x["quantity"] for x in pl["lines"]) == 1  # 3 bought, 2 given back
     assert sum(x["net"] for x in pl["lines"]) + sum(x["unit_price"] for x in pl["extras"]) - pl["discount"] == pl["target"] == 1_000
     assert not pl["extras"] and pl["discount"] == 0
+
+
+def test_the_trash_check_never_holds_back_the_stock_sent_to_the_website(client, shop):
+    """The orders are read, then the trash check fails (the website times out on that one request): the stock change
+    still goes to the website, the run shows no error, the problem is logged once and the check waits an hour."""
+    import httpx
+
+    from app.services import woo
+
+    sp = shop.add_product("کرم تایم‌اوت زباله", "Y-TRASH-3", 100_000, stock=10)
+    p = _product(client, "کرم تایم‌اوت زباله", "Y-TRASH-3")
+    _connect(client, shop, url="y-trash-3.example.com")
+    shop.add_order([(sp, 1)], phone="09151200108", first="الف", last="تایم‌اوت")
+    _sync(client)
+    real, tries = shop.handler, []
+
+    def slow_on_ids(request):  # noqa: ANN001, ANN202
+        if "include" in request.url.params:
+            tries.append(1)
+            raise httpx.ReadTimeout("timed out", request=request)
+        return real(request)
+
+    shop.handler = slow_on_ids
+    woo._transport = shop.transport()
+    client.post("/api/purchases", json={"supplier_name": "پخش زباله", "items": [{"product_id": p["id"], "quantity": 5, "unit_price": 500_000}]})
+    _gone_check_due()
+    out = _sync(client, catalog=False)  # no error for the run
+    assert out["gone"].get("error") == 1 and shop.products[sp]["stock_quantity"] == 14  # 10 - 1 sold on the site + 5 bought here
+    assert len(tries) == 1
+    _sync(client, catalog=False)  # the next run within the hour does not try again
+    assert len(tries) == 1
+    _gone_check_due()
+    _sync(client, catalog=False)  # tried again (an hour later): the same problem is not written again
+    logged = [x for x in client.get("/api/woo/log").json() if "سطل زباله" in x["message"] and "انجام نشد" in x["message"]]
+    assert len(tries) == 2 and len(logged) == 1
+
+
+def test_a_new_key_for_the_same_website_still_finds_an_order_put_in_the_trash(client, shop):
+    """The orders belong to the website's address, not to its key: an order put in the trash before the key was
+    changed is still found (it is no longer in the website's order list to be read again)."""
+    sp = shop.add_product("کرم کلید نو", "Y-TRASH-4", 100_000, stock=10)
+    _product(client, "کرم کلید نو", "Y-TRASH-4", qty=10)
+    _connect(client, shop, url="y-trash-4.example.com")
+    o = shop.add_order([(sp, 1)], phone="09151200109", first="الف", last="کلید نو")
+    _sync(client)
+    shop.trash(o["id"])
+    shop.key, shop.secret = shop.key + "x", shop.secret + "x"  # a new key made on the website
+    _connect(client, shop, url="y-trash-4.example.com")
+    out = _sync(client, catalog=False)
+    assert out["gone"].get("cancelled") == 1 and _orders(client)[o["id"]]["state"] == "cancelled"
+
+
+def test_orders_of_another_website_are_never_reported_deleted(client, shop):
+    """Orders read from a website connected before (another address), or by a version before this check, are not
+    looked for on the website connected now."""
+    from app.models import WooOrder
+
+    sp = shop.add_product("کرم سایت قبلی", "Y-TRASH-5", 100_000, stock=10)
+    _product(client, "کرم سایت قبلی", "Y-TRASH-5", qty=10)
+    _connect(client, shop, url="y-old-site.example.com")
+    a = shop.add_order([(sp, 1)], phone="09151200110", first="الف", last="سایت قبلی")
+    b = shop.add_order([(sp, 1)], phone="09151200111", first="ب", last="سایت قبلی")
+    _sync(client)
+    with _db() as db:  # b was read by 1.20.1 (no website recorded)
+        db.query(WooOrder).filter(WooOrder.order_id == b["id"]).update({"site": None})
+        db.commit()
+    shop.orders.pop(a["id"]), shop.orders.pop(b["id"])  # not on the website connected next
+    _connect(client, shop, url="y-new-site.example.com")
+    shop.calls.clear()
+    out = _sync(client, catalog=False)
+    assert not out.get("gone", {}).get("deleted")
+    assert not [x for x in shop.calls if x[1].startswith("/orders/")]
+    assert all(_orders(client)[x["id"]]["status"] != "deleted" for x in (a, b))

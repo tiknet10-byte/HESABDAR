@@ -595,6 +595,7 @@ class WooOrder(Base):
     refund_ids: Mapped[list] = mapped_column(JSON, default=list)  # refunds of the site whose money-out is booked here
     note: Mapped[str] = mapped_column(String(256), default="")
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+    site: Mapped[str | None] = mapped_column(String(160), nullable=True)  # the website it came from (address without https://www.)
 
 
 class WooOutbox(Base):

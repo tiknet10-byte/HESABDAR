@@ -109,6 +109,11 @@ def public_config(db: Session) -> dict:
     return {**cfg, "secret": MASK if cfg["secret"] else "", "key": _mask_key(cfg["key"]), "has_key": bool(cfg["key"] and cfg["secret"])}
 
 
+def site_key(url: str) -> str:
+    """Which website an order came from: its address without https:// and www. (a new key keeps the same website)."""
+    return re.sub(r"^https?://(www\.)?", "", (url or "").strip().lower()).rstrip("/")[:160]
+
+
 def normalize_url(url: str) -> str:
     url = (url or "").strip().rstrip("/")
     if url and not re.match(r"^https?://", url):
@@ -155,9 +160,7 @@ def save_config(db: Session, body: dict) -> dict:
     if (cfg["url"], cfg["key"]) != (old["url"], old["key"]) or cfg.get("start") != old.get("start"):
         st.pop("cursor", None)  # read the orders again from the start date
         st.pop("catalog_at", None)
-        if (cfg["url"], cfg["key"]) != (old["url"], old["key"]):  # maybe another website: its orders are the ones read from now on
-            st["site_since"] = local_now().isoformat()
-            st.pop("gone_at", None)
+        st.pop("gone_at", None)  # look for orders put in the trash soon after connecting
         _save_state(db, st)
     settings_store.set_value(db, CFG_KEY, {**cfg, "secret": encrypt_secret(cfg["secret"]) if cfg["secret"] else ""})
     db.flush()
@@ -774,6 +777,7 @@ def sync_order(db: Session, c: Client, cfg: dict, o: dict) -> str:
     st = o.get("status") or ""
     num = o.get("number") or str(oid)
     wo.number, wo.status, wo.created, wo.modified = str(num)[:32], st[:24], created, _when(o, "date_modified")
+    wo.site = site_key(cfg["url"])
     wo.total, wo.method, wo.synced_at = rial(o.get("total"), f), (o.get("payment_method_title") or "")[:64], local_now()
     inv = db.get(Invoice, wo.invoice_id) if wo.invoice_id else None
     if wo.state == "local_void" or (inv is not None and inv.status == "void" and wo.state == "booked"):
@@ -910,14 +914,10 @@ def check_gone(db: Session, c: Client, cfg: dict) -> dict:
     One in the trash is undone like a cancelled one; one deleted for good is only reported (what happened to its
     money can't be seen any more): its invoice stays until a person voids it."""
     since = local_now() - timedelta(days=GONE_DAYS)
+    # only this website's orders (one read before this version, or from a website connected before, is never asked for)
     q = (select(WooOrder).join(Invoice, Invoice.id == WooOrder.invoice_id)
-         .where(WooOrder.state == "booked", Invoice.status != "void", WooOrder.created >= since, WooOrder.status != "deleted"))
-    try:
-        site_since = datetime.fromisoformat(state(db).get("site_since") or "")
-    except ValueError:
-        site_since = None
-    if site_since:  # orders of a website connected before (another address or key) are not looked for on this one
-        q = q.where(WooOrder.synced_at >= site_since)
+         .where(WooOrder.state == "booked", Invoice.status != "void", WooOrder.created >= since, WooOrder.status != "deleted",
+                WooOrder.site == site_key(cfg["url"])))
     rows = {wo.order_id: wo for wo in db.scalars(q)}
     ids, out = sorted(rows), defaultdict(int)
     trashed: dict[int, dict] = {}
@@ -930,7 +930,7 @@ def check_gone(db: Session, c: Client, cfg: dict) -> dict:
             for o in c.all("/orders", status="trash", include=ask):
                 if int(o["id"]) in rows and o.get("status") == "trash":
                     trashed[int(o["id"])] = o
-            found = {int(o["id"]) for o in c.all("/orders", include=ask)}
+            found = {int(o["id"]) for o in c.all("/orders", include=ask, _fields="id")}  # only the ids: a light answer
             exact = exact and found <= set(chunk)
             listed |= found
         missing = [oid for oid in ids if oid not in trashed and oid not in listed] if exact else []
@@ -954,10 +954,20 @@ def check_gone(db: Session, c: Client, cfg: dict) -> dict:
             if isinstance(o, dict) and int(o.get("id") or 0) == oid and o.get("status") == "trash":
                 trashed[oid] = o
     except WooError as exc:
-        if exc.status is None:  # the website can't be reached: the run stops as it does for the orders
-            raise
+        # the orders were just read, so the website is there: this check waits an hour and never holds back the stock
+        # sent to the website; a lasting problem is written in the website's log once
         log.info("woo: trash check skipped: %s", exc)
         out["error"] = 1
+        st = state(db)
+        if st.get("gone_error") != str(exc)[:200]:
+            note(db, f"بررسی سفارش‌های سطل زبالهٔ سایت این بار انجام نشد (یک ساعت بعد دوباره): {exc}", "warn")
+            st["gone_error"] = str(exc)[:200]
+            _save_state(db, st)
+            db.commit()
+    else:
+        st = state(db)
+        if st.pop("gone_error", None) is not None:
+            _save_state(db, st)
     for oid, o in trashed.items():
         try:
             with db.begin_nested():
@@ -1006,7 +1016,16 @@ def run_sync(db: Session, force_catalog: bool = False) -> dict:
                 out["orders"] = import_orders(db, c, cfg)
                 gone_at = _dt(state(db).get("gone_at"))
                 if gone_at is None or local_now() - gone_at > GONE_EVERY:
-                    out["gone"] = check_gone(db, c, cfg)
+                    try:
+                        out["gone"] = check_gone(db, c, cfg)
+                    except Exception:  # noqa: BLE001 - the trash check never stops the stock being sent to the website
+                        db.rollback()
+                        log.exception("woo: trash check")
+                        out["gone"] = {"error": 1}
+                        st = state(db)
+                        st["gone_at"] = local_now().isoformat(timespec="seconds")  # tried again in an hour, not every run
+                        _save_state(db, st)
+                        db.commit()
                 out["stock"] = push_stock(db, c, cfg)
             error = ""
         except WooError as exc:

@@ -45,10 +45,11 @@ def _activity():  # noqa: ANN202
     inv = (select(Invoice.customer_id.label("cid"), func.sum(Invoice.total).label("amt"),
                   func.count(func.distinct(func.date(Invoice.issued_at))).label("n"), func.max(Invoice.issued_at).label("last"))
            .where(Invoice.status != "void").group_by(Invoice.customer_id).subquery())
-    # completed appointments without an invoice brought over from the previous software = history (its receipts)
-    hist = (select(Appointment.customer_id.label("cid"), func.sum(Appointment.quoted_price).label("amt"),
+    # completed appointments without an invoice = visits (history); only those brought over from the previous software
+    # carry money (its receipts): one set 'done' by hand in an older version is a visit with no money behind it
+    hist = (select(Appointment.customer_id.label("cid"), func.sum(case((_old_service(), Appointment.quoted_price), else_=0)).label("amt"),
                    func.count(func.distinct(func.date(Appointment.start_at))).label("n"), func.max(Appointment.start_at).label("last"))
-            .where(_old_service()).group_by(Appointment.customer_id).subquery())
+            .where(Appointment.status == "done", Appointment.invoice_id.is_(None)).group_by(Appointment.customer_id).subquery())
     held = (select(Deposit.customer_id.label("cid"), func.sum(Deposit.amount).label("amt"))
             .where(Deposit.status == "held").group_by(Deposit.customer_id).subquery())
     # product purchases brought over from the product accounting software (Tizpardaz); its returns count negative
