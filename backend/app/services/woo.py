@@ -927,7 +927,10 @@ def check_gone(db: Session, c: Client, cfg: dict) -> dict:
         wo = rows[oid]
         if oid not in legacy:
             return True
-        if str(o.get("number") or o.get("id"))[:32] == (wo.number or "") and _when(o, "date_created") == wo.created:
+        # placed at the same second (1.18-1.19 kept the website's own clock, later versions the clinic's), with the same
+        # number (or the order's id as its number: a number plugin installed later changes only how it is shown)
+        placed = wo.created in (_when(o, "date_created"), _dt(o.get("date_created")))
+        if placed and (wo.number or "") in (str(o.get("number") or o.get("id"))[:32], str(oid)):
             wo.site = key  # the same order: it is this website's
             legacy.discard(oid)
             return True

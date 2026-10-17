@@ -104,8 +104,10 @@ and how to use it. Commit messages end with the attribution lines the session as
   a namesake without mobile gets it; else new customer), payment on the chosen account when paid, cancel/refund ->
   void with money back, changed/partly refunded order -> booked again, orders before the start date skipped.
   The order list leaves the trash out: `check_gone` (hourly) looks up the booked orders of the last 45 days by id
-  (`include=`, only orders of this website: `WooOrder.site`): trash -> voided like a cancel; deleted for good
-  (404 `..._invalid_id`) -> alert only, invoice kept. Its errors are logged once and never stop the stock push.
+  (`include=`, only orders of this website: `WooOrder.site`; rows from before 1.20.2 have no site and are taken only
+  when the website shows the same order: placed at the same second and same number or id): trash -> voided like a
+  cancel; deleted for good (404 `..._invalid_id`) -> alert only, invoice kept, never for a row without site. Its errors
+  are logged once and never stop the stock push.
   Stock changes here are queued in `woo_outbox` in the same transaction (purchase +, in-person sale -, voids, opening
   +; stock count = exact) and sent to the product with the same SKU. Tested against `backend/tests/fake_woo.py`
   (in-memory WooCommerce); **not yet tried on the real site**.
@@ -115,7 +117,8 @@ and how to use it. Commit messages end with the attribution lines the session as
   (pushed after the Claude GitHub App was installed). Work on that branch and push to it.
 * 1.20.1: an appointment is «done» only by its invoice (PATCH/PUT refuse it; a done one's status is not changed by
   hand); money of history counts only imported done appointments (`reports._old_service()`; a hand-done one is a visit
-  without money); the sales CSV follows the ledger
+  without money; customers list visits = distinct days across invoices, those visits and products brought over, as
+  the customer file counts them); the sales CSV follows the ledger
   (Persian columns, returns as their own rows on the return day).
 * Next possible work: connect the real website and fix what differs (currency IRT/IRR, security plugins blocking
   `wp-json`, proxy/VPN); proxy setting if needed; anything the owner reports from daily use.

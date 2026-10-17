@@ -324,3 +324,35 @@ def test_an_order_read_before_this_version_is_still_found_in_the_trash(client, s
     shop.orders.pop(other["id"])  # gone for good: still not reported (it may be of another website)
     _gone_check_due()
     assert not _sync(client, catalog=False)["gone"].get("deleted")
+
+
+def test_older_orders_kept_with_the_websites_own_clock_or_renumbered_are_found_in_the_trash(client, shop):
+    """1.18-1.19 kept the date an order was placed in the website's own time zone; a number plugin installed later
+    shows another number for the same order: both are still taken as this website's orders when in its trash."""
+    from app.models import WooOrder
+    from app.services.woo import _dt
+
+    sp = shop.add_product("کرم ساعت سایت", "Y-TRASH-7", 100_000, stock=10)
+    _product(client, "کرم ساعت سایت", "Y-TRASH-7", qty=10)
+    _connect(client, shop, url="y-trash-7.example.com")
+    a = shop.add_order([(sp, 1)], phone="09151200115", first="الف", last="ساعت سایت")
+    b = shop.add_order([(sp, 1)], phone="09151200116", first="ب", last="شماره نو")
+    _sync(client)
+    with _db() as db:
+        db.query(WooOrder).filter(WooOrder.order_id.in_([a["id"], b["id"]])).update({"site": None}, synchronize_session=False)
+        db.query(WooOrder).filter(WooOrder.order_id == a["id"]).update({"created": _dt(a["date_created"])}, synchronize_session=False)
+        db.commit()
+    shop.orders[b["id"]]["number"] = f"WEB-{b['id']}"  # how the website shows it now (its date of change untouched)
+    shop.trash(a["id"])
+    shop.trash(b["id"])
+    _gone_check_due()
+    out = _sync(client, catalog=False)
+    assert out["gone"].get("cancelled") == 2, out
+    assert {_orders(client)[x["id"]]["state"] for x in (a, b)} == {"cancelled"}
+
+
+def test_the_customers_list_total_agrees_with_its_rows_for_every_filter(client):
+    for f in ("", "held", "debt", "seller", "no_mobile", "mobile_issue", "no_history", "unknown"):
+        for q in ("", "مشتری", "0915"):
+            r = client.get("/api/customers", params={"filter": f, "q": q, "limit": 500, "sort": "visits"}).json()
+            assert r["total"] == len(r["items"]) or (r["total"] > 500 and len(r["items"]) == 500), (f, q, r["total"])

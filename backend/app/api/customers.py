@@ -42,26 +42,24 @@ def _c(c: Customer, extra: dict | None = None) -> dict:
 
 def _activity():  # noqa: ANN202
     """Per customer: purchases (invoices here + services brought over from the previous software), visits, last visit."""
-    inv = (select(Invoice.customer_id.label("cid"), func.sum(Invoice.total).label("amt"),
-                  func.count(func.distinct(func.date(Invoice.issued_at))).label("n"), func.max(Invoice.issued_at).label("last"))
+    inv = (select(Invoice.customer_id.label("cid"), func.sum(Invoice.total).label("amt"), func.max(Invoice.issued_at).label("last"))
            .where(Invoice.status != "void").group_by(Invoice.customer_id).subquery())
     # completed appointments without an invoice = visits (history); only those brought over from the previous software
     # carry money (its receipts): one set 'done' by hand in an older version is a visit with no money behind it
     hist = (select(Appointment.customer_id.label("cid"), func.sum(case((_old_service(), Appointment.quoted_price), else_=0)).label("amt"),
-                   func.count(func.distinct(func.date(Appointment.start_at))).label("n"), func.max(Appointment.start_at).label("last"))
+                   func.max(Appointment.start_at).label("last"))
             .where(Appointment.status == "done", Appointment.invoice_id.is_(None)).group_by(Appointment.customer_id).subquery())
     held = (select(Deposit.customer_id.label("cid"), func.sum(Deposit.amount).label("amt"))
             .where(Deposit.status == "held").group_by(Deposit.customer_id).subquery())
     # product purchases brought over from the product accounting software (Tizpardaz); its returns count negative
     net = func.coalesce(TradeHistory.net_amount, TradeHistory.amount)  # after its invoice's discount
     signed = case((TradeHistory.kind == "sale_return", -net), else_=net)
-    trade = (select(TradeHistory.customer_id.label("cid"), func.sum(signed).label("amt"),
-                    func.count(func.distinct(func.date(TradeHistory.at))).label("n"), func.max(TradeHistory.at).label("last"))
+    trade = (select(TradeHistory.customer_id.label("cid"), func.sum(signed).label("amt"), func.max(TradeHistory.at).label("last"))
              .where(TradeHistory.kind.in_(("sale", "sale_return")), TradeHistory.customer_id.is_not(None))
              .group_by(TradeHistory.customer_id).subquery())
-    hist = (select(hist.c.cid, hist.c.amt, hist.c.n, hist.c.last).union_all(select(trade.c.cid, trade.c.amt, trade.c.n, trade.c.last))
+    hist = (select(hist.c.cid, hist.c.amt, hist.c.last).union_all(select(trade.c.cid, trade.c.amt, trade.c.last))
             .subquery())
-    hist = (select(hist.c.cid.label("cid"), func.sum(hist.c.amt).label("amt"), func.sum(hist.c.n).label("n"), func.max(hist.c.last).label("last"))
+    hist = (select(hist.c.cid.label("cid"), func.sum(hist.c.amt).label("amt"), func.max(hist.c.last).label("last"))
             .group_by(hist.c.cid).subquery())
     # visits: the days with anything bought (an invoice here, a visit of the previous software, a product brought over),
     # each day once - as the customer file counts them
@@ -101,33 +99,38 @@ def list_customers(q: str = "", limit: int = 100, offset: int = 0, sort: str = "
                    seller.label("seller"))
             .outerjoin(inv, inv.c.cid == Customer.id).outerjoin(hist, hist.c.cid == Customer.id).outerjoin(held, held.c.cid == Customer.id)
             .outerjoin(debt, debt.c.cid == Customer.id).outerjoin(vis, vis.c.cid == Customer.id))
+    conds = []
     if q:
         like = f"%{q}%"
         mob = normalize_mobile(q)
         code = to_en_digits(q).strip()
-        stmt = stmt.where(or_(fa_like(Customer.full_name, q), Customer.mobile.like(f"%{mob or code}%"), Customer.instagram.like(like),
+        conds.append(or_(fa_like(Customer.full_name, q), Customer.mobile.like(f"%{mob or code}%"), Customer.instagram.like(like),
                               Customer.legacy_code == code, Customer.mobile_raw.like(f"%{code}%"),
                               # numbers / codes of duplicate records merged into this customer
                               cast(Customer.other_mobiles, String).like(f"%{mob or code}%"),
                               cast(Customer.other_codes, String).like(f'%"{code}"%')))
+    count = select(func.count(Customer.id))
     if filter == "held":
-        stmt = stmt.where(held.c.amt > 0)
+        conds.append(held.c.amt > 0)
+        count = count.outerjoin(held, held.c.cid == Customer.id)
     elif filter == "debt":
-        stmt = stmt.where(debt.c.amt > 0)
+        conds.append(debt.c.amt > 0)
+        count = count.outerjoin(debt, debt.c.cid == Customer.id)
     elif filter == "seller":
-        stmt = stmt.where(seller)
+        conds.append(seller)
     elif filter == "no_mobile":
-        stmt = stmt.where(Customer.mobile.is_(None))
+        conds.append(Customer.mobile.is_(None))
     elif filter == "mobile_issue":
-        stmt = stmt.where(Customer.mobile_issue.in_(("invalid", "duplicate")))
+        conds.append(Customer.mobile_issue.in_(("invalid", "duplicate")))
     elif filter == "no_history":
-        stmt = stmt.where(*(~cond for cond in customer_merge.with_records()))
+        conds.extend(~cond for cond in customer_merge.with_records())
+    stmt = stmt.where(*conds)
     order = {"recent": [Customer.id.desc()], "name": [Customer.full_name],
              "code": [func.cast(Customer.legacy_code, Integer).desc(), Customer.id.desc()],
              "spent": [spent.desc(), Customer.id.desc()], "visits": [visits.desc(), Customer.id.desc()],
              "last_visit": [last.desc().nulls_last(), Customer.id.desc()],
              "debt": [func.coalesce(debt.c.amt, 0).desc(), Customer.id.desc()]}[sort if sort in SORTS else "code"]
-    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    total = db.scalar(count.where(*conds))
     rows = db.execute(stmt.order_by(*order).limit(min(limit, 500)).offset(max(offset, 0))).all()
     return {"total": total, "items": [_c(c, {"total_spent": int(sp or 0), "spent_old": int(old or 0), "deposits_held": int(h or 0),
                                              "visits": int(v or 0), "last_visit": str(lv)[:16] if lv else None, "debt": max(int(d or 0), 0),
