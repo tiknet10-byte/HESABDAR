@@ -47,6 +47,7 @@ from ..models import (
     TradeHistory,
     User,
     WaitlistEntry,
+    TreasuryRate,
     WooLog,
     WooOrder,
     WooOutbox,
@@ -55,7 +56,7 @@ from ..models import (
 
 # order matters (foreign keys): children first. Stock moves, website orders and purchases point at invoices and
 # products; history rows point at their invoice headers; appointments point at the invoice that settled them.
-TRANSACTIONS = [WooOutbox, WooOrder, WooLog, StockMove, CapitalMove, HoldingMove, SupplierPayment, PurchaseItem, Purchase, TradeHistory, TradeDoc,
+TRANSACTIONS = [TreasuryRate, WooOutbox, WooOrder, WooLog, StockMove, CapitalMove, HoldingMove, SupplierPayment, PurchaseItem, Purchase, TradeHistory, TradeDoc,
                 WaitlistEntry, InboundReceipt, BankTransaction, Payment, Deposit, Appointment, InvoiceItem, Invoice, Expense,
                 JournalLine, JournalEntry, Alert, ConversationMessage, ConversationState, ImportBatch]
 # kept by "transactions" and "customers", wiped by "factory" (then the defaults are seeded again); children first too

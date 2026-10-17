@@ -492,10 +492,11 @@ def invoice_item_rows(db: Session, start: date | None, end: date | None) -> list
 
 
 def staff_shares(db: Session, start: date | None = None, end: date | None = None) -> dict:
-    """Who did what: revenue, staff share (commission) and salon share per staff member and per line.
+    """Who did what: revenue, the line's treasury (خزانه), staff share (commission) and salon share per staff member and
+    per line; revenue = treasury + staff share + salon share, to the Rial.
 
-    Uses the commission recorded on each invoice item at issue time; older items without it fall back to
-    the staff member's current percent.
+    Uses the treasury and commission recorded on each invoice item (the books); older items without a commission fall
+    back to the staff member's current percent, rows from before the treasury have none.
     """
     from ..services.accounting import STAFF_PAYABLE, account, staff_balance
     from ..models import JournalEntry, JournalLine
@@ -518,27 +519,33 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
             comm = it.commission_amount
         else:
             comm = round(net * (person.commission_percent or 0) / 100) if person else 0
-        net, comm = k * net, k * comm
+        tre = it.treasury_amount or 0
+        net, comm, tre = k * net, k * comm, k * tre
         key = it.staff_id or 0
         r = per_staff.setdefault(key, {"staff_id": it.staff_id, "name": person.full_name if person else "بدون پرسنل",
                                        "line": lines.get(person.line_id) if person and person.line_id else None,
                                        "percent": person.commission_percent if person else 0,
-                                       "services": 0, "revenue": 0, "staff_share": 0, "salon_share": 0})
+                                       "services": 0, "revenue": 0, "treasury": 0, "staff_share": 0, "salon_share": 0})
         r["services"] += k * it.quantity
         r["revenue"] += net
+        r["treasury"] += tre
         r["staff_share"] += comm
-        r["salon_share"] += net - comm
+        r["salon_share"] += net - tre - comm
         lk = it.line_id or 0
         lr = per_line.setdefault(lk, {"line_id": it.line_id, "name": lines.get(it.line_id, "سایر"), "services": 0,
-                                      "revenue": 0, "staff_share": 0, "salon_share": 0, "forfeits": 0})
+                                      "revenue": 0, "treasury": 0, "staff_share": 0, "salon_share": 0, "forfeits": 0, "returned": 0})
         lr["services"] += k * it.quantity
         lr["revenue"] += net
+        lr["treasury"] += tre
         lr["staff_share"] += comm
-        lr["salon_share"] += net - comm
+        lr["salon_share"] += net - tre - comm
+        if k < 0:
+            lr["returned"] -= net  # returns of earlier sales counted in the period (with their own month's treasury)
     # forfeited deposits (no-shows): income of their line that is all the salon's (no staff share); shown on its own
     for _, line_id, amount in forfeit_rows(db, s, e):
         lr = per_line.setdefault(line_id or 0, {"line_id": line_id, "name": lines.get(line_id, "سایر"), "services": 0,
-                                                "revenue": 0, "staff_share": 0, "salon_share": 0, "forfeits": 0})
+                                                "revenue": 0, "treasury": 0, "staff_share": 0, "salon_share": 0, "forfeits": 0,
+                                                "returned": 0})
         lr["forfeits"] += int(amount)
     # payouts in the period and outstanding balances
     payable = account(db, STAFF_PAYABLE)
@@ -551,13 +558,13 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
         # also someone no longer active who is still owed money or was paid in the period (to settle with them)
         if pid not in per_staff and (p.is_active or balances[pid] or paid.get(pid)):
             per_staff[pid] = {"staff_id": pid, "name": p.full_name, "line": lines.get(p.line_id), "percent": p.commission_percent,
-                              "services": 0, "revenue": 0, "staff_share": 0, "salon_share": 0}
+                              "services": 0, "revenue": 0, "treasury": 0, "staff_share": 0, "salon_share": 0}
     for r in per_staff.values():
         r["paid"] = int(paid.get(r["staff_id"]) or 0) if r["staff_id"] else 0
         r["balance"] = balances.get(r["staff_id"], 0) if r["staff_id"] else 0
         r["active"] = bool(staff[r["staff_id"]].is_active) if r["staff_id"] in staff else True
     staff_rows = sorted(per_staff.values(), key=lambda x: -x["revenue"])
-    totals = {k: sum(r[k] for r in staff_rows) for k in ("revenue", "staff_share", "salon_share", "paid", "balance")}
+    totals = {k: sum(r[k] for r in staff_rows) for k in ("revenue", "treasury", "staff_share", "salon_share", "paid", "balance")}
     totals["forfeits"] = sum(r["forfeits"] for r in per_line.values())
     return {"period": {"start": s.date().isoformat(), "end": e.date().isoformat()}, "staff": staff_rows,
             "lines": sorted(per_line.values(), key=lambda x: -(x["revenue"] + x["forfeits"])), "totals": totals}

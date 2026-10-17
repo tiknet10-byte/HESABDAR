@@ -111,6 +111,22 @@ class Staff(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class TreasuryRate(Base):
+    """The treasury (خزانه) of a service line in a Jalali month: the part of the line's revenue taken first (for the
+    salon), before the rest is split between the staff member and the salon. In hundredths of a percent (4250 = 42.5%).
+    source: "owner" (set on the staff page) or "auto" (kept at the rate a month already used, when an earlier month changed)."""
+    __tablename__ = "treasury_rates"
+    __table_args__ = (UniqueConstraint("line_id", "jy", "jm"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    line_id: Mapped[int] = mapped_column(ForeignKey("service_lines.id"), index=True)
+    jy: Mapped[int] = mapped_column(Integer)
+    jm: Mapped[int] = mapped_column(Integer)
+    rate_bp: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(8), default="owner")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+    updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 # ---------------------------------------------------------------- customers
 class Customer(TimestampMixin, Base):
     __tablename__ = "customers"
@@ -247,6 +263,10 @@ class InvoiceItem(Base):
     kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     commission_percent: Mapped[float | None] = mapped_column(Float, nullable=True)  # staff % at issue time
     commission_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # staff share (Rial)
+    # the line's treasury of the month taken from the row first (hundredths of a percent, Rial); the staff share is
+    # worked out on what is left. NULL (rows from before 1.21) = no treasury
+    treasury_bp: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    treasury_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     invoice: Mapped[Invoice] = relationship(back_populates="items")
 
     @property

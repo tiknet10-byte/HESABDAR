@@ -40,7 +40,16 @@ def daily(start: date | None = None, end: date | None = None, db: Session = Depe
 
 
 @router.get("/reports/staff-shares")
-def staff_shares(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), _=Depends(require("reports"))):
+def staff_shares(start: date | None = None, end: date | None = None, jy: int | None = None, jm: int | None = None,
+                 db: Session = Depends(get_db), _=Depends(require("reports"))):
+    """For a period, or a Jalali month (jy, jm: its first to its last day)."""
+    if jy is not None and jm is not None:
+        from ..services.jalali import month_range
+
+        if not (1 <= jm <= 12) or not (1300 <= jy <= 1500):
+            raise HTTPException(400, "ماه نامعتبر است")
+        s, e = month_range(jy, jm)
+        start, end = s.date(), (e - timedelta(days=1)).date()
     return reports.staff_shares(db, start, end)
 
 

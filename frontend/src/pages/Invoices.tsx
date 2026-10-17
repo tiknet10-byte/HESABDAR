@@ -447,7 +447,7 @@ export function InvoiceView({ id, onChange }: { id: number; onChange: () => void
         <tbody>{data.items.map((it: any, i: number) => (
           <tr key={i}>
             <td>{it.description}<div className="muted text-xs">{[it.line, it.staff].filter(Boolean).join(" · ")}</div></td>
-            <td className="num">{money(it.amount)}{it.commission_amount ? <div className="muted text-xs">سهم پرسنل: {money(it.commission_amount)}</div> : null}</td>
+            <td className="num">{money(it.amount)}{it.treasury_amount ? <div className="muted text-xs">خزانه: {money(it.treasury_amount)}</div> : null}{it.commission_amount ? <div className="muted text-xs">سهم پرسنل: {money(it.commission_amount)}</div> : null}</td>
           </tr>
         ))}</tbody>
       </table>

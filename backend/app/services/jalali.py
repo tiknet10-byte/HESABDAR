@@ -59,3 +59,25 @@ def month_start(d):  # noqa: ANN001, ANN201
     day = d.date() if isinstance(d, datetime) else d
     jy, jm, _ = gregorian_to_jalali(day.year, day.month, day.day)
     return datetime.combine(date(*jalali_to_gregorian(jy, jm, 1)), datetime.min.time())
+
+
+def jmonth_of(d) -> tuple[int, int]:  # noqa: ANN001
+    """(Jalali year, month) of a date or datetime."""
+    from datetime import datetime
+
+    day = d.date() if isinstance(d, datetime) else d
+    jy, jm, _ = gregorian_to_jalali(day.year, day.month, day.day)
+    return jy, jm
+
+
+def next_month(jy: int, jm: int) -> tuple[int, int]:
+    return (jy + 1, 1) if jm == 12 else (jy, jm + 1)
+
+
+def month_range(jy: int, jm: int):  # noqa: ANN201
+    """[start, next start) of a Jalali month as datetimes (from the 1st of each month only: no month-length guess)."""
+    from datetime import date, datetime
+
+    ny, nm = next_month(jy, jm)
+    return (datetime.combine(date(*jalali_to_gregorian(jy, jm, 1)), datetime.min.time()),
+            datetime.combine(date(*jalali_to_gregorian(ny, nm, 1)), datetime.min.time()))

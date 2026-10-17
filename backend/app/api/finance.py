@@ -655,6 +655,10 @@ def _names(kind: str) -> dict[int, str]:
     return names
 
 
+def _costs(user) -> bool:  # noqa: ANN001
+    return has_permission(user.role, "reports")
+
+
 def _staff_names() -> dict[int, str]:
     return _names("staff")
 
@@ -663,19 +667,21 @@ def _line_names() -> dict[int, str]:
     return _names("line")
 
 
-def _inv(i: Invoice, name: str | None = None) -> dict:
+def _inv(i: Invoice, name: str | None = None, costs: bool = True) -> dict:
+    """costs: the staff share and the treasury of each row (only for those who see the reports)."""
     return {"id": i.id, "number": i.number, "customer_id": i.customer_id, "customer": name, "issued_at": i.issued_at.isoformat(),
             "status": i.status, "subtotal": i.subtotal, "discount": i.discount, "total": i.total, "paid": i.paid,
             "due": i.total - i.paid, "source": i.source, "notes": i.notes, "channel": i.channel or "in_person",
             "items": [{"service_id": it.service_id, "product_id": it.product_id, "kind": it.kind, "line_id": it.line_id, "staff_id": it.staff_id, "description": it.description,
                        "quantity": it.quantity, "unit_price": it.unit_price, "discount": it.discount, "amount": it.amount,
-                       "net_amount": it.net_amount, "commission_amount": it.commission_amount,
+                       "net_amount": it.net_amount, "commission_amount": it.commission_amount if costs else None,
+                       "treasury_amount": it.treasury_amount if costs else None, "treasury_bp": it.treasury_bp if costs else None,
                        "staff": _staff_names().get(it.staff_id), "line": _line_names().get(it.line_id)} for it in i.items]}
 
 
 @router.get("/invoices")
 def invoices(start: date | None = None, end: date | None = None, status: str | None = None, db: Session = Depends(get_db),
-             _=Depends(require("read"))):
+             user=Depends(require("read"))):
     q = select(Invoice, Customer.full_name).join(Customer, Customer.id == Invoice.customer_id).order_by(Invoice.issued_at.desc()).limit(500)
     if start:
         q = q.where(Invoice.issued_at >= datetime.combine(start, datetime.min.time()))
@@ -683,7 +689,7 @@ def invoices(start: date | None = None, end: date | None = None, status: str | N
         q = q.where(Invoice.issued_at <= datetime.combine(end, datetime.max.time()))
     if status:
         q = q.where(Invoice.status == status)
-    return [_inv(i, n) for i, n in db.execute(q).all()]
+    return [_inv(i, n, _costs(user)) for i, n in db.execute(q).all()]
 
 
 INVOICE_SORTS = {"date_desc", "date_asc", "total_desc", "total_asc", "due_desc", "number_desc", "customer"}
@@ -727,7 +733,7 @@ def invoices_search(q: str = "", status: str = "", sort: str = "date_desc", star
              "customer": [Customer.full_name]}[sort if sort in INVOICE_SORTS else "date_desc"]
     rows = db.execute(stmt.options(selectinload(Invoice.items)).order_by(*order, Invoice.id.desc())
                       .limit(min(limit, 200)).offset(max(offset, 0))).all()
-    items = [{**_inv(i, n), "code": code, "mobile": mob} for i, n, code, mob in rows]
+    items = [{**_inv(i, n, _costs(user)), "code": code, "mobile": mob} for i, n, code, mob in rows]
     # headline numbers (independent of filters)
     now = local_now()
     day = datetime.combine(now.date(), datetime.min.time())
@@ -801,16 +807,16 @@ def create_invoice(body: InvoiceIn, db: Session = Depends(get_db), user=Depends(
                   {"invoice": inv.number, "released": a.original_start_at.isoformat() if a.original_start_at else None}, user=user)
     learning.refresh_price_stats(db)
     db.commit()
-    return {**_inv(inv, c.full_name), "freed": freed}
+    return {**_inv(inv, c.full_name, _costs(user)), "freed": freed}
 
 
 @router.get("/invoices/{iid}")
-def get_invoice(iid: int, db: Session = Depends(get_db), _=Depends(require("read"))):
+def get_invoice(iid: int, db: Session = Depends(get_db), user=Depends(require("read"))):
     i = _get(db, Invoice, iid, "فاکتور")
     c = db.get(Customer, i.customer_id)
     pays = db.scalars(select(Payment).where(Payment.invoice_id == iid)).all()
     deps = db.scalars(select(Deposit).where(Deposit.applied_invoice_id == iid)).all()
-    return {**_inv(i, c.full_name), "customer_mobile": c.mobile, "customer_code": c.legacy_code,
+    return {**_inv(i, c.full_name, _costs(user)), "customer_mobile": c.mobile, "customer_code": c.legacy_code,
             "payments": [{"id": p.id, "amount": p.amount, "account_id": p.payment_account_id, "paid_at": p.paid_at.isoformat(),
                           "reference": p.reference} for p in pays],
             "deposits": [_dep(d) for d in deps]}
@@ -825,7 +831,7 @@ def pay_invoice(iid: int, body: PayIn, db: Session = Depends(get_db), user=Depen
     except AccountingError as exc:
         raise HTTPException(400, str(exc)) from exc
     db.commit()
-    return _inv(i)
+    return _inv(i, costs=_costs(user))
 
 
 class ApplyDepositIn(BaseModel):
@@ -843,7 +849,7 @@ def apply_deposit(iid: int, body: ApplyDepositIn, db: Session = Depends(get_db),
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
     db.commit()
-    return {**_inv(i), "used": used}
+    return {**_inv(i, costs=_costs(user)), "used": used}
 
 
 @router.post("/invoices/{iid}/void")
@@ -854,7 +860,7 @@ def void(iid: int, reason: str = "", payments: str = "cancel", db: Session = Dep
     except AccountingError as exc:
         raise HTTPException(400, str(exc)) from exc
     db.commit()
-    return _inv(i)
+    return _inv(i, costs=_costs(user))
 
 
 # ---------------------------------------------------------------- expenses

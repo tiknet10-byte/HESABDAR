@@ -66,6 +66,13 @@ and how to use it. Commit messages end with the attribution lines the session as
 
 ## Features and where they live
 * Deposits (بیعانه) + appointments: refunded deposit cancels its appointment; appointments easy to change / delete.
+* Staff shares and treasury (1.21, `services/treasury.py`, `api/treasury.py`, page «پرسنل و سهم‌ها» `StaffShares.tsx`):
+  each service line has a treasury rate per Jalali month (`TreasuryRate`, bp = 1/100 %, carried forward). Every
+  service row: treasury = net x rate (half up), commission = (net - treasury) x staff % (booked 5200/2200), salon = rest;
+  stored on `InvoiceItem.treasury_bp/treasury_amount` (NULL = none, before 1.21). Changing a month (settings =
+  owner/admin; preview, `expected_bp` -> 409, `confirm` when paid since / balance negative) re-books that month only
+  (`accounting.repost_commission`); `reports.staff_shares` (also `?jy&jm`) shows treasury per line and staff and must
+  equal 5200. Roles without `reports` get no commission / treasury on invoices.
 * Owner's capital and worth (`services/capital.py`, `api/capital.py`, page «سرمایه و دارایی‌ها» `pages/Capital.tsx`,
   permission `capital` = owner/admin): put money in / take it out (3100), owner paid a supplier from own pocket,
   a person's credit (e.g. a customer named «سرمایه») turned into capital (suggested, user confirms), gold / coins /
@@ -112,7 +119,7 @@ and how to use it. Commit messages end with the attribution lines the session as
   +; stock count = exact) and sent to the product with the same SKU. Tested against `backend/tests/fake_woo.py`
   (in-memory WooCommerce); **not yet tried on the real site**.
 
-## Status (1.20.2)
+## Status (1.21.0)
 * GitHub: `tiknet10-byte/HESABDAR`, branch `claude/beauty-salon-accounting-system-9zzoep` holds the full history
   (pushed after the Claude GitHub App was installed). Work on that branch and push to it.
 * 1.20.1: an appointment is «done» only by its invoice (PATCH/PUT refuse it; a done one's status is not changed by

@@ -13,6 +13,7 @@ from . import __version__
 from .api import auth, catalog, customers, finance, legacy, products, system, tizpardaz
 from .api import woo as woo_api
 from .api import capital as capital_api
+from .api import treasury as treasury_api
 from .core import db as dbmod
 from .core.config import get_settings
 from .core.db import Base, SessionLocal
@@ -204,7 +205,7 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     for r in (auth.router, catalog.router, customers.router, finance.router, legacy.router, products.router, system.router, tizpardaz.router,
-              woo_api.router, capital_api.router):
+              woo_api.router, capital_api.router, treasury_api.router):
         app.include_router(r)
 
     manager.discover()

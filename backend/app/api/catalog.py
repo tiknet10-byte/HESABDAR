@@ -176,6 +176,15 @@ def update_line(lid: int, body: LineIn, db: Session = Depends(get_db), user=Depe
     return _line(l)
 
 
+def _forget_rates(db: Session, line_id: int) -> None:
+    """A line erased for good (nothing in the books) takes its treasury rates with it."""
+    from ..models import TreasuryRate
+
+    for r in db.scalars(select(TreasuryRate).where(TreasuryRate.line_id == line_id)):
+        db.delete(r)
+    db.flush()
+
+
 @router.delete("/lines/{lid}")
 def delete_line(lid: int, db: Session = Depends(get_db), user=Depends(require("settings"))):
     """Delete a line with all its services (services used in the books are archived, not erased)."""
@@ -190,6 +199,7 @@ def delete_line(lid: int, db: Session = Depends(get_db), user=Depends(require("s
     if used:
         l.is_active = False
     else:
+        _forget_rates(db, lid)
         db.delete(l)
     audit(db, "line.delete", "line", lid, {"name": l.name, "archived": bool(used)}, user=user)
     _names_changed()
@@ -355,9 +365,12 @@ def delete_service(sid: int, db: Session = Depends(get_db), user=Depends(require
         line = db.get(ServiceLine, line_id)
         if line:  # last service of the line is gone -> remove the line too
             if db.scalar(select(func.count(Service.id)).where(Service.line_id == line_id)) or \
-                    db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.line_id == line_id)):
+                    db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.line_id == line_id)) or \
+                    db.scalar(select(func.count(Staff.id)).where(Staff.line_id == line_id)) or \
+                    db.scalar(select(func.count(JournalLine.id)).where(JournalLine.line_id == line_id)):
                 line.is_active = False
             else:
+                _forget_rates(db, line_id)
                 db.delete(line)
             line_removed = True
     audit(db, "service.delete", "service", sid, {"archived": archived, "line_removed": line_removed}, user=user)

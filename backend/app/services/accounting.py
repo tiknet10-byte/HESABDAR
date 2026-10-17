@@ -660,21 +660,27 @@ def issue_invoice(db: Session, *, customer: Customer, items: list[dict], discoun
         legs.append(Leg(revenue_account_for_line(db, name), credit=net, customer_id=customer.id, line_id=line_id))
     post(db, f"فاکتور {inv.number} - {customer.full_name}", legs, "invoice", inv.id, at=inv.issued_at)
 
-    # staff commission: each item's net (after its share of the invoice discount) x the staff member's percent.
-    # Booked as an expense of the salon and a liability to the staff member until it is paid out.
-    comm_legs: list[Leg] = []
+    # treasury: the line's part of the month taken from each service row first (services/treasury.py); read after the
+    # invoice's first write, so a rate saved at the same moment is either fully before or fully after this invoice.
+    # Staff commission: what is left x the staff member's percent. Booked as an expense of the salon and a liability
+    # to the staff member until it is paid out.
+    from . import treasury
+
+    rates: dict[int, int] = {}
+    for item in inv.items:
+        if item.product_id or item.kind == "extra" or not item.line_id:
+            continue
+        if item.line_id not in rates:
+            rates[item.line_id] = treasury.effective_bp(db, item.line_id, inv.issued_at)
+        treasury.book_item(item, rates[item.line_id])
     for item in inv.items:
         person = db.get(Staff, item.staff_id) if item.staff_id else None
         if person and person.commission_percent:
             item.commission_percent = float(person.commission_percent)
-            item.commission_amount = int(round(item.net_amount * person.commission_percent / 100))
-            if item.commission_amount > 0:
-                comm_legs += [Leg(account(db, COMMISSION), debit=item.commission_amount, line_id=item.line_id, staff_id=person.id),
-                              Leg(account(db, STAFF_PAYABLE), credit=item.commission_amount, line_id=item.line_id, staff_id=person.id)]
+            item.commission_amount = treasury.commission_of(treasury.base_of(item), person.commission_percent)
         else:
             item.commission_percent, item.commission_amount = 0.0, 0
-    if comm_legs:
-        post(db, f"سهم پرسنل - فاکتور {inv.number}", comm_legs, "commission", inv.id, at=inv.issued_at)
+    _post_commission(db, inv)
 
     # products leave the stock; the costing engine works out their cost and posts it (COGS / inventory)
     sold = {inventory.sell(db, item, inv.issued_at).product_id for item in inv.items if item.product_id}
@@ -827,6 +833,47 @@ def record_payment(db: Session, *, payment_account: PaymentAccount, amount: int,
         audit(db, "payment.create", "payment", pay.id, {"amount": amount, "invoice": invoice.id if invoice else None}, user=user)
     bus.emit("payment.created", {"id": pay.id, "amount": amount, "customer_id": customer_id}, db=db)
     return pay
+
+
+def _commission_legs(db: Session, inv: Invoice) -> list[Leg]:
+    legs: list[Leg] = []
+    for item in inv.items:
+        if item.staff_id and (item.commission_amount or 0) > 0:
+            legs += [Leg(account(db, COMMISSION), debit=item.commission_amount, line_id=item.line_id, staff_id=item.staff_id),
+                     Leg(account(db, STAFF_PAYABLE), credit=item.commission_amount, line_id=item.line_id, staff_id=item.staff_id)]
+    return legs
+
+
+def _post_commission(db: Session, inv: Invoice, at: datetime | None = None) -> None:
+    legs = _commission_legs(db, inv)
+    if legs:
+        post(db, f"سهم پرسنل - فاکتور {inv.number}", legs, "commission", inv.id, at=at or inv.issued_at)
+
+
+def repost_commission(db: Session, inv: Invoice) -> None:
+    """Book an invoice's staff shares again from its rows (after its month's treasury changed): its commission entry on
+    its own date and, for a voided invoice, the commission part of its reversal on the reversal's date - so a return
+    always takes back exactly what was given. Entries are deleted through the ORM (their lines go with them)."""
+    comm_ids = {account(db, COMMISSION).id, account(db, STAFF_PAYABLE).id}
+    old = list(db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "commission", JournalEntry.ref_id == inv.id)))
+    at = min((e.at for e in old), default=inv.issued_at)
+    back, back_at = [], None
+    if inv.status == "void":
+        undo = list(db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "invoice_void", JournalEntry.ref_id == inv.id)))
+        back = [e for e in undo if e.lines and all(l.account_id in comm_ids for l in e.lines)]
+        # the return's date stays where it was (reports date a return by its first reversal)
+        back_at = min((e.at for e in back), default=None) or min((e.at for e in undo), default=None)
+    for e in old + back:
+        db.delete(e)
+    db.flush()
+    legs = _commission_legs(db, inv)
+    if not legs:
+        return
+    post(db, f"سهم پرسنل - فاکتور {inv.number}", legs, "commission", inv.id, at=at)
+    if inv.status == "void" and back_at is not None:
+        post(db, f"ابطال سهم پرسنل {inv.number}", [
+            Leg(l.account, debit=l.credit, credit=l.debit, line_id=l.line_id, staff_id=l.staff_id) for l in legs
+        ], "invoice_void", inv.id, at=back_at)
 
 
 def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payments: str = "cancel") -> Invoice:

@@ -26,7 +26,7 @@ backend/  (FastAPI + SQLAlchemy 2)
 | Deposit refunded | 2100 | Cash account |
 | Deposit forfeited (no-show) | 2100 | 48xx Forfeited deposits of the deposit's service line (4800 when the line is unknown) |
 | Expense | 51xx Expense category | Cash account |
-| Staff commission | 5200 | 2200 Staff payable |
+| Staff commission ((net - treasury) x staff %, per row) | 5200 | 2200 Staff payable |
 | Product sold / returned | 5400 COGS / 1300 | 1300 Inventory / 5400 |
 | Purchase on credit | 1300 Inventory | 2300 Supplier payables |
 | Owner puts money in / takes it out | Cash account / 3100 | 3100 Capital / Cash account |
@@ -40,6 +40,15 @@ backend/  (FastAPI + SQLAlchemy 2)
 Each POS terminal / card / bank account gets its own ledger sub-account (11xx), so balances per terminal are always available. Each service line gets its own revenue account (41xx) and forfeit account (48xx); each gold/currency holding its own 14xx.
 
 **Deposit vs credit.** `Deposit.kind` None/"deposit" = بیعانه, a prepayment for a SERVICE: it pays only the services of an invoice (after their share of the discount) and can be forfeited. "credit" = اعتبار, the customer's money kept with us (balances brought over from Tizpardaz, money of a voided invoice kept for them, website refunds): pays anything, never forfeited.
+
+**Treasury (خزانه)** (`services/treasury.py`, table `treasury_rates`): per service line and Jalali month, a rate in
+hundredths of a percent (a month without its own rate takes the line's latest earlier one; none: 0). On every service
+row at issue: treasury = net x rate (integer, half up), staff share = (net - treasury) x staff % (the commission
+above), salon share = the rest; treasury + staff + salon = net. The treasury has no account of its own: it is the
+salon's (41xx stays whole); only 5200/2200 get smaller. Saving a month's rate later (owner/admin, preview first)
+books that month's rows again - only that month (later months that already have invoices keep the rate they used, as
+an "auto" row): the "commission" entry of each changed invoice is deleted through the ORM and posted again on its
+date, and for a voided invoice the commission part of its "invoice_void" reversal too, on the reversal's date.
 
 **Profit** on the dashboard and the capital page comes from the ledger (`capital.profit_breakdown`): every revenue (41xx, 42xx, 48xx, 49xx) minus every expense (51xx expenses, 52xx staff share, 53xx cash differences, 54xx COGS, 55xx stock shortages) dated in the period. **Net worth** (`capital.position`) = assets - liabilities = capital 3100 + opening 3200 + profit to date; the page shows how it changed: worth at the start + put in - taken out + profit (+ openings entered) = worth now.
 

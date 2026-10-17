@@ -65,16 +65,20 @@ def test_start_on_an_older_database(tmp_path):
            "HESABDAR_FRONTEND_DIST": str(tmp_path / "no-dist"), "HESABDAR_AI_ENABLED": "false"}
     _run(SETUP, env)
     con = sqlite3.connect(db)
-    for table, col in (("users", "token_version"), ("trade_history", "net_amount"), ("deposits", "kind")):
+    for table, col in (("users", "token_version"), ("trade_history", "net_amount"), ("deposits", "kind"),
+                       ("invoice_items", "treasury_bp"), ("invoice_items", "treasury_amount"), ("woo_orders", "site")):
         if col in {r[1] for r in con.execute(f"PRAGMA table_info({table})")}:
             con.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+    con.execute("DROP TABLE IF EXISTS treasury_rates")
     con.commit()
     con.close()
     _run(START, env)
     con = sqlite3.connect(db)
     try:
-        for table, col in (("users", "token_version"), ("trade_history", "net_amount"), ("deposits", "kind")):
+        for table, col in (("users", "token_version"), ("trade_history", "net_amount"), ("deposits", "kind"),
+                       ("invoice_items", "treasury_bp"), ("invoice_items", "treasury_amount"), ("woo_orders", "site")):
             assert col in {r[1] for r in con.execute(f"PRAGMA table_info({table})")}, (table, col)
+        assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'treasury_rates'").fetchone()[0] == 1
         dr, cr = con.execute("SELECT SUM(debit), SUM(credit) FROM journal_lines").fetchone()
         assert dr == cr
         ledger_1300 = con.execute("SELECT COALESCE(SUM(l.debit - l.credit), 0) FROM journal_lines l JOIN ledger_accounts a "

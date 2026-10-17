@@ -16,7 +16,8 @@ from app.models import (
     Alert, Appointment, AuditLog, BankTransaction, CapitalMove, ConversationMessage, ConversationState, Customer, Deposit,
     Expense, Holding, HoldingMove, ImportBatch, InboundReceipt, Invoice, InvoiceItem, JournalEntry, JournalLine, KnowledgeItem,
     LedgerAccount, Payment, PaymentAccount, PluginState, Product, Purchase, PurchaseItem, Service, ServiceLine, Setting, Staff,
-    StockMove, Supplier, SupplierPayment, TradeDoc, TradeHistory, User, WaitlistEntry, WooLog, WooOrder, WooOutbox, WooProduct,
+    StockMove, Supplier, SupplierPayment, TradeDoc, TradeHistory, TreasuryRate, User, WaitlistEntry, WooLog, WooOrder, WooOutbox,
+    WooProduct,
 )
 from app.plugins.manager import manager
 from app.services import capital, customer_merge, inventory, maintenance
@@ -64,7 +65,7 @@ def _fill(db: Session) -> dict:
     db.flush()
     item = InvoiceItem(invoice_id=inv.id, service_id=svc.id, product_id=product.id, line_id=line.id, staff_id=staff.id, unit_price=150)
     appt = Appointment(customer_id=c1.id, service_id=svc.id, staff_id=staff.id, start_at=now, invoice_id=inv.id)
-    db.add_all([item, appt])
+    db.add_all([item, appt, TreasuryRate(line_id=line.id, jy=1404, jm=1, rate_bp=4200)])
     db.flush()
     dep = Deposit(customer_id=c1.id, appointment_id=appt.id, service_id=svc.id, payment_account_id=pa.id, amount=50,
                   applied_invoice_id=inv.id, staff_id=staff.id, refund_account_id=pa.id, status="applied")
