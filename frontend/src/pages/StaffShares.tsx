@@ -163,8 +163,9 @@ export default function StaffShares() {
       )}
       {unset.length > 0 && (
         <div className="rounded-2xl bg-amber-500/10 p-3 text-sm leading-7 text-amber-800 dark:text-amber-200">
-          درصد خزانهٔ این ماه برای {unset.map((r: any) => `«${r.name}»`).join("، ")} هنوز تعیین نشده؛ فعلاً {unset.map((r: any) => `${r.name}: ${pct(r.bp)}${r.from ? ` (از ${monthName(r.from)})` : ""}`).join("، ")} به کار می‌رود.
-          {mayEdit && " از جدول «خزانه و تقسیم سهم» پایین همین صفحه، دکمهٔ مداد را بزنید."}
+          درصد خزانهٔ این ماه برای {unset.map((r: any) => `«${r.name}»`).join("، ")} هنوز تعیین نشده؛ فعلاً درصد ماه قبلِ همان لاین به کار می‌رود
+          {unset.some((r: any) => r.bp) ? ` (${unset.filter((r: any) => r.bp).map((r: any) => `${r.name}: ${pct(r.bp)}`).join("، ")}؛ بقیه ۰٪)` : " (۰٪)"}.
+          {mayEdit && " در جدول «خزانه و تقسیم سهم»، دکمهٔ مداد کنار هر لاین را بزنید."}
         </div>
       )}
       {!data ? <Loading /> : (
