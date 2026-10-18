@@ -203,7 +203,7 @@ def _later_months_to_keep(db: Session, line_id: int, jy: int, jm: int, old_bp: i
 def save(db: Session, line_id: int, jy: int, jm: int, bp: int, expected_bp: int | None = None, confirm: bool = False,
          user=None) -> dict:  # noqa: ANN001
     """Set (line, month)'s rate and book that month's rows again. One transaction; the caller commits."""
-    from .accounting import repost_commission
+    from .accounting import repost_commissions
     from .audit import audit, write_lock
 
     bp = int(bp)
@@ -234,8 +234,7 @@ def save(db: Session, line_id: int, jy: int, jm: int, bp: int, expected_bp: int 
             it.commission_amount = p["new_c"]
             changed[p["invoice"].id] = p["invoice"]
     db.flush()
-    for inv in changed.values():
-        repost_commission(db, inv)
+    repost_commissions(db, list(changed.values()))
     audit(db, "treasury.set", "line", line_id, {
         "month": f"{jy}/{jm:02d}", "old_bp": pv["old_bp"], "new_bp": bp, "invoices": len(changed),
         "kept": [f"{k['jy']}/{k['jm']:02d}={k['bp']}" for k in pv["later_kept"]],

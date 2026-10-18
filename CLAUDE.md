@@ -97,7 +97,8 @@ and how to use it. Commit messages end with the attribution lines the session as
 * People: one list (customers) also holds sellers; the customer file shows sales and purchase invoices (here and
   Tizpardaz) with clickable details, what we owe them; `customer_merge.LINKED/RECORDS` = every table that belongs to
   a customer (merge moves them; a customer with any of them is never deleted).
-* Data reset (`services/maintenance.py`): TRANSACTIONS order is children-first (FKs) - add new tables there
+* Data reset (`services/maintenance.py`): TRANSACTIONS order is children-first (FKs) - add new tables there (settings-like
+  tables such as `TreasuryRate` go in CATALOG, kept by the "transactions" reset)
   (`tests/test_g9_integration.py` fails when a table is missing).
 * Security (1.20.0): roles without `reports` (reception, staff) never get money totals, product costs or what we owe
   sellers (backend returns null, UI shows «—»); `capital` = owner/admin. Login gives one 401 for every failure, the

@@ -850,30 +850,57 @@ def _post_commission(db: Session, inv: Invoice, at: datetime | None = None) -> N
         post(db, f"سهم پرسنل - فاکتور {inv.number}", legs, "commission", inv.id, at=at or inv.issued_at)
 
 
-def repost_commission(db: Session, inv: Invoice) -> None:
-    """Book an invoice's staff shares again from its rows (after its month's treasury changed): its commission entry on
-    its own date and, for a voided invoice, the commission part of its reversal on the reversal's date - so a return
-    always takes back exactly what was given. Entries are deleted through the ORM (their lines go with them)."""
-    comm_ids = {account(db, COMMISSION).id, account(db, STAFF_PAYABLE).id}
-    old = list(db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "commission", JournalEntry.ref_id == inv.id)))
-    at = min((e.at for e in old), default=inv.issued_at)
-    back, back_at = [], None
-    if inv.status == "void":
-        undo = list(db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "invoice_void", JournalEntry.ref_id == inv.id)))
-        back = [e for e in undo if e.lines and all(l.account_id in comm_ids for l in e.lines)]
-        # the return's date stays where it was (reports date a return by its first reversal)
-        back_at = min((e.at for e in back), default=None) or min((e.at for e in undo), default=None)
-    for e in old + back:
-        db.delete(e)
-    db.flush()
-    legs = _commission_legs(db, inv)
-    if not legs:
+def repost_commissions(db: Session, invoices: list[Invoice]) -> None:
+    """Book invoices' staff shares again from their rows (after their month's treasury changed): each commission entry
+    on its own date and, for a voided invoice, the commission part of its reversal on the reversal's date - so a return
+    always takes back exactly what was given. Entries are deleted through the ORM (their lines go with them).
+    Done in bulk (a busy month has thousands of invoices and the database is locked meanwhile)."""
+    from sqlalchemy.orm import selectinload
+
+    if not invoices:
         return
-    post(db, f"سهم پرسنل - فاکتور {inv.number}", legs, "commission", inv.id, at=at)
-    if inv.status == "void" and back_at is not None:
-        post(db, f"ابطال سهم پرسنل {inv.number}", [
-            Leg(l.account, debit=l.credit, credit=l.debit, line_id=l.line_id, staff_id=l.staff_id) for l in legs
-        ], "invoice_void", inv.id, at=back_at)
+    comm, pay = account(db, COMMISSION), account(db, STAFF_PAYABLE)
+    ids = [i.id for i in invoices]
+    old: dict[int, list[JournalEntry]] = {i: [] for i in ids}
+    undo: dict[int, list[JournalEntry]] = {i: [] for i in ids}
+    for k in range(0, len(ids), 500):
+        chunk = ids[k:k + 500]
+        db.scalars(select(Invoice).options(selectinload(Invoice.items)).where(Invoice.id.in_(chunk))).all()
+        for e in db.scalars(select(JournalEntry).options(selectinload(JournalEntry.lines))
+                            .where(JournalEntry.ref_type.in_(("commission", "invoice_void")), JournalEntry.ref_id.in_(chunk))):
+            (old if e.ref_type == "commission" else undo)[e.ref_id].append(e)
+    plans = []
+    for inv in invoices:
+        at = min((e.at for e in old[inv.id]), default=inv.issued_at)
+        back, back_at = [], None
+        if inv.status == "void":
+            back = [e for e in undo[inv.id] if e.lines and all(l.account_id in (comm.id, pay.id) for l in e.lines)]
+            # the return's date stays where it was (reports date a return by its first reversal)
+            back_at = min((e.at for e in back), default=None) or min((e.at for e in undo[inv.id]), default=None)
+        for e in old[inv.id] + back:
+            db.delete(e)
+        plans.append((inv, at, back_at))
+    db.flush()
+    for inv, at, back_at in plans:
+        rows = [(it.line_id, it.staff_id, it.commission_amount) for it in inv.items if it.staff_id and (it.commission_amount or 0) > 0]
+        if not rows:
+            continue
+        entry = JournalEntry(description=f"سهم پرسنل - فاکتور {inv.number}", ref_type="commission", ref_id=inv.id, at=at)
+        for line_id, staff_id, amount in rows:  # balanced by construction: each share is a debit and a credit
+            entry.lines += [JournalLine(account_id=comm.id, debit=amount, credit=0, line_id=line_id, staff_id=staff_id),
+                            JournalLine(account_id=pay.id, debit=0, credit=amount, line_id=line_id, staff_id=staff_id)]
+        db.add(entry)
+        if inv.status == "void" and back_at is not None:
+            back_entry = JournalEntry(description=f"ابطال سهم پرسنل {inv.number}", ref_type="invoice_void", ref_id=inv.id, at=back_at)
+            for line_id, staff_id, amount in rows:
+                back_entry.lines += [JournalLine(account_id=comm.id, debit=0, credit=amount, line_id=line_id, staff_id=staff_id),
+                                     JournalLine(account_id=pay.id, debit=amount, credit=0, line_id=line_id, staff_id=staff_id)]
+            db.add(back_entry)
+    db.flush()
+
+
+def repost_commission(db: Session, inv: Invoice) -> None:
+    repost_commissions(db, [inv])
 
 
 def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payments: str = "cancel") -> Invoice:

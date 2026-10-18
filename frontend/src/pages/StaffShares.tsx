@@ -69,11 +69,12 @@ function RateEditor({ rate, month, onDone }: { rate: any; month: YM; onDone: () 
     setPv(null);
     setOk(false);
     if (bp === null) return;
+    let alive = true; // an older answer arriving late never replaces the preview of what is typed now
     const t = setTimeout(() => {
       api("/api/treasury/preview", { body: { line_id: rate.line_id, jy: month[0], jm: month[1], rate_bp: bp } })
-        .then(setPv).catch((e: any) => toast(e.message, "error"));
+        .then((r) => { if (alive) setPv(r); }).catch((e: any) => { if (alive) toast(e.message, "error"); });
     }, 300);
-    return () => clearTimeout(t);
+    return () => { alive = false; clearTimeout(t); };
   }, [text]); // eslint-disable-line react-hooks/exhaustive-deps
   const touched = pv?.staff?.filter((s: any) => s.change || s.balance_after !== s.balance) ?? [];
   return (
@@ -120,7 +121,7 @@ function RateEditor({ rate, month, onDone }: { rate: any; month: YM; onDone: () 
           )}
         </div>
       )}
-      <button className="btn btn-primary w-full py-3" disabled={bp === null || !pv || busy || (pv.needs_confirm && !ok)} onClick={async () => {
+      <button className="btn btn-primary w-full py-3" disabled={bp === null || !pv || pv.new_bp !== bp || busy || (pv.needs_confirm && !ok)} onClick={async () => {
         setBusy(true);
         try {
           const r = await api("/api/treasury", { method: "PUT", body: { line_id: rate.line_id, jy: month[0], jm: month[1], rate_bp: bp, expected_bp: pv.old_bp, confirm: ok } });

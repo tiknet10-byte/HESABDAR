@@ -104,13 +104,20 @@ def test_a_months_rate_is_taken_first_then_the_rest_is_split(client, accounts):
     assert rep["treasury"] == 4_200_000 + pct_bp(3_000_000, 4200)
     assert rep["treasury"] + rep["staff_share"] + rep["salon_share"] == rep["revenue"]
     assert rep["staff_share"] == ledger_5200(line, CUR)  # the books
-    # a row without a staff member gives its treasury too; the rest is all the salon's
-    alone = invoice(client, accounts, svc, person, 1_000_000, staff=False)
-    item = client.get(f"/api/invoices/{alone['id']}").json()["items"][0]
-    if item["staff_id"] is None:
-        assert (item["treasury_amount"], item["commission_amount"]) == (420_000, 0)
     balanced(client)
     assert other["total"] == 3_000_000
+
+
+def test_a_row_without_a_staff_member_gives_its_treasury_and_the_rest_to_the_salon(client, accounts):
+    line, svc, person = setup(client, "بی‌پرسنل", percent=30)
+    client.post("/api/staff", json={"full_name": "پرسنل دوم بی‌پرسنل", "line_id": line["id"], "commission_percent": 40})  # two: none is chosen
+    assert put_rate(client, line, CUR, 4200).status_code == 200
+    alone = invoice(client, accounts, svc, person, 1_000_000, staff=False)
+    item = client.get(f"/api/invoices/{alone['id']}").json()["items"][0]
+    assert item["staff_id"] is None
+    assert (item["treasury_amount"], item["commission_amount"]) == (420_000, 0)
+    rep = line_row(month_report(client, CUR), line)
+    assert (rep["revenue"], rep["treasury"], rep["staff_share"], rep["salon_share"]) == (1_000_000, 420_000, 0, 580_000)
 
 
 def test_no_rate_is_as_before_and_a_month_without_its_own_rate_uses_the_last_one(client, accounts):
@@ -238,11 +245,15 @@ def test_reception_does_not_see_staff_shares_on_an_invoice(client, accounts):
 
 
 def test_a_line_with_only_a_rate_can_be_deleted(client):
-    line, svc, person = setup(client, "حذف")
+    from app.models import ServiceLine, TreasuryRate
+
+    line = client.post("/api/lines", json={"name": "لاین خزانه حذف"}).json()  # no service, no staff: only a rate
     assert put_rate(client, line, CUR, 4000).status_code == 200
-    client.delete(f"/api/staff/{person['id']}")
     r = client.delete(f"/api/lines/{line['id']}")
-    assert r.status_code == 200, r.text
+    assert r.status_code == 200 and r.json()["archived"] is False, r.text
+    with _db() as db:
+        assert db.get(ServiceLine, line["id"]) is None
+        assert not db.scalars(select(TreasuryRate).where(TreasuryRate.line_id == line["id"])).all()
 
 
 def test_rows_from_before_the_staff_share_was_recorded_are_left_alone(client, accounts):
@@ -269,13 +280,24 @@ def test_rows_from_before_the_staff_share_was_recorded_are_left_alone(client, ac
 
 
 def test_a_busy_month_is_booked_again_quickly(client, accounts):
+    """Other users wait for the database at most 8 seconds (busy timeout): a month of 1,500 invoices is booked again
+    well within that."""
+    from app.models import Customer
+    from app.services import accounting
+
     line, svc, person = setup(client, "شلوغ", percent=35)
     at = datetime.combine(PREV_START - timedelta(days=5), time(9))
-    for i in range(300):
-        invoice(client, accounts, svc, person, 1_000_000 + i * 7, at=at)
+    with _db() as db:
+        c = Customer(full_name="مشتری شلوغ", mobile=_mobile())
+        db.add(c)
+        db.flush()
+        for i in range(1500):
+            accounting.issue_invoice(db, customer=c, items=[{"service_id": svc["id"], "unit_price": 1_000_000 + i * 7,
+                                                             "staff_id": person["id"]}], issued_at=at)
+        db.commit()
     t = clock.time()
     assert put_rate(client, line, PREV, 4350).status_code == 200
-    assert clock.time() - t < 15
+    assert clock.time() - t < 5
     rep = line_row(month_report(client, PREV), line)
     assert rep["staff_share"] == ledger_5200(line, PREV)
     assert rep["treasury"] + rep["staff_share"] + rep["salon_share"] == rep["revenue"]
