@@ -73,6 +73,16 @@ and how to use it. Commit messages end with the attribution lines the session as
   owner/admin; preview, `expected_bp` -> 409, `confirm` when paid since / balance negative) re-books that month only
   (`accounting.repost_commission`); `reports.staff_shares` (also `?jy&jm`) shows treasury per line and staff and must
   equal 5200. Roles without `reports` get no commission / treasury on invoices.
+* Forfeits shared like services, staff pay, employees, expenses (1.22): a forfeited deposit gets its line's treasury
+  and its staff member's share (`accounting.book_forfeit`, ref `forfeit_commission`, kept on the Deposit, re-booked
+  by `treasury.save`; NULL `treasury_bp` = before 1.22, all the salon's). `services/staffpay.py`: `StaffPayout`
+  (advance | settlement for a month, account or owner's pocket 3100, void on its own date, duplicate checks),
+  `SalaryAccrual` for employees (`Staff.kind = "employee"`, Dr 51xx «حقوق و دستمزد» / Cr 2200), `statement()`;
+  `services/payout_receipt.py` reads a receipt (vision or text) + the WhatsApp caption to fill the form; UI
+  `components/StaffPay.tsx` (form, statement, several receipts, send on WhatsApp), pages `Employees.tsx`,
+  `Expenses.tsx` (month view, categories setting `expenses.categories`, void), print `/print/staff/:id`.
+  Report expense figures come from the ledger 51xx (`reports.expense_rows`). WhatsApp can't record by itself (Meta's
+  API is not available for Iran and the clinic PC is not reachable): the payout is entered here and sent from here.
 * Owner's capital and worth (`services/capital.py`, `api/capital.py`, page «سرمایه و دارایی‌ها» `pages/Capital.tsx`,
   permission `capital` = owner/admin): put money in / take it out (3100), owner paid a supplier from own pocket,
   a person's credit (e.g. a customer named «سرمایه») turned into capital (suggested, user confirms), gold / coins /
@@ -120,7 +130,7 @@ and how to use it. Commit messages end with the attribution lines the session as
   +; stock count = exact) and sent to the product with the same SKU. Tested against `backend/tests/fake_woo.py`
   (in-memory WooCommerce); **not yet tried on the real site**.
 
-## Status (1.21.0)
+## Status (1.22.0)
 * GitHub: `tiknet10-byte/HESABDAR`, branch `claude/beauty-salon-accounting-system-9zzoep` holds the full history
   (pushed after the Claude GitHub App was installed). Work on that branch and push to it.
 * 1.20.1: an appointment is «done» only by its invoice (PATCH/PUT refuse it; a done one's status is not changed by

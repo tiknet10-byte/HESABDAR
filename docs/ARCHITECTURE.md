@@ -25,8 +25,11 @@ backend/  (FastAPI + SQLAlchemy 2)
 | Payment | Cash/POS/Card account | 1200 Receivables |
 | Deposit refunded | 2100 | Cash account |
 | Deposit forfeited (no-show) | 2100 | 48xx Forfeited deposits of the deposit's service line (4800 when the line is unknown) |
-| Expense | 51xx Expense category | Cash account |
+| Staff share of a forfeited deposit ((amount - treasury) x staff %, ref `forfeit_commission`) | 5200 | 2200 |
+| Expense (voided: the reverse on its own date, ref `expense_void`) | 51xx Expense category | Cash account |
 | Staff commission ((net - treasury) x staff %, per row) | 5200 | 2200 Staff payable |
+| Employee's salary for a month (ref `salary`) | 51xx «حقوق و دستمزد» | 2200 (the employee) |
+| Advance / settlement to a staff member or employee (ref `staff_payout`, ref_id = StaffPayout) | 2200 (the person) | Cash account (or 3100 when the owner paid from own pocket) |
 | Product sold / returned | 5400 COGS / 1300 | 1300 Inventory / 5400 |
 | Purchase on credit | 1300 Inventory | 2300 Supplier payables |
 | Owner puts money in / takes it out | Cash account / 3100 | 3100 Capital / Cash account |
@@ -49,6 +52,25 @@ salon's (41xx stays whole); only 5200/2200 get smaller. Saving a month's rate la
 books that month's rows again - only that month (later months that already have invoices keep the rate they used, as
 an "auto" row): the "commission" entry of each changed invoice is deleted through the ORM and posted again on its
 date, and for a voided invoice the commission part of its "invoice_void" reversal too, on the reversal's date.
+
+**Forfeited deposits (1.22)** are shared like a service of their line: at the forfeit the line's treasury of that
+month and the deposit's staff member's share are kept on the deposit (`forfeit_line_id`, `treasury_bp/amount`,
+`commission_percent/amount`) and the share is booked 5200/2200 on the forfeit's date (`forfeit_commission`); a new
+rate for that month books them again (`accounting.repost_forfeit_commissions`). Forfeits from before 1.22
+(`treasury_bp` NULL) stay all the salon's. `reports.staff_shares`: revenue + forfeits = treasury + staff + salon.
+
+**Staff and employees' money (1.22, `services/staffpay.py`).** 2200 per `staff_id` is what we owe each person (minus:
+they owe us). Practitioners earn their share (commission, forfeit share); employees (`Staff.kind = "employee"`, no
+line, no percent) earn the month's salary when it is entered (`SalaryAccrual`, an expense of that month, dated now or
+at the month's last moment). Advances during the month and the month-end settlement are `StaffPayout` rows (month it
+is for: jy/jm); a payout entered by mistake is voided on its own date. `staffpay.statement` = owed at the start +
+earned - given = owed at the end, and what was paid for that month after it ended. Payouts booked before 1.22 (an
+entry whose ref_id was the staff id) get their row at start (`backfill_payouts`). A payout receipt (picture or text)
+is read by `services/payout_receipt.py` to fill the form (nothing is booked by it); its picture is kept under
+`data/receipts/staff/<sha256>`. The capital page shows people who owe us as an asset, not as less owed to the others.
+
+**Expenses in the reports** (summary, daily series, by category) come from the ledger 51xx (`reports.expense_rows`),
+so salaries and voided expenses agree with the profit.
 
 **Profit** on the dashboard and the capital page comes from the ledger (`capital.profit_breakdown`): every revenue (41xx, 42xx, 48xx, 49xx) minus every expense (51xx expenses, 52xx staff share, 53xx cash differences, 54xx COGS, 55xx stock shortages) dated in the period. **Net worth** (`capital.position`) = assets - liabilities = capital 3100 + opening 3200 + profit to date; the page shows how it changed: worth at the start + put in - taken out + profit (+ openings entered) = worth now.
 
