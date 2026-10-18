@@ -144,7 +144,7 @@ def preview(db: Session, line_id: int, jy: int, jm: int, bp: int) -> dict:
     plan = _plan(db, line_id, jy, jm, bp)
     s, _ = month_range(jy, jm)
     per: dict[int, dict] = {}
-    elsewhere: dict[tuple[int, int], int] = defaultdict(int)
+    elsewhere: dict[tuple[int, int], dict] = defaultdict(lambda: {"change": 0, "treasury_change": 0})
     revenue = t_before = t_after = 0
     for p in plan:
         it = p["item"]
@@ -155,8 +155,12 @@ def preview(db: Session, line_id: int, jy: int, jm: int, bp: int) -> dict:
         revenue += k * it.net_amount
         t_before += k * (it.treasury_amount or 0)
         t_after += k * p["treasury"]
-        if p["returned_at"] is not None and not returned_here and d:
-            elsewhere[jmonth_of(p["returned_at"])] -= d
+        dt = p["treasury"] - (it.treasury_amount or 0)
+        if p["returned_at"] is not None and not returned_here and (d or dt):
+            # returned in a later month: that return takes back the new amounts there
+            w = elsewhere[jmonth_of(p["returned_at"])]
+            w["change"] -= d
+            w["treasury_change"] -= dt
         if not it.staff_id:
             continue
         r = per.setdefault(it.staff_id, {"staff_id": it.staff_id, "before": 0, "after": 0, "balance_change": 0})
@@ -179,7 +183,7 @@ def preview(db: Session, line_id: int, jy: int, jm: int, bp: int) -> dict:
             "own": bool(row and (row.jy, row.jm) == (jy, jm)), "inherited_from": [row.jy, row.jm] if row and (row.jy, row.jm) != (jy, jm) else None,
             "revenue": revenue, "treasury_before": t_before, "treasury_after": t_after,
             "invoices": len({p["invoice"].id for p in plan if p["new_c"] != p["old_c"] or (p["item"].treasury_amount or 0) != p["treasury"]}),
-            "staff": staff_rows, "returns_elsewhere": [{"jy": y, "jm": m, "change": v} for (y, m), v in sorted(elsewhere.items()) if v],
+            "staff": staff_rows, "returns_elsewhere": [{"jy": y, "jm": m, **v} for (y, m), v in sorted(elsewhere.items()) if v["change"] or v["treasury_change"]],
             "needs_confirm": any(x["paid_since"] > 0 for x in touched) or any(x["balance_after"] < 0 for x in touched),
             "later_kept": _later_months_to_keep(db, line_id, jy, jm, old_bp)}
 
@@ -239,7 +243,8 @@ def save(db: Session, line_id: int, jy: int, jm: int, bp: int, expected_bp: int 
         "month": f"{jy}/{jm:02d}", "old_bp": pv["old_bp"], "new_bp": bp, "invoices": len(changed),
         "kept": [f"{k['jy']}/{k['jm']:02d}={k['bp']}" for k in pv["later_kept"]],
         "staff": {str(x["staff_id"]): x["change"] for x in pv["staff"] if x["change"]},
-        "returns_elsewhere": {f"{x['jy']}/{x['jm']:02d}": x["change"] for x in pv["returns_elsewhere"]}}, user=user)
+        "returns_elsewhere": {f"{x['jy']}/{x['jm']:02d}": [x["change"], x["treasury_change"]] for x in pv["returns_elsewhere"]}},
+          user=user)
     return {**pv, "invoices": len(changed)}
 
 

@@ -180,6 +180,9 @@ def test_returns_take_back_exactly_what_was_given(client, accounts):
     for inv, mode in zip(gone, ("cancel", "refund", "deposit")):
         assert client.post(f"/api/invoices/{inv['id']}/void", params={"payments": mode, "reason": "خزانه"}).status_code == 200
     bal0 = balance(client, person)
+    pv = client.post("/api/treasury/preview", json={"line_id": line["id"], "jy": PREV[0], "jm": PREV[1], "rate_bp": 4000}).json()
+    # the two returns made this month take back the new amounts: shown before saving
+    assert pv["returns_elsewhere"] == [{"jy": CUR[0], "jm": CUR[1], "change": 800_000, "treasury_change": -1_600_000}]
     assert put_rate(client, line, PREV, 4000).status_code == 200
     prev, cur = line_row(month_report(client, PREV), line), line_row(month_report(client, CUR), line)
     # last month: the kept invoice and the two returned later (sold then); the cancelled one never happened

@@ -6,8 +6,8 @@ import { cmoney, daysAgo, isoDate, money, num } from "../lib/format";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
 import { J_MONTHS, faDigits, toJalali } from "../lib/jalali";
 
-const RANGES = { month: "ماهانه", "1": "امروز", "7": "۷ روز", "30": "۳۰ روز", "90": "۳ ماه", "365": "یک سال" } as const;
-type Range = keyof typeof RANGES;
+const RANGES = [["month", "ماهانه"], ["1", "امروز"], ["7", "۷ روز"], ["30", "۳۰ روز"], ["90", "۳ ماه"], ["365", "یک سال"]] as const;
+type Range = (typeof RANGES)[number][0];
 type YM = [number, number];
 
 const thisMonth = (): YM => {
@@ -22,23 +22,24 @@ const step = ([jy, jm]: YM, by: number): YM => {
 const monthName = ([jy, jm]: YM) => `${J_MONTHS[jm - 1]} ${faDigits(jy)}`;
 /** hundredths of a percent -> «۴۲٫۵٪» */
 const pct = (bp: number) => `${faDigits(String(+(bp / 100).toFixed(2))).replace(".", "٫")}٪`;
-/** what the user typed («۴۲٫۵», "42.5", "42/5") -> hundredths of a percent, or null */
+/** what the user typed («۴۲٫۵», "42.5", "42/5", «٤٢») -> hundredths of a percent, or null */
 const parseBp = (s: string): number | null => {
-  const t = s.replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))).replace(/[٫/,]/g, ".").replace(/[٪%\s]/g, "");
-  if (!/^\d{1,3}(\.\d{0,2})?$/.test(t)) return null;
+  const t = s.replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))).replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
+    .replace(/[٫/,]/g, ".").replace(/[٪%\s]/g, "");
+  if (!/^(\d{1,3}(\.\d{0,2})?|\.\d{1,2})$/.test(t)) return null;
   const bp = Math.round(parseFloat(t) * 100);
   return bp >= 0 && bp <= 10000 ? bp : null;
 };
 
-function Payout({ row, month, onDone }: { row: any; month: YM | null; onDone: () => void }) {
+function Payout({ row, onDone }: { row: any; onDone: () => void }) {
   const toast = useToast();
   const accounts = useApi<any[]>("/api/accounts").data ?? [];
   const [amount, setAmount] = useState(Math.max(0, row.balance));
   const [acc, setAcc] = useState(0);
-  const [desc, setDesc] = useState(month ? `تسویه ${monthName(month)}` : "");
+  const [desc, setDesc] = useState("");
   return (
     <div className="space-y-3">
-      <div className="rounded-2xl bg-violet-500/10 p-3 text-sm">مانده قابل پرداخت به <b>{row.name}</b>: <b className="num">{money(row.balance)}</b></div>
+      <div className="rounded-2xl bg-violet-500/10 p-3 text-sm">مانده قابل پرداخت به <b>{row.name}</b> تا امروز (همهٔ ماه‌ها): <b className="num">{money(row.balance)}</b></div>
       <Field label="مبلغ پرداخت"><MoneyInput value={amount} onChange={setAmount} /></Field>
       <Field label="پرداخت از">
         <select className="input" value={acc || accounts[0]?.id || 0} onChange={(e) => setAcc(Number(e.target.value))}>
@@ -65,6 +66,7 @@ function RateEditor({ rate, month, onDone }: { rate: any; month: YM; onDone: () 
   const [pv, setPv] = useState<any>(null);
   const [ok, setOk] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [refresh, setRefresh] = useState(0); // asked again after the server refused (paid meanwhile / changed meanwhile)
   useEffect(() => {
     setPv(null);
     setOk(false);
@@ -75,8 +77,9 @@ function RateEditor({ rate, month, onDone }: { rate: any; month: YM; onDone: () 
         .then((r) => { if (alive) setPv(r); }).catch((e: any) => { if (alive) toast(e.message, "error"); });
     }, 300);
     return () => { alive = false; clearTimeout(t); };
-  }, [text]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [text, refresh]); // eslint-disable-line react-hooks/exhaustive-deps
   const touched = pv?.staff?.filter((s: any) => s.change || s.balance_after !== s.balance) ?? [];
+  const changedMeanwhile = pv && pv.old_bp !== rate.bp; // someone else saved this month since the page was opened
   return (
     <div className="space-y-4">
       <div className="rounded-2xl bg-violet-500/10 p-3 text-sm leading-7">
@@ -99,7 +102,7 @@ function RateEditor({ rate, month, onDone }: { rate: any; month: YM; onDone: () 
           </div>
           {pv.staff.length > 0 && (
             <table className="table text-xs">
-              <thead><tr><th>پرسنل</th><th>سهم این ماه (الان)</th><th>سهم بعد از تغییر</th><th>تفاوت</th><th>مانده بعد</th></tr></thead>
+              <thead><tr><th>پرسنل</th><th>سهم از فاکتورهای این ماه (الان)</th><th>بعد از تغییر</th><th>تفاوت</th><th>مانده بعد</th></tr></thead>
               <tbody>{pv.staff.map((s: any) => (
                 <tr key={s.staff_id}><td className="font-semibold">{s.name}</td><td className="num">{money(s.before)}</td><td className="num">{money(s.after)}</td>
                   <td className={`num font-semibold ${s.change < 0 ? "text-rose-600" : s.change > 0 ? "text-emerald-600" : ""}`}>{s.change ? money(s.change) : "—"}</td>
@@ -107,8 +110,9 @@ function RateEditor({ rate, month, onDone }: { rate: any; month: YM; onDone: () 
               ))}</tbody>
             </table>
           )}
-          {pv.later_kept?.length > 0 && <p className="rounded-xl bg-sky-500/10 p-2 text-xs leading-6">ماه‌های بعدی که فاکتور دارند ({pv.later_kept.map((k: any) => monthName([k.jy, k.jm])).join("، ")}) با همان درصدی که با آن حساب شده‌اند ({pct(pv.old_bp)}) می‌مانند؛ اگر لازم است، درصد آن‌ها را جدا تعیین کنید.</p>}
-          {pv.returns_elsewhere?.length > 0 && <p className="rounded-xl bg-amber-500/10 p-2 text-xs leading-6">چند فاکتور این ماه در ماه بعد برگشت خورده‌اند؛ برگشت آن‌ها هم با سهم تازه حساب می‌شود ({pv.returns_elsewhere.map((r: any) => `${monthName([r.jy, r.jm])}: ${money(r.change)}`).join("، ")}).</p>}
+          {pv.later_kept?.length > 0 && <p className="rounded-xl bg-sky-500/10 p-2 text-xs leading-6">ماه‌های بعدی که فاکتور دارند ({pv.later_kept.map((k: any) => monthName([k.jy, k.jm])).join("، ")}) با همان درصدی که با آن حساب شده‌اند ({pct(pv.old_bp)}) می‌مانند و فاکتورهای تازهٔ آن ماه‌ها هم با همین درصد حساب می‌شوند، نه با درصد تازه؛ درصد آن ماه‌ها را جدا تعیین کنید.</p>}
+          {pv.returns_elsewhere?.length > 0 && <p className="rounded-xl bg-amber-500/10 p-2 text-xs leading-6">چند فاکتور این ماه در ماه‌های بعد برگشت خورده‌اند؛ برگشت آن‌ها هم با مبالغ تازه حساب می‌شود، پس ارقام آن ماه‌ها هم کمی عوض می‌شود ({pv.returns_elsewhere.map((r: any) => `${monthName([r.jy, r.jm])}: سهم پرسنل ${money(r.change)}، خزانه ${money(r.treasury_change)}`).join("؛ ")}).</p>}
+          {changedMeanwhile && <p className="rounded-xl bg-rose-500/10 p-2 text-xs leading-6">درصد خزانهٔ این ماه همین الان (احتمالاً از کامپیوتر یا صفحهٔ دیگری) عوض شده و الان {pct(pv.old_bp)} است. این پنجره را ببندید تا صفحه تازه شود، بعد دوباره باز کنید.</p>}
           {pv.needs_confirm && (
             <label className="flex items-start gap-2 rounded-xl bg-rose-500/10 p-3 text-xs leading-6">
               <input type="checkbox" className="mt-1" checked={ok} onChange={(e) => setOk(e.target.checked)} />
@@ -121,13 +125,16 @@ function RateEditor({ rate, month, onDone }: { rate: any; month: YM; onDone: () 
           )}
         </div>
       )}
-      <button className="btn btn-primary w-full py-3" disabled={bp === null || !pv || pv.new_bp !== bp || busy || (pv.needs_confirm && !ok)} onClick={async () => {
+      <button className="btn btn-primary w-full py-3" disabled={bp === null || !pv || pv.new_bp !== bp || changedMeanwhile || busy || (pv.needs_confirm && !ok)} onClick={async () => {
         setBusy(true);
         try {
-          const r = await api("/api/treasury", { method: "PUT", body: { line_id: rate.line_id, jy: month[0], jm: month[1], rate_bp: bp, expected_bp: pv.old_bp, confirm: ok } });
+          const r = await api("/api/treasury", { method: "PUT", body: { line_id: rate.line_id, jy: month[0], jm: month[1], rate_bp: bp, expected_bp: rate.bp, confirm: ok } });
           toast(`خزانهٔ ${rate.name} در ${monthName(month)}: ${pct(bp!)}${r.invoices ? ` - ${num(r.invoices)} فاکتور دوباره حساب شد` : ""}`);
           onDone();
-        } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
+        } catch (e: any) {
+          toast(e.message, "error");
+          if (e.status === 409) setRefresh((n) => n + 1); // show what changed (and the confirmation, if now needed)
+        } finally { setBusy(false); }
       }}>ذخیره</button>
     </div>
   );
@@ -135,38 +142,53 @@ function RateEditor({ rate, month, onDone }: { rate: any; month: YM; onDone: () 
 
 export default function StaffShares() {
   const { user } = useAuth();
+  const allowed = can(user, "reports"); // money of the staff: owner, admin, accountant
   const [range, setRange] = useState<Range>("month");
   const [month, setMonth] = useState<YM>(thisMonth());
   const isMonth = range === "month";
   const start = range === "1" ? isoDate(new Date()) : isMonth ? "" : daysAgo(Number(range) - 1);
-  const { data, reload } = useApi<any>(isMonth ? `/api/reports/staff-shares?jy=${month[0]}&jm=${month[1]}` : `/api/reports/staff-shares?start=${start}&end=${isoDate(new Date())}`, [range, month[0], month[1]]);
-  const rates = useApi<any>(isMonth ? `/api/treasury?jy=${month[0]}&jm=${month[1]}` : null, [range, month[0], month[1]]);
+  const { data, reload } = useApi<any>(!allowed ? null : isMonth ? `/api/reports/staff-shares?jy=${month[0]}&jm=${month[1]}` : `/api/reports/staff-shares?start=${start}&end=${isoDate(new Date())}`, [range, month[0], month[1]]);
+  const rates = useApi<any>(allowed && isMonth ? `/api/treasury?jy=${month[0]}&jm=${month[1]}` : null, [range, month[0], month[1]]);
   const [payout, setPayout] = useState<any>(null);
   const [editing, setEditing] = useState<any>(null);
   const t = data?.totals;
   const cur = thisMonth();
   const atCurrent = month[0] === cur[0] && month[1] === cur[1];
   const rateOf = (lineId: number | null) => rates.data?.lines?.find((r: any) => r.line_id === lineId);
-  const unset = isMonth && atCurrent ? (rates.data?.lines ?? []).filter((r: any) => !r.own || r.source === "auto") : [];
+  const thisMonthRates = isMonth && atCurrent ? (rates.data?.lines ?? []) : [];
+  const inherited = thisMonthRates.filter((r: any) => !r.own); // no rate of its own: the line's latest earlier one
+  const kept = thisMonthRates.filter((r: any) => r.own && r.source === "auto"); // kept at what its invoices used
   const mayEdit = can(user, "settings");
   const reloadAll = () => { reload(); rates.reload(); };
+  if (!allowed) return (
+    <div className="space-y-5">
+      <PageHeader title="پرسنل و سهم‌ها" icon={<UsersRound size={22} />} />
+      <Empty text="این صفحه (درآمد و سهم پرسنل) فقط برای مدیر و حسابدار است." />
+    </div>
+  );
   return (
     <div className="space-y-5">
       <PageHeader title="پرسنل و سهم‌ها" subtitle="درآمد هر پرسنل و هر لاین، خزانهٔ ماه، سهم پرسنل، سهم سالن و تسویه با پرسنل" icon={<UsersRound size={22} />}
-        actions={<Tabs value={range} onChange={setRange} items={Object.entries(RANGES).map(([value, label]) => ({ value: value as Range, label }))} />} />
+        actions={<Tabs value={range} onChange={setRange} items={RANGES.map(([value, label]) => ({ value, label }))} />} />
       {isMonth && (
-        <div className="flex items-center justify-center gap-2">
+        <div className="flex flex-wrap items-center justify-center gap-2">
           <button className="btn btn-sm" onClick={() => setMonth(step(month, -1))} title="ماه قبل"><ChevronRight size={16} />ماه قبل</button>
-          <div className="min-w-40 rounded-2xl px-4 py-2 text-center text-lg font-bold" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>{monthName(month)}</div>
+          <div className="min-w-32 rounded-2xl sm:min-w-40 px-4 py-2 text-center text-lg font-bold" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>{monthName(month)}</div>
           <button className="btn btn-sm" disabled={atCurrent} onClick={() => setMonth(step(month, 1))} title="ماه بعد">ماه بعد<ChevronLeft size={16} /></button>
           {!atCurrent && <button className="btn btn-sm" onClick={() => setMonth(cur)}>این ماه</button>}
         </div>
       )}
-      {unset.length > 0 && (
-        <div className="rounded-2xl bg-amber-500/10 p-3 text-sm leading-7 text-amber-800 dark:text-amber-200">
-          درصد خزانهٔ این ماه برای {unset.map((r: any) => `«${r.name}»`).join("، ")} هنوز تعیین نشده؛ فعلاً درصد ماه قبلِ همان لاین به کار می‌رود
-          {unset.some((r: any) => r.bp) ? ` (${unset.filter((r: any) => r.bp).map((r: any) => `${r.name}: ${pct(r.bp)}`).join("، ")}؛ بقیه ۰٪)` : " (۰٪)"}.
-          {mayEdit && " در جدول «خزانه و تقسیم سهم»، دکمهٔ مداد کنار هر لاین را بزنید."}
+      {(inherited.length > 0 || kept.length > 0) && (
+        <div className="space-y-1 rounded-2xl bg-amber-500/10 p-3 text-sm leading-7 text-amber-800 dark:text-amber-200">
+          {inherited.length > 0 && <div>
+            درصد خزانهٔ این ماه برای {inherited.map((r: any) => `«${r.name}»`).join("، ")} هنوز تعیین نشده؛ فعلاً این درصد به کار می‌رود:{" "}
+            {inherited.map((r: any) => `${r.name} ${pct(r.bp)} (${r.from ? `از ${monthName(r.from)}` : "هیچ ماهی تعیین نشده"})`).join("، ")}.
+          </div>}
+          {kept.length > 0 && <div>
+            درصد این ماه برای {kept.map((r: any) => `«${r.name}» (${pct(r.bp)})`).join("، ")} همان درصدی است که فاکتورهای این ماه قبلاً با آن حساب شده بودند، نه درصد تازهٔ ماه قبل؛
+            فاکتورهای تازه هم با همین درصد حساب می‌شوند تا درصد این ماه را تعیین کنید.
+          </div>}
+          {mayEdit && <div>در جدول «خزانه و تقسیم سهم»، دکمهٔ مداد کنار هر لاین را بزنید.</div>}
         </div>
       )}
       {!data ? <Loading /> : (
@@ -180,7 +202,7 @@ export default function StaffShares() {
             <Stat label="سهم سالن (مدیریت)" value={cmoney(t.salon_share)} tone="emerald"
               hint={t.forfeits ? `به‌علاوهٔ ${cmoney(t.forfeits)} بیعانهٔ سوخت‌شده` : undefined}
               help="درآمد منهای خزانه و منهای سهم پرسنل. خزانه + سهم پرسنل + سهم سالن = درآمد خدمات." />
-            <Stat label="مانده بدهی به پرسنل" value={cmoney(t.balance)} hint={`پرداخت‌شده در دوره: ${cmoney(t.paid)}`} tone="sky" />
+            <Stat label="مانده بدهی به پرسنل (تا امروز)" value={cmoney(t.balance)} hint={`پرداخت‌شده در دوره: ${cmoney(t.paid)}`} tone="sky" />
           </div>
           <Card title={isMonth ? `خزانه و تقسیم سهم - ${monthName(month)}` : "به تفکیک لاین"} pad={false}
             actions={<HelpTip title="خزانه چیست؟">برای هر لاین و هر ماه: اول «درصد خزانه» از درآمد خدمات برداشته می‌شود. باقیمانده با درصد هر پرسنل بین پرسنل و سالن تقسیم می‌شود. مثال: درآمد ۱۰۰ میلیون، خزانه ۴۲٪ = ۴۲ میلیون، باقیمانده ۵۸ میلیون؛ پرسنل ۳۰٪ = ۱۷٫۴ میلیون، سالن ۴۰٫۶ میلیون.</HelpTip>}>
@@ -216,7 +238,7 @@ export default function StaffShares() {
               </table>
             </div>
             <p className="muted px-5 py-3 text-xs leading-6">
-              خزانه + سهم پرسنل + سهم سالن = درآمد خدمات (تا آخرین ریال). بیعانهٔ مشتری‌ای که نیامد، درآمد همان لاین است و همه‌اش سهم سالن است (پرسنل از آن سهمی ندارد و خزانه هم از آن برداشته نمی‌شود).
+              خزانه + سهم پرسنل + سهم سالن = درآمد خدمات (در دفاتر تا آخرین ریال یکی است؛ اعداد جدول به تومان گرد شده‌اند و ممکن است ۱ تومان اختلاف دیده شود). بیعانهٔ مشتری‌ای که نیامد، درآمد همان لاین است و همه‌اش سهم سالن است (پرسنل از آن سهمی ندارد و خزانه هم از آن برداشته نمی‌شود).
               {isMonth && mayEdit && " درصد خزانهٔ ماه‌های گذشته را هم می‌توانید عوض کنید؛ قبل از ذخیره نشان می‌دهد سهم هر پرسنل چقدر عوض می‌شود."}
             </p>
           </Card>
@@ -224,7 +246,7 @@ export default function StaffShares() {
             <div className="overflow-x-auto">
               {data.staff.length === 0 ? <Empty text="پرسنلی ثبت نشده؛ از تنظیمات ← پرسنل و کاربران اضافه کنید" /> : (
                 <table className="table">
-                  <thead><tr><th>پرسنل</th><th>لاین</th><th>درصد</th><th>تعداد خدمت</th><th>درآمد</th><th>خزانه</th><th>سهم پرسنل</th><th>سهم سالن</th><th>پرداخت در دوره</th><th>مانده</th><th></th></tr></thead>
+                  <thead><tr><th>پرسنل</th><th>لاین</th><th>درصد</th><th>تعداد خدمت</th><th>درآمد</th><th>خزانه</th><th>سهم پرسنل</th><th>سهم سالن</th><th>پرداخت در دوره</th><th>مانده تا امروز</th><th></th></tr></thead>
                   <tbody>{data.staff.map((r: any) => (
                     <tr key={r.staff_id ?? 0} className={r.staff_id ? "" : "text-amber-700 dark:text-amber-300"}>
                       <td className="font-semibold">{r.name}{r.active === false && <span className="badge mr-2 bg-slate-500/15 text-[10px] text-slate-500" title="این پرسنل غیرفعال شده ولی هنوز با او حساب داریم">غیرفعال</span>}</td><td className="muted">{r.line ?? "—"}</td>
@@ -244,9 +266,9 @@ export default function StaffShares() {
         </>
       )}
       <Modal open={!!payout} onClose={() => setPayout(null)} title="تسویه با پرسنل">
-        {payout && <Payout row={payout} month={isMonth ? month : null} onDone={() => { setPayout(null); reload(); }} />}
+        {payout && <Payout row={payout} onDone={() => { setPayout(null); reload(); }} />}
       </Modal>
-      <Modal open={!!editing} onClose={() => setEditing(null)} title="درصد خزانهٔ ماه" wide>
+      <Modal open={!!editing} onClose={() => { setEditing(null); rates.reload(); }} title="درصد خزانهٔ ماه" wide>
         {editing && <RateEditor rate={editing} month={month} onDone={() => { setEditing(null); reloadAll(); }} />}
       </Modal>
     </div>
