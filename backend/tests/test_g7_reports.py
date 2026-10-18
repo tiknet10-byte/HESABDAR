@@ -195,7 +195,8 @@ def test_g7_staff_shares_services_only_and_forfeits_per_line(client, accounts, s
     assert rep["totals"]["salon_share"] - rep0["totals"]["salon_share"] == 6_000_000
     mine = staff_row(rep, person["id"])
     assert (mine["revenue"], mine["staff_share"], mine["salon_share"]) == (10_000_000, 4_000_000, 6_000_000)
-    # a forfeited deposit of this line: the line's own income (all the salon's), shown on its row
+    # a forfeited deposit of this line: the line's own income, shared like its services (1.22): the only staff member
+    # of the line is the deposit's, so 40% of it is theirs
     dep = client.post("/api/deposits", json={"customer_name": "غایب G7 سهم", "customer_mobile": "09151070007", "amount": 1_500_000,
                                              "payment_account_id": accounts["صندوق نقدی"], "service_id": svc["id"]}).json()
     assert client.post(f"/api/deposits/{dep['id']}/close", json={"action": "forfeit"}).status_code == 200
@@ -203,6 +204,9 @@ def test_g7_staff_shares_services_only_and_forfeits_per_line(client, accounts, s
     lr = next(x for x in rep2["lines"] if x["line_id"] == line["id"])
     assert lr["forfeits"] == 1_500_000 and lr["revenue"] == 10_000_000
     assert rep2["totals"]["forfeits"] - rep["totals"]["forfeits"] == 1_500_000
+    mine2 = staff_row(rep2, person["id"])
+    assert (mine2["forfeits"], mine2["staff_share"], mine2["salon_share"]) == (1_500_000, 4_600_000, 6_900_000)
+    assert lr["revenue"] + lr["forfeits"] == lr["treasury"] + lr["staff_share"] + lr["salon_share"]
 
 
 def test_g7_inactive_staff_still_owed_is_listed(client, accounts):
@@ -216,8 +220,15 @@ def test_g7_inactive_staff_still_owed_is_listed(client, accounts):
     rep = shares(client, TODAY - timedelta(days=6), TODAY)
     row = next(r for r in rep["staff"] if r["staff_id"] == person["id"])
     assert row["balance"] == 3_000_000 and row["active"] is False and row["revenue"] == 0
-    # the total owed to staff = the ledger (2200)
-    owed = ledger(("2200",), date(2000, 1, 1), TODAY)
+    # the total owed to staff = the ledger (2200), less what is owed to the clinic's employees (their own page)
+    from app.models import JournalLine, LedgerAccount, Staff
+
+    with _db() as db:
+        employees = int(db.scalar(select(func.coalesce(func.sum(JournalLine.credit - JournalLine.debit), 0))
+                                  .join(LedgerAccount, LedgerAccount.id == JournalLine.account_id)
+                                  .where(LedgerAccount.code == "2200",
+                                         JournalLine.staff_id.in_(select(Staff.id).where(Staff.kind == "employee")))) or 0)
+    owed = ledger(("2200",), date(2000, 1, 1), TODAY) - employees
     assert rep["totals"]["balance"] == owed
 
 

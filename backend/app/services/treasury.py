@@ -9,6 +9,9 @@ staff share = (net - treasury) x the staff member's percent (as before), salon s
 commission in the books (5200 / 2200), so the profit and every report follow the ledger; the treasury and the salon
 share are both the salon's (revenue 41xx stays whole, no account of its own).
 
+A forfeited deposit (بیعانهٔ سوخت‌شده) is income of its line like a service (1.22): the same treasury and staff share
+on the day it was forfeited (kept on the deposit; forfeits from before 1.22 stay all the salon's).
+
 Changing a month's rate later books that month's rows again - only that month (later months that used the old rate
 keep it: they get a row of their own first). The commission entry of each changed invoice is posted again on its own
 date, and for a returned invoice the commission part of its return too, so a return takes back exactly what was given.
@@ -21,7 +24,7 @@ from datetime import date, datetime
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import Invoice, InvoiceItem, JournalEntry, JournalLine, ServiceLine, Staff, TreasuryRate, local_now
+from ..models import Deposit, Invoice, InvoiceItem, JournalEntry, JournalLine, ServiceLine, Staff, TreasuryRate, local_now
 from .jalali import jmonth_of, month_range, next_month
 
 BP = 10_000  # 100.00%
@@ -82,6 +85,16 @@ def _month_items(db: Session, line_id: int, jy: int, jm: int) -> list[tuple[Invo
                            .order_by(Invoice.id, InvoiceItem.id)).all())
 
 
+def _month_forfeits(db: Session, line_id: int | None, jy: int, jm: int):  # noqa: ANN202
+    """The line's deposits forfeited in the month and shared like its services (forfeits from before 1.22 are not)."""
+    s, e = month_range(jy, jm)
+    q = select(Deposit).where(Deposit.status == "forfeited", Deposit.treasury_bp.is_not(None), Deposit.closed_at >= s,
+                              Deposit.closed_at < e)
+    if line_id is not None:
+        q = q.where(Deposit.forfeit_line_id == line_id)
+    return q
+
+
 def _undo_dates(db: Session, invoice_ids: list[int]) -> dict[int, datetime]:
     """When each voided invoice was taken back in the books (as the reports date it)."""
     if not invoice_ids:
@@ -111,6 +124,15 @@ def _plan(db: Session, line_id: int, jy: int, jm: int, bp: int) -> list[dict]:
     return out
 
 
+def _plan_forfeits(db: Session, line_id: int, jy: int, jm: int, bp: int) -> list[dict]:
+    out = []
+    for dep in db.scalars(_month_forfeits(db, line_id, jy, jm).order_by(Deposit.id)):
+        t = pct_bp(dep.amount, bp)
+        new_c = commission_of(dep.amount - t, dep.commission_percent) if dep.commission_percent else 0
+        out.append({"deposit": dep, "treasury": t, "old_c": dep.commission_amount or 0, "new_c": new_c})
+    return out
+
+
 def _payouts_since(db: Session, staff_ids: list[int], since: datetime) -> dict[int, int]:
     from .accounting import STAFF_PAYABLE, account
 
@@ -118,7 +140,8 @@ def _payouts_since(db: Session, staff_ids: list[int], since: datetime) -> dict[i
         return {}
     payable = account(db, STAFF_PAYABLE)
     return {k: int(v or 0) for k, v in db.execute(
-        select(JournalLine.staff_id, func.sum(JournalLine.debit)).join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+        select(JournalLine.staff_id, func.sum(JournalLine.debit - JournalLine.credit))
+        .join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
         .where(JournalLine.account_id == payable.id, JournalEntry.ref_type == "staff_payout", JournalEntry.at >= since,
                JournalLine.staff_id.in_(staff_ids)).group_by(JournalLine.staff_id)).all()}
 
@@ -168,6 +191,19 @@ def preview(db: Session, line_id: int, jy: int, jm: int, bp: int) -> dict:
         r["after"] += k * p["new_c"]
         if not p["void"]:
             r["balance_change"] += d  # a voided row's share and its return change together: nothing owed changes
+    forfeits = 0
+    fplan = _plan_forfeits(db, line_id, jy, jm, bp)
+    for p in fplan:  # forfeited deposits of the month: shared like its services
+        dep = p["deposit"]
+        forfeits += dep.amount
+        t_before += dep.treasury_amount or 0
+        t_after += p["treasury"]
+        if not dep.staff_id:
+            continue
+        r = per.setdefault(dep.staff_id, {"staff_id": dep.staff_id, "before": 0, "after": 0, "balance_change": 0})
+        r["before"] += p["old_c"]
+        r["after"] += p["new_c"]
+        r["balance_change"] += p["new_c"] - p["old_c"]
     from .accounting import staff_balance
 
     paid = _payouts_since(db, list(per), s)
@@ -181,7 +217,8 @@ def preview(db: Session, line_id: int, jy: int, jm: int, bp: int) -> dict:
     touched = [x for x in staff_rows if x["balance_change"]]
     return {"line_id": line_id, "line": line.name, "jy": jy, "jm": jm, "old_bp": old_bp, "new_bp": int(bp),
             "own": bool(row and (row.jy, row.jm) == (jy, jm)), "inherited_from": [row.jy, row.jm] if row and (row.jy, row.jm) != (jy, jm) else None,
-            "revenue": revenue, "treasury_before": t_before, "treasury_after": t_after,
+            "revenue": revenue, "forfeits": forfeits, "treasury_before": t_before, "treasury_after": t_after,
+            "forfeits_changed": sum(1 for p in fplan if p["new_c"] != p["old_c"] or (p["deposit"].treasury_amount or 0) != p["treasury"]),
             "invoices": len({p["invoice"].id for p in plan if p["new_c"] != p["old_c"] or (p["item"].treasury_amount or 0) != p["treasury"]}),
             "staff": staff_rows, "returns_elsewhere": [{"jy": y, "jm": m, **v} for (y, m), v in sorted(elsewhere.items()) if v["change"] or v["treasury_change"]],
             "needs_confirm": any(x["paid_since"] > 0 for x in touched) or any(x["balance_after"] < 0 for x in touched),
@@ -190,7 +227,7 @@ def preview(db: Session, line_id: int, jy: int, jm: int, bp: int) -> dict:
 
 def _later_months_to_keep(db: Session, line_id: int, jy: int, jm: int, old_bp: int) -> list[dict]:
     """Later months (up to this month) that take their rate from this one or an earlier one and already have invoices
-    of the line: they keep the rate their invoices were booked with. Those without invoices take the new rate."""
+    (or forfeited deposits) of the line: they keep the rate their invoices were booked with. Those without invoices take the new rate."""
     out = []
     cur = jmonth_of(local_now())
     own = {(r.jy, r.jm) for r in db.scalars(select(TreasuryRate).where(TreasuryRate.line_id == line_id))}
@@ -198,7 +235,8 @@ def _later_months_to_keep(db: Session, line_id: int, jy: int, jm: int, old_bp: i
     while (y, m) <= cur and (y, m) not in own:
         s, e = month_range(y, m)
         if db.scalar(select(InvoiceItem.id).join(Invoice, Invoice.id == InvoiceItem.invoice_id).where(
-                InvoiceItem.line_id == line_id, Invoice.issued_at >= s, Invoice.issued_at < e).limit(1)) is not None:
+                InvoiceItem.line_id == line_id, Invoice.issued_at >= s, Invoice.issued_at < e).limit(1)) is not None \
+                or db.scalar(_month_forfeits(db, line_id, y, m).with_only_columns(Deposit.id).limit(1)) is not None:
             out.append({"jy": y, "jm": m, "bp": old_bp})
         y, m = next_month(y, m)
     return out
@@ -207,7 +245,7 @@ def _later_months_to_keep(db: Session, line_id: int, jy: int, jm: int, old_bp: i
 def save(db: Session, line_id: int, jy: int, jm: int, bp: int, expected_bp: int | None = None, confirm: bool = False,
          user=None) -> dict:  # noqa: ANN001
     """Set (line, month)'s rate and book that month's rows again. One transaction; the caller commits."""
-    from .accounting import repost_commissions
+    from .accounting import repost_commissions, repost_forfeit_commissions
     from .audit import audit, write_lock
 
     bp = int(bp)
@@ -237,10 +275,18 @@ def save(db: Session, line_id: int, jy: int, jm: int, bp: int, expected_bp: int 
         if p["new_c"] != (it.commission_amount or 0):
             it.commission_amount = p["new_c"]
             changed[p["invoice"].id] = p["invoice"]
+    forfeits_changed = []
+    for p in _plan_forfeits(db, line_id, jy, jm, bp):
+        dep = p["deposit"]
+        dep.treasury_bp, dep.treasury_amount = bp, p["treasury"]
+        if p["new_c"] != (dep.commission_amount or 0):
+            dep.commission_amount = p["new_c"]
+            forfeits_changed.append(dep)
     db.flush()
     repost_commissions(db, list(changed.values()))
+    repost_forfeit_commissions(db, forfeits_changed)
     audit(db, "treasury.set", "line", line_id, {
-        "month": f"{jy}/{jm:02d}", "old_bp": pv["old_bp"], "new_bp": bp, "invoices": len(changed),
+        "month": f"{jy}/{jm:02d}", "old_bp": pv["old_bp"], "new_bp": bp, "invoices": len(changed), "forfeits": len(forfeits_changed),
         "kept": [f"{k['jy']}/{k['jm']:02d}={k['bp']}" for k in pv["later_kept"]],
         "staff": {str(x["staff_id"]): x["change"] for x in pv["staff"] if x["change"]},
         "returns_elsewhere": {f"{x['jy']}/{x['jm']:02d}": [x["change"], x["treasury_change"]] for x in pv["returns_elsewhere"]}},
@@ -255,6 +301,7 @@ def month_rates(db: Session, jy: int, jm: int) -> list[dict]:
     used = {lid for (lid,) in db.execute(select(InvoiceItem.line_id).join(Invoice, Invoice.id == InvoiceItem.invoice_id)
                                          .where(Invoice.issued_at >= s, Invoice.issued_at < e, InvoiceItem.line_id.is_not(None))
                                          .distinct())}
+    used |= {lid for lid in db.scalars(_month_forfeits(db, None, jy, jm).with_only_columns(Deposit.forfeit_line_id).distinct()) if lid}
     out = []
     for line in lines:
         if not line.is_active and line.id not in used:

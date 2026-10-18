@@ -190,16 +190,15 @@ def default_staff_id(db: Session, service_id: int | None, staff_id: int | None =
 
 def pay_staff(db: Session, staff: Staff, amount: int, payment_account: PaymentAccount, paid_at: datetime | None = None,
               description: str = "", user=None) -> JournalEntry:
-    """Settle (part of) a staff member's earned commission."""
-    if amount <= 0:
-        raise AccountingError("مبلغ پرداخت باید مثبت باشد")
-    ensure_not_future(paid_at, "تاریخ پرداخت")
-    entry = post(db, f"پرداخت سهم {staff.full_name}" + (f" - {description}" if description else ""), [
-        Leg(account(db, STAFF_PAYABLE), debit=amount, staff_id=staff.id, line_id=staff.line_id),
-        Leg(cash_account_for(db, payment_account), credit=amount, staff_id=staff.id),
-    ], "staff_payout", staff.id, at=paid_at)
-    audit(db, "staff.payout", "staff", staff.id, {"amount": amount, "account": payment_account.id}, user=user)
-    return entry
+    """Settle (part of) a staff member's earned share (a StaffPayout of kind settlement, see services/staffpay)."""
+    from . import staffpay
+
+    try:
+        p = staffpay.pay(db, staff, amount, payment_account=payment_account, paid_at=paid_at, description=description,
+                         force=True, user=user)
+    except staffpay.PayError as exc:
+        raise AccountingError(str(exc)) from exc
+    return db.get(JournalEntry, p.entry_id)
 
 
 def staff_balance(db: Session, staff_id: int) -> int:
@@ -332,27 +331,71 @@ def close_deposit(db: Session, dep: Deposit, action: str, refund_account: Paymen
         raise AccountingError("این مبلغ اعتبار مشتری است (نه بیعانهٔ نوبت) و سوخت نمی‌شود؛ فقط می‌شود آن را پس داد یا در خرید بعدی استفاده کرد")
     if dep.status != "held" or not _claim(db, dep, "held", "refunded" if action == "refund" else "forfeited"):
         raise AccountingError("این بیعانه قبلاً تسویه شده است")
+    when = at or local_now()
     if action == "refund":
         pa = refund_account or db.get(PaymentAccount, dep.payment_account_id)
         post(db, "استرداد بیعانه", [
             Leg(account(db, DEPOSITS), debit=dep.amount, customer_id=dep.customer_id),
             Leg(cash_account_for(db, pa), credit=dep.amount, customer_id=dep.customer_id),
-        ], "deposit", dep.id, at=at)
+        ], "deposit", dep.id, at=when)
         dep.status = "refunded"
         dep.refund_account_id = pa.id
     elif action == "forfeit":
-        # a forfeited deposit is income of the line of its service (laser, skin...), booked under 48xx per line
+        # a forfeited deposit is income of the line of its service (laser, skin...), booked under 48xx per line, and
+        # shared like a service of that line: the line's treasury of the month first, then the staff member's share
         line_id = deposit_line_id(db, dep)
         post(db, "سوخت بیعانه (عدم مراجعه)", [
             Leg(account(db, DEPOSITS), debit=dep.amount, customer_id=dep.customer_id, line_id=line_id, staff_id=dep.staff_id),
             Leg(forfeit_account(db, line_id), credit=dep.amount, customer_id=dep.customer_id, line_id=line_id, staff_id=dep.staff_id),
-        ], "deposit", dep.id, at=at)
+        ], "deposit", dep.id, at=when)
         dep.status = "forfeited"
+        book_forfeit(db, dep, line_id, when)
     else:
         raise AccountingError("unknown action")
-    dep.closed_at = at or local_now()
+    dep.closed_at = when  # the same moment as its entry (the month of a forfeit is the month of its entry)
     audit(db, f"deposit.{action}", "deposit", dep.id, {"amount": dep.amount}, user=user)
     return dep
+
+
+def book_forfeit(db: Session, dep: Deposit, line_id: int | None, at: datetime) -> None:
+    """The shares of a forfeited deposit, as for a service row of its line (1.22): treasury = amount x the line's rate of
+    that month, the staff member's share = (amount - treasury) x their percent (booked 5200 / 2200 on the forfeit's
+    date), the salon's = the rest. Kept on the deposit, so a later change of the month's rate books it again."""
+    from .treasury import commission_of, effective_bp, pct_bp
+
+    person = db.get(Staff, dep.staff_id) if dep.staff_id else None
+    bp = effective_bp(db, line_id, at)
+    dep.forfeit_line_id = line_id
+    dep.treasury_bp, dep.treasury_amount = bp, pct_bp(dep.amount, bp)
+    dep.commission_percent = person.commission_percent if person is not None and (person.kind or "") != "employee" else None
+    dep.commission_amount = commission_of(dep.amount - dep.treasury_amount, dep.commission_percent) if dep.commission_percent else 0
+    _post_forfeit_commission(db, dep, at)
+
+
+def _post_forfeit_commission(db: Session, dep: Deposit, at: datetime) -> None:
+    if dep.staff_id and (dep.commission_amount or 0) > 0:
+        post(db, f"سهم پرسنل از بیعانهٔ سوخت‌شده #{dep.id}", [
+            Leg(account(db, COMMISSION), debit=dep.commission_amount, line_id=dep.forfeit_line_id, staff_id=dep.staff_id),
+            Leg(account(db, STAFF_PAYABLE), credit=dep.commission_amount, line_id=dep.forfeit_line_id, staff_id=dep.staff_id),
+        ], "forfeit_commission", dep.id, at=at)
+
+
+def repost_forfeit_commissions(db: Session, deposits: list[Deposit]) -> None:
+    """Book forfeited deposits' staff shares again (their month's treasury changed), each on its own date."""
+    if not deposits:
+        return
+    olds: dict[int, list[JournalEntry]] = {d.id: [] for d in deposits}
+    for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "forfeit_commission",
+                                                   JournalEntry.ref_id.in_(list(olds)))):
+        olds[e.ref_id].append(e)
+    plans = []
+    for dep in deposits:
+        plans.append((dep, min((e.at for e in olds[dep.id]), default=dep.closed_at)))
+        for e in olds[dep.id]:
+            db.delete(e)
+    db.flush()
+    for dep, at in plans:
+        _post_forfeit_commission(db, dep, at)
 
 
 def is_service(item: InvoiceItem) -> bool:
@@ -987,21 +1030,69 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payment
 
 
 # --------------------------------------------------------------------- expenses
+EXPENSE_DUPLICATE_WINDOW = timedelta(minutes=3)
+
+
+class DuplicateExpense(AccountingError):
+    """The same expense (category, amount, account) was entered a moment ago."""
+
+
+def expense_category(name: str | None) -> str:
+    """One spelling per category (Arabic ي/ك, extra spaces), so «پذيرايي» and «پذیرایی » are one account."""
+    text = (name or "").replace("ي", "ی").replace("ك", "ک")
+    return " ".join(text.split())[:64]
+
+
 def record_expense(db: Session, *, category: str, amount: int, payment_account: PaymentAccount,
-                   spent_at: datetime | None = None, description: str = "", staff_id: int | None = None, user=None) -> Expense:
+                   spent_at: datetime | None = None, description: str = "", staff_id: int | None = None, force: bool = False,
+                   user=None) -> Expense:
+    from .audit import write_lock
+
+    category = expense_category(category)
+    if not category:
+        raise AccountingError("دستهٔ هزینه را انتخاب کنید یا بنویسید")
     if amount <= 0:
         raise AccountingError("مبلغ هزینه باید مثبت باشد")
     ensure_not_future(spent_at, "تاریخ پرداخت هزینه")
+    if staff_id is not None and db.get(Staff, staff_id) is None:
+        raise AccountingError("شخص انتخاب‌شده پیدا نشد")
+    write_lock(db)  # a double click: the second one sees the first
+    if not force and db.scalar(select(Expense.id).where(
+            Expense.category == category, Expense.amount == amount, Expense.payment_account_id == payment_account.id,
+            Expense.voided_at.is_(None), Expense.created_at >= local_now() - EXPENSE_DUPLICATE_WINDOW).limit(1)):
+        raise DuplicateExpense("همین هزینه (همین دسته، مبلغ و حساب) چند لحظه پیش ثبت شد؛ اگر خرید جداگانه‌ای است، دوباره تأیید کنید")
     exp = Expense(category=category, amount=amount, payment_account_id=payment_account.id,
                   spent_at=spent_at or local_now(), description=description, staff_id=staff_id)
     db.add(exp)
     db.flush()
-    post(db, f"هزینه: {category}", [
-        Leg(expense_account(db, category), debit=amount),
+    post(db, (f"هزینه: {category}" + (f" - {description}" if description else ""))[:256], [
+        Leg(expense_account(db, category), debit=amount, staff_id=staff_id),
         Leg(cash_account_for(db, payment_account), credit=amount),
     ], "expense", exp.id, at=exp.spent_at)
     audit(db, "expense.create", "expense", exp.id, {"amount": amount, "category": category}, user=user)
     bus.emit("expense.created", {"id": exp.id, "amount": amount, "category": category}, db=db)
+    return exp
+
+
+def void_expense(db: Session, exp: Expense, reason: str = "", user=None) -> Expense:  # noqa: ANN001
+    """An expense entered by mistake (wrong amount, entered twice): reversed on its own date, as if it never happened."""
+    from sqlalchemy import update
+
+    db.flush()
+    now = local_now()
+    if exp.voided_at is not None or not db.execute(
+            update(Expense).where(Expense.id == exp.id, Expense.voided_at.is_(None)).values(voided_at=now)
+            .execution_options(synchronize_session=False)).rowcount:
+        raise AccountingError("این هزینه قبلاً باطل شده است")
+    exp.voided_at, exp.void_reason = now, (reason or "")[:256]
+    entry = db.scalar(select(JournalEntry).where(JournalEntry.ref_type == "expense", JournalEntry.ref_id == exp.id)
+                      .order_by(JournalEntry.id))
+    if entry is not None:
+        post(db, f"ابطال هزینه: {exp.category}" + (f" - {reason}" if reason else ""), [
+            Leg(db.get(LedgerAccount, ln.account_id), debit=ln.credit, credit=ln.debit, staff_id=ln.staff_id, line_id=ln.line_id)
+            for ln in entry.lines
+        ], "expense_void", exp.id, at=entry.at)
+    audit(db, "expense.void", "expense", exp.id, {"amount": exp.amount, "category": exp.category, "reason": reason}, user=user)
     return exp
 
 
@@ -1135,6 +1226,7 @@ REF_LABELS = {
     "purchase": "خرید محصول", "purchase_void": "ابطال خرید", "supplier_payment": "پرداخت به تأمین‌کننده",
     "stock_move": "گردش انبار (بهای تمام‌شده)", "stock_opening": "موجودی اول دورهٔ کالا",
     "capital": "سرمایهٔ مدیر", "capital_void": "ابطال سرمایه", "holding": "طلا و ارز", "holding_void": "ابطال طلا و ارز",
+    "forfeit_commission": "سهم پرسنل از بیعانهٔ سوخت‌شده", "salary": "حقوق کارمند", "expense_void": "ابطال هزینه",
 }
 
 
@@ -1192,8 +1284,16 @@ def _ref_details(db: Session, entries: list[JournalEntry]) -> dict[tuple[str, in
         if e.ref_id:
             ids.setdefault(e.ref_type, set()).add(e.ref_id)
     out: dict[tuple[str, int | None], str] = {}
-    for x in db.scalars(select(Expense).where(Expense.id.in_(ids.get("expense", set())))):
-        out[("expense", x.id)] = x.description or ""
+    for x in db.scalars(select(Expense).where(Expense.id.in_(ids.get("expense", set()) | ids.get("expense_void", set())))):
+        out[("expense", x.id)] = out[("expense_void", x.id)] = x.description or ""
+    for x in db.scalars(select(Deposit).where(Deposit.id.in_(ids.get("forfeit_commission", set())))):
+        out[("forfeit_commission", x.id)] = f"بیعانه #{x.id}"
+    from ..models import SalaryAccrual, StaffPayout
+
+    for x in db.scalars(select(StaffPayout).where(StaffPayout.id.in_(ids.get("staff_payout", set())))):
+        out[("staff_payout", x.id)] = "، ".join(t for t in (f"پیگیری {x.reference}" if x.reference else "", x.description) if t)
+    for x in db.scalars(select(SalaryAccrual).where(SalaryAccrual.id.in_(ids.get("salary", set())))):
+        out[("salary", x.id)] = x.description or ""
     for x in db.scalars(select(Payment).where(Payment.id.in_(ids.get("payment", set())))):
         out[("payment", x.id)] = f"پیگیری {x.reference}" if x.reference else ""
     for x in db.scalars(select(Deposit).where(Deposit.id.in_(ids.get("deposit", set()) | ids.get("deposit_apply", set())))):

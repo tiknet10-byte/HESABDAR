@@ -13,7 +13,6 @@ from ..models import (
     AuditLog,
     Customer,
     Deposit,
-    Expense,
     Invoice,
     InvoiceItem,
     JournalEntry,
@@ -156,6 +155,18 @@ def _profit(db: Session, s: datetime, e: datetime) -> dict:
     return profit_breakdown(db, s, e + timedelta(microseconds=1))
 
 
+def expense_rows(db: Session, s: datetime, e: datetime) -> list[tuple]:
+    """(day, category, amount) of the period's expenses from the books (51xx, as the profit counts them): everything
+    paid for the clinic, the employees' salaries, and an expense voided by mistake taken back on its own day."""
+    from ..models import JournalEntry, JournalLine, LedgerAccount
+
+    q = (select(func.date(JournalEntry.at), LedgerAccount.name, func.sum(JournalLine.debit - JournalLine.credit))
+         .join(JournalEntry, JournalEntry.id == JournalLine.entry_id).join(LedgerAccount, LedgerAccount.id == JournalLine.account_id)
+         .where(LedgerAccount.code.like("51%"), LedgerAccount.type == "expense", JournalEntry.at.between(s, e))
+         .group_by(func.date(JournalEntry.at), LedgerAccount.name))
+    return [(str(d), name, int(v)) for d, name, v in db.execute(q) if v]
+
+
 def receivable_total(db: Session) -> int:
     """What customers owe, from the books (1200): unpaid invoices and debts brought over (opening balances) alike.
     A customer whose account is in credit does not lower what the others owe."""
@@ -178,7 +189,8 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
     returns = sum(i.total for i in returned)
     revenue = gross - returns
     discounts = sum(k * (i.discount + sum(it.discount for it in i.items)) for i, k in signed)
-    expenses = int(db.scalar(select(func.coalesce(func.sum(Expense.amount), 0)).where(Expense.spent_at.between(s, e))) or 0)
+    spent = expense_rows(db, s, e)
+    expenses = sum(x[2] for x in spent)
     moves = money_movements(db, s, e)
     received_deposits = sum(r["amount"] for r in moves if r["kind"] == "deposit")
     paid_back = -sum(r["amount"] for r in moves if r["kind"] in ("deposit_refund", "refund"))
@@ -218,8 +230,8 @@ def summary(db: Session, start: date | None = None, end: date | None = None) -> 
     by_account = _per_account(moves)
 
     expense_by_cat: dict[str, int] = defaultdict(int)
-    for cat, amt in db.execute(select(Expense.category, Expense.amount).where(Expense.spent_at.between(s, e))):
-        expense_by_cat[cat] += int(amt)
+    for _, cat, amt in spent:
+        expense_by_cat[cat] += amt
 
     appts = db.execute(select(Appointment.status, func.count()).where(Appointment.start_at.between(s, e)).group_by(Appointment.status)).all()
     appt_stats = {k: v for k, v in appts}
@@ -324,8 +336,8 @@ def daily_series(db: Session, start: date | None = None, end: date | None = None
         rev[at.date()] += int(total)
     for total, at in db.execute(_returned(select(Invoice.total, undo.c.at), s, e, undo)):
         rev[at.date()] -= int(total)
-    for at, amt in db.execute(select(Expense.spent_at, Expense.amount).where(Expense.spent_at.between(s, e))):
-        exp[at.date()] += int(amt)
+    for day, _, amt in expense_rows(db, s, e):
+        exp[date.fromisoformat(day[:10])] += amt
     # net money of customers per day: the same movements as summary()'s cash_in (refunded deposits included)
     for r in money_movements(db, s, e):
         cash[r["at"].date()] += r["amount"]
@@ -491,9 +503,44 @@ def invoice_item_rows(db: Session, start: date | None, end: date | None) -> list
     return out
 
 
+def _staff_row(person: Staff | None, lines: dict, staff_id: int | None = None) -> dict:
+    return {"staff_id": person.id if person else staff_id, "name": person.full_name if person else "بدون پرسنل",
+            "line": lines.get(person.line_id) if person and person.line_id else None,
+            "percent": person.commission_percent if person else 0,
+            "services": 0, "revenue": 0, "forfeits": 0, "treasury": 0, "staff_share": 0, "salon_share": 0}
+
+
+def forfeit_shares(db: Session, s: datetime, e: datetime) -> list[tuple[int | None, int | None, int, int, int]]:
+    """(line, staff, amount, treasury, staff share) of each deposit forfeited in the period, from the books: the income
+    on 48xx with its line and staff, the treasury kept on the deposit, the share = its 5200 entry."""
+    from ..models import JournalEntry, JournalLine, LedgerAccount
+    from .accounting import COMMISSION, account
+
+    accs = select(LedgerAccount.id).where((LedgerAccount.code == "4800") | (LedgerAccount.parent_code == "4800"))
+    income = db.execute(select(JournalEntry.ref_type, JournalEntry.ref_id, JournalLine.line_id, JournalLine.staff_id,
+                               func.sum(JournalLine.credit - JournalLine.debit))
+                        .join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+                        .where(JournalLine.account_id.in_(accs), JournalEntry.at.between(s, e))
+                        .group_by(JournalEntry.ref_type, JournalEntry.ref_id, JournalLine.line_id, JournalLine.staff_id)).all()
+    comm = account(db, COMMISSION)
+    shares = {dep_id: int(v or 0) for dep_id, v in db.execute(
+        select(JournalEntry.ref_id, func.sum(JournalLine.debit - JournalLine.credit)).join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+        .where(JournalEntry.ref_type == "forfeit_commission", JournalLine.account_id == comm.id, JournalEntry.at.between(s, e))
+        .group_by(JournalEntry.ref_id))}
+    ids = [ref_id for ref_type, ref_id, *_ in income if ref_type == "deposit" and ref_id]
+    treasury = {d: int(t or 0) for d, t in db.execute(select(Deposit.id, Deposit.treasury_amount).where(Deposit.id.in_(ids)))} if ids else {}
+    out = []
+    for ref_type, ref_id, line_id, staff_id, amount in income:
+        if not amount:
+            continue
+        dep_id = ref_id if ref_type == "deposit" else None
+        out.append((line_id, staff_id, int(amount), treasury.pop(dep_id, 0), shares.pop(dep_id, 0)))
+    return out
+
+
 def staff_shares(db: Session, start: date | None = None, end: date | None = None) -> dict:
     """Who did what: revenue, the line's treasury (خزانه), staff share (commission) and salon share per staff member and
-    per line; revenue = treasury + staff share + salon share, to the Rial.
+    per line; revenue + forfeits = treasury + staff share + salon share, to the Rial (staff share = 5200 in the books).
 
     Uses the treasury and commission recorded on each invoice item (the books); older items without a commission fall
     back to the staff member's current percent, rows from before the treasury have none.
@@ -521,11 +568,7 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
             comm = round(net * (person.commission_percent or 0) / 100) if person else 0
         tre = it.treasury_amount or 0
         net, comm, tre = k * net, k * comm, k * tre
-        key = it.staff_id or 0
-        r = per_staff.setdefault(key, {"staff_id": it.staff_id, "name": person.full_name if person else "بدون پرسنل",
-                                       "line": lines.get(person.line_id) if person and person.line_id else None,
-                                       "percent": person.commission_percent if person else 0,
-                                       "services": 0, "revenue": 0, "treasury": 0, "staff_share": 0, "salon_share": 0})
+        r = per_staff.setdefault(it.staff_id or 0, _staff_row(person, lines, it.staff_id))
         r["services"] += k * it.quantity
         r["revenue"] += net
         r["treasury"] += tre
@@ -541,37 +584,49 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
         lr["salon_share"] += net - tre - comm
         if k < 0:
             lr["returned"] -= net  # returns of earlier sales counted in the period (with their own month's treasury)
-    # forfeited deposits (no-shows): income of their line that is all the salon's (no staff share); shown on its own
-    for _, line_id, amount in forfeit_rows(db, s, e):
+    # forfeited deposits (no-shows): income of their line, shared like its services (1.22: the month's treasury, then
+    # the staff member's share of the rest, as booked on the deposit; forfeited before 1.22: all the salon's)
+    for line_id, staff_id, amount, tre, comm in forfeit_shares(db, s, e):
         lr = per_line.setdefault(line_id or 0, {"line_id": line_id, "name": lines.get(line_id, "سایر"), "services": 0,
                                                 "revenue": 0, "treasury": 0, "staff_share": 0, "salon_share": 0, "forfeits": 0,
                                                 "returned": 0})
-        lr["forfeits"] += int(amount)
-    # payouts in the period and outstanding balances
+        lr["forfeits"] += amount
+        lr["treasury"] += tre
+        lr["staff_share"] += comm
+        lr["salon_share"] += amount - tre - comm
+        person = staff.get(staff_id)
+        if person is not None and (person.kind or "") == "employee":
+            person = None
+        r = per_staff.setdefault(person.id if person else 0, _staff_row(person, lines))
+        r["forfeits"] += amount
+        r["treasury"] += tre
+        r["staff_share"] += comm
+        r["salon_share"] += amount - tre - comm
+    # payouts in the period (less the ones voided) and outstanding balances
     payable = account(db, STAFF_PAYABLE)
-    paid = dict(db.execute(select(JournalLine.staff_id, func.sum(JournalLine.debit))
+    paid = dict(db.execute(select(JournalLine.staff_id, func.sum(JournalLine.debit - JournalLine.credit))
                            .join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
                            .where(JournalLine.account_id == payable.id, JournalEntry.ref_type == "staff_payout",
                                   JournalEntry.at.between(s, e)).group_by(JournalLine.staff_id)).all())
-    balances = {pid: staff_balance(db, pid) for pid in staff}
-    for pid, p in staff.items():
+    practitioners = {pid: p for pid, p in staff.items() if (p.kind or "") != "employee"}  # employees: their own page
+    balances = {pid: staff_balance(db, pid) for pid in practitioners}
+    for pid, p in practitioners.items():
         # also someone no longer active who is still owed money or was paid in the period (to settle with them)
         if pid not in per_staff and (p.is_active or balances[pid] or paid.get(pid)):
-            per_staff[pid] = {"staff_id": pid, "name": p.full_name, "line": lines.get(p.line_id), "percent": p.commission_percent,
-                              "services": 0, "revenue": 0, "treasury": 0, "staff_share": 0, "salon_share": 0}
+            per_staff[pid] = _staff_row(p, lines)
     for r in per_staff.values():
         r["paid"] = int(paid.get(r["staff_id"]) or 0) if r["staff_id"] else 0
         r["balance"] = balances.get(r["staff_id"], 0) if r["staff_id"] else 0
         r["active"] = bool(staff[r["staff_id"]].is_active) if r["staff_id"] in staff else True
     staff_rows = sorted(per_staff.values(), key=lambda x: -x["revenue"])
-    totals = {k: sum(r[k] for r in staff_rows) for k in ("revenue", "treasury", "staff_share", "salon_share", "paid", "balance")}
-    totals["forfeits"] = sum(r["forfeits"] for r in per_line.values())
+    totals = {k: sum(r[k] for r in staff_rows) for k in ("revenue", "forfeits", "treasury", "staff_share", "salon_share", "paid",
+                                                         "balance")}
     return {"period": {"start": s.date().isoformat(), "end": e.date().isoformat()}, "staff": staff_rows,
             "lines": sorted(per_line.values(), key=lambda x: -(x["revenue"] + x["forfeits"])), "totals": totals}
 
 
 # ------------------------------------------------------------------ revenue by line / staff / service
-J_MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"]
+from .jalali import J_MONTHS  # noqa: E402
 
 
 def _jmonth(day: str, cache: dict) -> str:

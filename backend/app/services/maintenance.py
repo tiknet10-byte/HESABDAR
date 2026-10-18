@@ -40,6 +40,8 @@ from ..models import (
     ServiceLine,
     Setting,
     Staff,
+    SalaryAccrual,
+    StaffPayout,
     StockMove,
     Supplier,
     SupplierPayment,
@@ -58,6 +60,7 @@ from ..models import (
 # products; history rows point at their invoice headers; appointments point at the invoice that settled them.
 TRANSACTIONS = [WooOutbox, WooOrder, WooLog, StockMove, CapitalMove, HoldingMove, SupplierPayment, PurchaseItem, Purchase, TradeHistory, TradeDoc,
                 WaitlistEntry, InboundReceipt, BankTransaction, Payment, Deposit, Appointment, InvoiceItem, Invoice, Expense,
+                StaffPayout, SalaryAccrual,
                 JournalLine, JournalEntry, Alert, ConversationMessage, ConversationState, ImportBatch]
 # kept by "transactions" and "customers", wiped by "factory" (then the defaults are seeded again); children first too
 CATALOG = [TreasuryRate, WooProduct, Product, Supplier, Holding, Service, Staff, PaymentAccount, ServiceLine, KnowledgeItem, LedgerAccount, Setting,
@@ -65,6 +68,7 @@ CATALOG = [TreasuryRate, WooProduct, Product, Supplier, Holding, Service, Staff,
 KEPT = [User]  # logins are never wiped. Every table is in exactly one of TRANSACTIONS, [Customer], CATALOG, KEPT (tested)
 SCOPES = {
     "transactions": "همه تراکنش‌ها (فاکتور، بیعانه، دریافت، هزینه، نوبت، رسید، اسناد، خرید و موجودی کالا، سرمایه و طلا/ارز، "
+                    "پرداخت به پرسنل و حقوق کارمندان، "
                     "سفارش‌های سایت و سوابق تیزپرداز) - مشتریان، خدمات، کالاها، فروشندگان و تنظیمات می‌مانند",
     "customers": "تراکنش‌ها + همه مشتریان - خدمات، کالاها، فروشندگان، کارتخوان‌ها و تنظیمات می‌مانند",
     "factory": "بازگشت به تنظیمات کارخانه: همه داده‌ها پاک می‌شود (فقط کاربران می‌مانند)",

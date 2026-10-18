@@ -596,6 +596,10 @@ def close_deposit(did: int, body: DepositCloseIn, db: Session = Depends(get_db),
 def set_deposit_service(did: int, service_id: int, db: Session = Depends(get_db), user=Depends(require("write"))):
     """Confirm/correct which service a deposit is for - the system learns from this."""
     d = _get(db, Deposit, did, "بیعانه")
+    if d.status != "held":
+        # a forfeited deposit's line and shares are booked with it; a used / refunded one is closed
+        raise HTTPException(400, "خدمتِ بیعانه‌ای که بسته شده (استفاده، استرداد یا سوخت) عوض نمی‌شود")
+    _get(db, Service, service_id, "خدمت")
     d.service_id = service_id
     if d.notes:
         learning.learn_text(db, d.notes, service_id, weight=2)
@@ -871,25 +875,113 @@ class ExpenseIn(BaseModel):
     spent_at: datetime | None = None
     description: str = ""
     staff_id: int | None = None
+    force: bool = False  # the same expense was entered a moment ago, and the person confirmed it is another one
+
+
+def _expense_row(e: Expense, accounts: dict[int, str]) -> dict:
+    return {"id": e.id, "category": e.category, "amount": e.amount, "payment_account_id": e.payment_account_id,
+            "account": accounts.get(e.payment_account_id), "spent_at": e.spent_at.isoformat(), "description": e.description,
+            "staff_id": e.staff_id, "voided_at": e.voided_at.isoformat() if e.voided_at else None, "void_reason": e.void_reason}
 
 
 @router.get("/expenses")
-def expenses(db: Session = Depends(get_db), _=Depends(require("finance"))):
-    return [{"id": e.id, "category": e.category, "amount": e.amount, "payment_account_id": e.payment_account_id,
-             "spent_at": e.spent_at.isoformat(), "description": e.description, "staff_id": e.staff_id}
-            for e in db.scalars(select(Expense).order_by(Expense.spent_at.desc()).limit(500))]
+def expenses(jy: int | None = None, jm: int | None = None, q: str = "", category: str = "", db: Session = Depends(get_db),
+             _=Depends(require("finance"))):
+    """The expenses of one Jalali month (default: this month), with the month's totals from the books: every category
+    (the employees' salaries too) and what the month's profit is after them."""
+    from ..services import reports
+    from ..services.capital import profit_breakdown
+    from ..services.jalali import jmonth_of, month_range
+
+    if jy is None or jm is None:
+        jy, jm = jmonth_of(local_now())
+    if not (1 <= jm <= 12) or not (1300 <= jy <= 1500):
+        raise HTTPException(400, "ماه نامعتبر است")
+    s, e = month_range(jy, jm)
+    stmt = select(Expense).where(Expense.spent_at >= s, Expense.spent_at < e).order_by(Expense.spent_at.desc(), Expense.id.desc())
+    if category:
+        stmt = stmt.where(Expense.category == accounting.expense_category(category))
+    if q.strip():
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(or_(Expense.description.like(like), Expense.category.like(like)))
+    accounts = {pa.id: pa.name for pa in db.scalars(select(PaymentAccount))}
+    rows = [_expense_row(x, accounts) for x in db.scalars(stmt.limit(2000))]
+    by_cat: dict[str, int] = {}
+    for _, cat, amt in reports.expense_rows(db, s, e - timedelta(microseconds=1)):
+        by_cat[cat] = by_cat.get(cat, 0) + amt
+    salaries = by_cat.get(staffpay_salary_category(), 0)
+    profit = profit_breakdown(db, s, e)
+    return {"jy": jy, "jm": jm, "current": list(jmonth_of(local_now())), "rows": rows,
+            "total": sum(by_cat.values()), "salaries": salaries,
+            "by_category": sorted(({"name": k, "value": v} for k, v in by_cat.items() if v), key=lambda x: -x["value"]),
+            "profit": profit}
+
+
+def staffpay_salary_category() -> str:
+    from ..services.staffpay import SALARY_CATEGORY
+
+    return SALARY_CATEGORY
+
+
+@router.get("/expenses/categories")
+def expense_categories(db: Session = Depends(get_db), _=Depends(require("finance"))):
+    """The quick categories (Settings) and every other one used before (its own expense account)."""
+    from ..models import LedgerAccount
+
+    quick = [accounting.expense_category(x) for x in (settings_store.get(db, "expenses.categories") or [])]
+    used = [a.name for a in db.scalars(select(LedgerAccount).where(LedgerAccount.parent_code == accounting.EXPENSE_PARENT)
+                                       .order_by(LedgerAccount.code))]
+    return {"quick": [x for x in dict.fromkeys(quick) if x], "used": [x for x in dict.fromkeys(used) if x not in quick],
+            "salary": staffpay_salary_category()}
+
+
+class CategoriesIn(BaseModel):
+    names: list[str]
+
+
+@router.put("/expenses/categories")
+def set_expense_categories(body: CategoriesIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
+    names = [x for x in dict.fromkeys(accounting.expense_category(n) for n in body.names) if x][:60]
+    settings_store.set_value(db, "expenses.categories", list(names))  # a new list: the stored one is never changed in place
+    audit(db, "expenses.categories", "setting", "expenses.categories", {"names": names}, user=user)
+    db.commit()
+    return {"quick": names}
 
 
 @router.post("/expenses")
 def create_expense(body: ExpenseIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+    pa = _get(db, PaymentAccount, body.payment_account_id, "حساب")
+    if not pa.is_active:
+        raise HTTPException(400, f"حساب «{pa.name}» بایگانی شده است؛ حساب دیگری انتخاب کنید")
     try:
-        e = accounting.record_expense(db, category=body.category, amount=body.amount,
-                                      payment_account=_get(db, PaymentAccount, body.payment_account_id, "حساب"),
-                                      spent_at=body.spent_at, description=body.description, staff_id=body.staff_id, user=user)
+        e = accounting.record_expense(db, category=body.category, amount=body.amount, payment_account=pa,
+                                      spent_at=body.spent_at, description=(body.description or "").strip(),
+                                      staff_id=body.staff_id, force=body.force, user=user)
+    except accounting.DuplicateExpense as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
     except AccountingError as exc:
+        db.rollback()
         raise HTTPException(400, str(exc)) from exc
     db.commit()
-    return {"id": e.id}
+    return {"id": e.id, "category": e.category}
+
+
+class ExpenseVoidIn(BaseModel):
+    reason: str = ""
+
+
+@router.post("/expenses/{expense_id}/void")
+def void_expense(expense_id: int, body: ExpenseVoidIn, db: Session = Depends(get_db), user=Depends(require("void"))):
+    """An expense entered by mistake: taken back on its own date (to change one: void it and enter it again)."""
+    e = _get(db, Expense, expense_id, "هزینه")
+    try:
+        accounting.void_expense(db, e, body.reason.strip(), user=user)
+    except AccountingError as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- ledger

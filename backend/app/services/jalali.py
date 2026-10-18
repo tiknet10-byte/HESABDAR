@@ -1,6 +1,8 @@
 """Jalali (Shamsi) <-> Gregorian conversion (algorithm by Kazimierz Borkowski / jdf)."""
 from __future__ import annotations
 
+J_MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"]
+
 
 def gregorian_to_jalali(gy: int, gm: int, gd: int) -> tuple[int, int, int]:
     g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]

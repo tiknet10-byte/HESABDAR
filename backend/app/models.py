@@ -109,6 +109,57 @@ class Staff(TimestampMixin, Base):
     line_id: Mapped[int | None] = mapped_column(ForeignKey("service_lines.id"), nullable=True)
     commission_percent: Mapped[float] = mapped_column(Float, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # None: a practitioner (works on a line, a share of what they do); "employee": a clinic employee on a fixed monthly
+    # salary (reception, cleaning...), booked as an expense - never offered for services, invoices or appointments
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    salary: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # employee: monthly salary (Rial)
+    job_title: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # bank cards money is sent to (last 4 digits, learned from payment receipts) - to know whose receipt it is
+    cards: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+
+class StaffPayout(Base):
+    """Money given to a staff member or an employee: an advance during the month (برداشتی / مساعده) or the month-end
+    settlement / salary payment (تسویه). Booked Dr 2200 (the person) / Cr the cash account (or 3100: from the owner's
+    own pocket); a void reverses it on its own date. jy/jm: the month it is for."""
+    __tablename__ = "staff_payouts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    staff_id: Mapped[int] = mapped_column(ForeignKey("staff.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="settlement")  # advance | settlement
+    jy: Mapped[int] = mapped_column(Integer)
+    jm: Mapped[int] = mapped_column(Integer)
+    amount: Mapped[int] = mapped_column(BigInteger)
+    paid_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    payment_account_id: Mapped[int | None] = mapped_column(ForeignKey("payment_accounts.id"), nullable=True)
+    from_owner: Mapped[bool] = mapped_column(Boolean, default=False)
+    reference: Mapped[str] = mapped_column(String(64), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(16), default="manual")  # manual | receipt | legacy (before 1.22)
+    image_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    image_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    parsed: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # what was read from the receipt
+    status: Mapped[str] = mapped_column(String(12), default="booked")  # booked | void
+    entry_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    void_reason: Mapped[str] = mapped_column(String(256), default="")
+
+
+class SalaryAccrual(Base):
+    """An employee's salary for a month, booked as an expense (51xx «حقوق و دستمزد») owed to them (2200) until paid."""
+    __tablename__ = "salary_accruals"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    staff_id: Mapped[int] = mapped_column(ForeignKey("staff.id"), index=True)
+    jy: Mapped[int] = mapped_column(Integer)
+    jm: Mapped[int] = mapped_column(Integer)
+    amount: Mapped[int] = mapped_column(BigInteger)
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(12), default="booked")  # booked | void
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class TreasuryRate(Base):
@@ -227,6 +278,13 @@ class Deposit(TimestampMixin, Base):
     # "credit": اعتبار, the customer's money kept with us (a product-side credit brought over, money of a voided
     # invoice kept for them): pays anything, is never forfeited
     kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # a forfeited deposit is income of its line like a service (1.22): its line, the line's treasury of that month and
+    # the staff member's share of what is left, as booked when it was forfeited (NULL: forfeited before 1.22)
+    forfeit_line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    treasury_bp: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    treasury_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    commission_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    commission_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class Invoice(TimestampMixin, Base):
@@ -295,6 +353,8 @@ class Expense(TimestampMixin, Base):
     spent_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     staff_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"), nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # entered by mistake: reversed on its date
+    void_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
 
 # ---------------------------------------------------------------- double-entry ledger

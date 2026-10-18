@@ -79,6 +79,10 @@ class StaffIn(BaseModel):
     line_id: int | None = None
     commission_percent: float = 0
     is_active: bool = True
+    # None: works on a line for a share of what they do; "employee": a clinic employee on a monthly salary (1.22)
+    kind: str | None = None
+    salary: int | None = None
+    job_title: str | None = None
 
 
 class AccountIn(BaseModel):
@@ -415,57 +419,87 @@ def classify(text: str, amount: int | None = None, customer_id: int | None = Non
 
 # ---------------------------------------------------------------- staff
 @router.get("/staff")
-def staff(line_id: int | None = None, service_id: int | None = None, db: Session = Depends(get_db), _=Depends(require("read"))):
-    """Staff list; filter by line, or by a service (= the staff of that service's line)."""
+def staff(line_id: int | None = None, service_id: int | None = None, kind: str = "staff", db: Session = Depends(get_db),
+          user=Depends(require("read"))):
+    """Staff list; filter by line, or by a service (= the staff of that service's line). kind: staff (who perform
+    services, the default), employee (the clinic's employees on a salary) or all."""
+    from ..core.security import has_permission
+
     if service_id:
         svc = db.get(Service, service_id)
         line_id = svc.line_id if svc else None
     q = select(Staff).order_by(Staff.id)
     if line_id:
         q = q.where(Staff.line_id == line_id)
+    if kind == "employee":
+        q = q.where(Staff.kind == "employee")
+    elif kind != "all":
+        q = q.where(func.coalesce(Staff.kind, "") != "employee")
     lines = {l.id: l.name for l in db.scalars(select(ServiceLine))}
+    money = has_permission(user.role, "reports")  # a salary is not for the reception's eyes
     return [{"id": p.id, "full_name": p.full_name, "mobile": p.mobile, "line_id": p.line_id, "line": lines.get(p.line_id),
-             "commission_percent": p.commission_percent, "is_active": p.is_active} for p in db.scalars(q)]
+             "commission_percent": p.commission_percent, "is_active": p.is_active, "kind": p.kind or "staff",
+             "job_title": p.job_title, "salary": p.salary if money else None} for p in db.scalars(q)]
 
 
-class PayoutIn(BaseModel):
-    amount: int
-    payment_account_id: int
-    description: str = ""
+def _staff_fields(db: Session, body: StaffIn, p: Staff | None = None) -> dict:
+    from ..services.textutil import normalize_mobile
 
+    data = body.model_dump()
+    data["full_name"] = " ".join((data["full_name"] or "").split())
+    if not data["full_name"]:
+        raise HTTPException(400, "نام را بنویسید")
+    if data["mobile"]:
+        m = normalize_mobile(data["mobile"])
+        if m is None:
+            raise HTTPException(400, "شمارهٔ موبایل درست نیست (مثل 09121234567)")
+        data["mobile"] = m
+    else:
+        data["mobile"] = None
+    kind = data["kind"] if data["kind"] in ("employee",) else None
+    data["kind"] = kind
+    if kind == "employee":
+        # an employee is paid a salary (an expense), never a share of services: no line, no percent
+        data["line_id"], data["commission_percent"] = None, 0
+        if data["salary"] is not None and data["salary"] < 0:
+            raise HTTPException(400, "حقوق نمی‌تواند منفی باشد")
+    else:
+        data["salary"] = None
+        if not 0 <= (data["commission_percent"] or 0) <= 100:
+            raise HTTPException(400, "درصد سهم باید بین ۰ تا ۱۰۰ باشد")
+    data["job_title"] = (data["job_title"] or "").strip()[:64] or None
+    if p is not None and (p.kind or None) != kind:
+        from ..services.accounting import STAFF_PAYABLE, account
 
-@router.post("/staff/{pid}/payout")
-def staff_payout(pid: int, body: PayoutIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
-    p = db.get(Staff, pid) or _404()
-    pa = db.get(PaymentAccount, body.payment_account_id) or _404()
-    try:
-        accounting.pay_staff(db, p, body.amount, pa, description=body.description, user=user)
-    except accounting.AccountingError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    db.commit()
-    return {"ok": True, "balance": accounting.staff_balance(db, pid)}
+        if db.scalar(select(JournalLine.id).where(JournalLine.account_id == account(db, STAFF_PAYABLE).id,
+                                                  JournalLine.staff_id == p.id).limit(1)) is not None:
+            raise HTTPException(409, "این شخص سابقهٔ مالی (سهم، حقوق یا پرداخت) دارد و نوعش عوض نمی‌شود؛ "
+                                     "برای کار جدیدش یک شخص تازه بسازید و این یکی را غیرفعال کنید")
+    return data
 
 
 @router.post("/staff")
 def create_staff(body: StaffIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
-    p = Staff(**body.model_dump())
+    data = _staff_fields(db, body)
+    p = Staff(**data)
     db.add(p)
     db.flush()
-    audit(db, "staff.create", "staff", p.id, body.model_dump(), user=user)
+    audit(db, "staff.create", "staff", p.id, data, user=user)
     _names_changed()
     db.commit()
-    return {"id": p.id, **body.model_dump()}
+    return {"id": p.id, **data}
 
 
 @router.put("/staff/{pid}")
 def update_staff(pid: int, body: StaffIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
     p = db.get(Staff, pid) or _404()
-    for k, v in body.model_dump().items():
+    data = _staff_fields(db, body, p)
+    for k, v in data.items():
         setattr(p, k, v)
-    audit(db, "staff.update", "staff", p.id, body.model_dump(), user=user)
+    audit(db, "staff.update", "staff", p.id, data, user=user)
     _names_changed()
     db.commit()
-    return {"id": p.id, **body.model_dump()}
+    return {"id": p.id, **data}
 
 
 # ---------------------------------------------------------------- payment accounts

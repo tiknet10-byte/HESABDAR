@@ -497,11 +497,15 @@ def position(db: Session, start: date | None = None, end: date | None = None) ->
     ]
     accs = {a.code: a for a in db.scalars(select(LedgerAccount))}
     other_assets = sum(v for k, v in c.items() if k not in known and accs.get(k) is not None and accs[k].type == "asset")
+    # 2200 per person: what we owe some, and what others owe us (took more than they earned: taken from next month)
+    owed, owing = _staff_split(db, e)
+    if owing:
+        assets.append({"key": "staff_advances", "label": "طلب از پرسنل و کارمندان (برداشتی بیش از کارکرد)", "value": owing})
     if other_assets:
         assets.append({"key": "other", "label": "سایر دارایی‌ها", "value": other_assets})
     liabilities = [
         {"key": "deposits", "label": "بیعانه‌های مشتری‌ها (پیش‌پرداخت خدمات)", "value": c.get(accounting.DEPOSITS, 0)},
-        {"key": "staff", "label": "سهم پرسنل (پرداخت‌نشده)", "value": c.get("2200", 0)},
+        {"key": "staff", "label": "سهم پرسنل و حقوق کارمندان (پرداخت‌نشده)", "value": owed},
         {"key": "suppliers", "label": "بدهی به فروشنده‌ها", "value": c.get("2300", 0)},
     ]
     other_liab = sum(v for k, v in c.items() if k not in known and accs.get(k) is not None and accs[k].type == "liability")
@@ -533,8 +537,8 @@ def position(db: Session, start: date | None = None, end: date | None = None) ->
     t = now["totals"]
     return {
         "period": {"start": start.isoformat(), "end": end.isoformat()},
-        "assets": assets, "assets_total": t["asset"],
-        "liabilities": liabilities, "liabilities_total": t["liability"],
+        "assets": assets, "assets_total": t["asset"] + owing,
+        "liabilities": liabilities, "liabilities_total": t["liability"] + owing,
         "worth": now["worth"],  # what the business is worth to the owner, at book value
         "worth_market": now["worth"] + unrealized,  # with gold/dollars at today's price
         "unrealized": unrealized, "missing_price": missing_price,
@@ -547,6 +551,16 @@ def position(db: Session, start: date | None = None, end: date | None = None) ->
         # equity + profit must equal assets - liabilities (the books balance); 0 when everything is right
         "check": t["asset"] - t["liability"] - t["equity"] - (t["revenue"] - t["expense"]),
     }
+
+
+def _staff_split(db: Session, before: datetime) -> tuple[int, int]:
+    """(owed to people, owed by people) on 2200 just before `before`, person by person."""
+    acc = account(db, accounting.STAFF_PAYABLE)
+    per = (select(func.sum(JournalLine.credit - JournalLine.debit).label("v")).join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+           .where(JournalLine.account_id == acc.id, JournalEntry.at < before).group_by(JournalLine.staff_id).subquery())
+    owed = int(db.scalar(select(func.coalesce(func.sum(per.c.v), 0)).where(per.c.v > 0)) or 0)
+    owing = -int(db.scalar(select(func.coalesce(func.sum(per.c.v), 0)).where(per.c.v < 0)) or 0)
+    return owed, owing
 
 
 def _balances_of(db: Session, account_id: int, before: datetime) -> int:

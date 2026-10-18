@@ -14,6 +14,7 @@ from .api import auth, catalog, customers, finance, legacy, products, system, ti
 from .api import woo as woo_api
 from .api import capital as capital_api
 from .api import treasury as treasury_api
+from .api import staffpay as staffpay_api
 from .core import db as dbmod
 from .core.config import get_settings
 from .core.db import Base, SessionLocal
@@ -72,6 +73,9 @@ def init_db() -> None:
         from .services import tizpardaz
 
         tizpardaz.backfill_docs(db)  # Tizpardaz rows brought over before invoices were kept: their invoices, sellers linked
+        from .services import staffpay
+
+        staffpay.backfill_payouts(db)  # payouts made before 1.22 (an entry only): their row, to list / void / show them
         db.commit()
         from .services.audit import rechain_once
 
@@ -103,6 +107,11 @@ INDEXES = {
     "ix_cust_name": "customers(full_name)",
     "ix_cust_created": "customers(created_at)",
     "ix_exp_spent": "expenses(spent_at)",
+    "ix_jl_staff": "journal_lines(staff_id)",
+    "ix_payout_staff_month": "staff_payouts(staff_id, jy, jm)",
+    "ix_payout_ref": "staff_payouts(reference)",
+    "ix_salary_staff_month": "salary_accruals(staff_id, jy, jm)",
+    "ix_dep_forfeit": "deposits(status, forfeit_line_id, closed_at)",
 }
 
 
@@ -205,7 +214,7 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     for r in (auth.router, catalog.router, customers.router, finance.router, legacy.router, products.router, system.router, tizpardaz.router,
-              woo_api.router, capital_api.router, treasury_api.router):
+              woo_api.router, capital_api.router, treasury_api.router, staffpay_api.router):
         app.include_router(r)
 
     manager.discover()
