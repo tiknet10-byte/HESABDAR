@@ -505,6 +505,7 @@ def invoice_item_rows(db: Session, start: date | None, end: date | None) -> list
 
 def _staff_row(person: Staff | None, lines: dict, staff_id: int | None = None) -> dict:
     return {"staff_id": person.id if person else staff_id, "name": person.full_name if person else "بدون پرسنل",
+            "mobile": person.mobile if person else None,
             "line": lines.get(person.line_id) if person and person.line_id else None,
             "percent": person.commission_percent if person else 0,
             "services": 0, "revenue": 0, "forfeits": 0, "treasury": 0, "staff_share": 0, "salon_share": 0}

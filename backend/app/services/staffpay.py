@@ -101,10 +101,12 @@ def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", pay
         if reference and db.scalar(select(StaffPayout.id).where(StaffPayout.reference == reference, StaffPayout.amount == amount,
                                                                 StaffPayout.status == "booked").limit(1)):
             raise Duplicate("پرداختی با همین شمارهٔ پیگیری و همین مبلغ قبلاً ثبت شده است")
+        day = datetime.combine(at.date(), datetime.min.time())
         if db.scalar(select(StaffPayout.id).where(StaffPayout.staff_id == staff.id, StaffPayout.amount == amount,
-                                                  StaffPayout.status == "booked", StaffPayout.created_at >= local_now() - DUPLICATE_WINDOW)
-                     .limit(1)):
-            raise Duplicate("همین مبلغ چند دقیقه پیش برای همین شخص ثبت شده است؛ اگر پرداخت جداگانه‌ای است، دوباره تأیید کنید")
+                                                  StaffPayout.status == "booked", StaffPayout.paid_at >= day,
+                                                  StaffPayout.paid_at < day + timedelta(days=1),
+                                                  StaffPayout.created_at >= local_now() - DUPLICATE_WINDOW).limit(1)):
+            raise Duplicate("همین مبلغ با همین تاریخ چند دقیقه پیش برای همین شخص ثبت شده است؛ اگر پرداخت جداگانه‌ای است، دوباره تأیید کنید")
     p = StaffPayout(staff_id=staff.id, kind=kind, jy=jy, jm=jm, amount=amount, paid_at=at,
                     payment_account_id=None if from_owner else payment_account.id, from_owner=bool(from_owner),
                     reference=(reference or "")[:64], description=description or "", source=source, image_path=image_path,

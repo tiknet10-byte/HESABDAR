@@ -221,7 +221,7 @@ function DepositView({ id, onChange }: { id: number; onChange: () => void }) {
   const refreshAll = () => { reload(); onChange(); };
   const booked = d.appointment?.status === "booked";
   async function close(action: string) {
-    if (action === "forfeit" && !confirm(`بیعانه سوخت شود و به درآمد منتقل گردد؟ (معمولاً وقتی مشتری نیامده)${booked ? "\n\nنوبت این بیعانه هم «نیامد» (یا اگر هنوز نرسیده «لغو») ثبت می‌شود." : ""}`)) return;
+    if (action === "forfeit" && !confirm(`بیعانه سوخت شود و درآمد لاینِ آن شود؟ (معمولاً وقتی مشتری نیامده)\nخزانهٔ ماه از آن برداشته می‌شود و پرسنلِ این بیعانه از باقیمانده سهم می‌گیرد.${booked ? "\n\nنوبت این بیعانه هم «نیامد» (یا اگر هنوز نرسیده «لغو») ثبت می‌شود." : ""}`)) return;
     try {
       const r = await api(`/api/deposits/${id}/close`, { body: { action, refund_account_id: action === "refund" ? (refundAcc || d.payment_account_id) : null,
         appointment: action === "refund" && !cancelAppt ? "keep" : "auto" } });

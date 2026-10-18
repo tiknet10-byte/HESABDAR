@@ -100,7 +100,7 @@ export default function AppointmentView({ id, initialStep, onChanged, onClose }:
         </Field>
       )}
       <label className={`flex items-start gap-2 ${finance ? "" : "opacity-50"}`}><input type="radio" className="mt-1" disabled={!finance} checked={money_ === "forfeit"} onChange={() => setMoney("forfeit")} />
-        <span><b>بیعانه سوخت شود</b><span className="muted block text-xs">طبق قانون سالن پول برگردانده نمی‌شود و درآمد سالن حساب می‌شود.{!finance && " (فقط مدیر یا حسابدار)"}</span></span></label>
+        <span><b>بیعانه سوخت شود</b><span className="muted block text-xs">طبق قانون سالن پول برگردانده نمی‌شود و مثل درآمد همان لاین حساب می‌شود (خزانه و سهم پرسنل هم دارد).{!finance && " (فقط مدیر یا حسابدار)"}</span></span></label>
     </div>
   );
 

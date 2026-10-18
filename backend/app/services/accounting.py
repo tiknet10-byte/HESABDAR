@@ -1057,12 +1057,15 @@ def record_expense(db: Session, *, category: str, amount: int, payment_account: 
     if staff_id is not None and db.get(Staff, staff_id) is None:
         raise AccountingError("شخص انتخاب‌شده پیدا نشد")
     write_lock(db)  # a double click: the second one sees the first
+    when = spent_at or local_now()
+    day = datetime.combine(when.date(), datetime.min.time())
     if not force and db.scalar(select(Expense.id).where(
             Expense.category == category, Expense.amount == amount, Expense.payment_account_id == payment_account.id,
-            Expense.voided_at.is_(None), Expense.created_at >= local_now() - EXPENSE_DUPLICATE_WINDOW).limit(1)):
+            Expense.voided_at.is_(None), Expense.spent_at >= day, Expense.spent_at < day + timedelta(days=1),
+            Expense.created_at >= local_now() - EXPENSE_DUPLICATE_WINDOW).limit(1)):
         raise DuplicateExpense("همین هزینه (همین دسته، مبلغ و حساب) چند لحظه پیش ثبت شد؛ اگر خرید جداگانه‌ای است، دوباره تأیید کنید")
     exp = Expense(category=category, amount=amount, payment_account_id=payment_account.id,
-                  spent_at=spent_at or local_now(), description=description, staff_id=staff_id)
+                  spent_at=when, description=description, staff_id=staff_id)
     db.add(exp)
     db.flush()
     post(db, (f"هزینه: {category}" + (f" - {description}" if description else ""))[:256], [

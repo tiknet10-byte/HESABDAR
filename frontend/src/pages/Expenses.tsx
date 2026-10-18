@@ -1,56 +1,199 @@
-import { Plus, Wallet } from "lucide-react";
+import { Ban, Coffee, ListChecks, Plus, Search, Settings2, Wallet } from "lucide-react";
 import { useState } from "react";
-import { Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader } from "../components/ui";
-import { api } from "../lib/api";
+import { Link } from "react-router-dom";
+import AccountSelect from "../components/AccountSelect";
 import JalaliPicker from "../components/JalaliPicker";
-import { jdate, money } from "../lib/format";
-import { toLocalIso } from "../lib/jalali";
-import { useApi, useToast } from "../lib/hooks";
+import MonthNav from "../components/MonthNav";
+import { Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Stat } from "../components/ui";
+import { api } from "../lib/api";
+import { cmoney, jdate, money } from "../lib/format";
+import { can, useApi, useAuth, useToast } from "../lib/hooks";
+import { monthName, sameMonth, thisMonth, toLocalIso, type YM } from "../lib/jalali";
 
-const CATS = ["اجاره", "حقوق و دستمزد", "پورسانت پرسنل", "مواد مصرفی", "تجهیزات", "قبوض", "تبلیغات", "نگهداری و تعمیرات", "مالیات و عوارض", "سایر"];
+/** what usually goes in each quick category (shown under the chips) */
+const EXAMPLES: Record<string, string> = {
+  "پذیرایی": "چای، قهوه، شیرینی، آب معدنی برای مشتری‌ها و پرسنل",
+  "بهداشتی و نظافت": "دستمال کاغذی، مواد شوینده، کیسه زباله، ضدعفونی",
+  "مواد مصرفی": "مواد و وسایل یک‌بارمصرف خدمات (دستکش، ملحفه، ژل...)",
+  "اجاره": "اجارهٔ ماهانهٔ محل",
+  "شارژ ساختمان": "شارژ ماهانه",
+  "قبوض": "آب، برق، گاز",
+  "اینترنت و تلفن": "اینترنت، تلفن ثابت، شارژ موبایل کلینیک",
+  "تعمیر و نگهداری": "تعمیر دستگاه، سرویس، لوازم یدکی",
+  "تجهیزات": "دستگاه و وسیلهٔ تازه",
+  "لوازم اداری": "کاغذ، کارتریج، خودکار",
+  "تبلیغات": "تبلیغ اینستاگرام، چاپ تراکت",
+  "حمل و پیک": "پیک، اسنپ، پست",
+  "کارمزد بانکی": "کارمزد کارتخوان و انتقال",
+  "مالیات و عوارض": "مالیات، عوارض شهرداری",
+};
+const SALARY = "حقوق و دستمزد";
+const COMMISSION = "پورسانت پرسنل";
+
+function QuickAdd({ onDone }: { onDone: () => void }) {
+  const toast = useToast();
+  const cats = useApi<any>("/api/expenses/categories").data;
+  const [category, setCategory] = useState("");
+  const [other, setOther] = useState(false);
+  const [amount, setAmount] = useState(0);
+  const [acc, setAcc] = useState(0);
+  const [at, setAt] = useState(toLocalIso(new Date()));
+  const [description, setDescription] = useState("");
+  const [dup, setDup] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const quick: string[] = cats?.quick ?? [];
+  const used: string[] = (cats?.used ?? []).filter((x: string) => x !== SALARY && x !== COMMISSION);
+  async function save(force = false) {
+    setBusy(true);
+    try {
+      const r: any = await api("/api/expenses", { body: { category, amount, payment_account_id: acc, spent_at: at, description, force } });
+      toast(`هزینهٔ «${r.category}» ${money(amount)} ثبت شد`);
+      setAmount(0);
+      setDescription("");
+      setDup(null);
+      setAt(toLocalIso(new Date()));
+      onDone();
+    } catch (e: any) {
+      if (e.status === 409) setDup(e.message); else toast(e.message, "error");
+    } finally { setBusy(false); }
+  }
+  const chip = (c: string) => (
+    <button key={c} type="button" onClick={() => { setCategory(c); setOther(false); }}
+      className={`rounded-full border px-3 py-1.5 text-sm ${category === c && !other ? "border-violet-500 bg-violet-500/15 font-bold text-violet-700 dark:text-violet-300" : ""}`}
+      style={category === c && !other ? undefined : { borderColor: "var(--border)" }}>{c}</button>
+  );
+  return (
+    <div className="space-y-3">
+      <Field label="چه خریدید؟ (دسته)">
+        <div className="flex flex-wrap gap-2">
+          {quick.map(chip)}
+          {used.filter((c) => !quick.includes(c)).map(chip)}
+          <button type="button" onClick={() => { setOther(true); setCategory(""); }} className={`rounded-full border border-dashed px-3 py-1.5 text-sm ${other ? "border-violet-500" : ""}`}
+            style={other ? undefined : { borderColor: "var(--border)" }}>+ دستهٔ دیگر</button>
+        </div>
+        {other && <input className="input mt-2" autoFocus placeholder="نام دسته (مثلاً گل و تزئینات)" value={category} onChange={(e) => setCategory(e.target.value)} />}
+        {EXAMPLES[category] && !other && <div className="muted mt-1 text-xs">{EXAMPLES[category]}</div>}
+        {category.trim() === SALARY && <div className="mt-2 rounded-xl bg-amber-500/10 p-2 text-xs leading-6 text-amber-800 dark:text-amber-200">
+          حقوق کارمندان ثابت (منشی، نظافت...) را در صفحهٔ <Link to="/employees" className="font-bold underline">کارمندان و حقوق</Link> ثبت کنید تا مساعده‌ها و ماندهٔ هر نفر هم حساب شود؛ اینجا فقط برای دستمزد یک‌باره (مثلاً کارگر روزمزد).</div>}
+        {category.trim() === COMMISSION && <div className="mt-2 rounded-xl bg-rose-500/10 p-2 text-xs leading-6 text-rose-700 dark:text-rose-300">
+          سهم پرسنل را اینجا ثبت نکنید: سهم هر خدمت خودش حساب می‌شود؛ پرداخت به پرسنل را در صفحهٔ <Link to="/staff" className="font-bold underline">پرسنل و سهم‌ها</Link> با «برداشتی» یا «تسویه» ثبت کنید (وگرنه دو بار از سود کم می‌شود).</div>}
+      </Field>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="مبلغ"><MoneyInput value={amount} onChange={setAmount} /></Field>
+        <Field label="پرداخت از"><AccountSelect value={acc} onChange={setAcc} /></Field>
+        <Field label="تاریخ"><JalaliPicker pastOnly value={at} onChange={setAt} /></Field>
+        <Field label="توضیح (اختیاری)"><input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="مثلاً ۲ بسته قهوه" /></Field>
+      </div>
+      {dup && (
+        <div className="space-y-2 rounded-2xl bg-rose-500/10 p-3 text-sm">
+          <div>{dup}</div>
+          <button className="btn btn-sm btn-danger" disabled={busy} onClick={() => save(true)}>بله، خرید جداگانه‌ای است؛ ثبت شود</button>
+        </div>
+      )}
+      <button className="btn btn-primary w-full py-3" disabled={!amount || !category.trim() || !acc || busy} onClick={() => save(false)}>
+        <Plus size={16} />ثبت هزینه {amount ? money(amount) : ""}
+      </button>
+    </div>
+  );
+}
+
+function CategoryEditor({ onDone }: { onDone: () => void }) {
+  const toast = useToast();
+  const cats = useApi<any>("/api/expenses/categories").data;
+  const [text, setText] = useState<string | null>(null);
+  const value = text ?? (cats?.quick ?? []).join("\n");
+  return (
+    <div className="space-y-3">
+      <div className="muted text-sm leading-7">هر خط یک دسته. این‌ها دکمه‌های سریع صفحهٔ هزینه‌ها هستند (هر دسته در دفاتر حساب جدای خودش را دارد). دسته‌هایی که قبلاً استفاده شده‌اند همیشه می‌مانند.</div>
+      <textarea className="input h-64" value={value} onChange={(e) => setText(e.target.value)} />
+      <button className="btn btn-primary w-full" onClick={async () => {
+        try { await api("/api/expenses/categories", { method: "PUT", body: { names: value.split("\n") } }); toast("ذخیره شد"); onDone(); } catch (e: any) { toast(e.message, "error"); }
+      }}>ذخیره</button>
+    </div>
+  );
+}
 
 export default function Expenses() {
   const toast = useToast();
-  const { data, reload } = useApi<any[]>("/api/expenses");
-  const accounts = useApi<any[]>("/api/accounts").data ?? [];
-  const [open, setOpen] = useState(false);
-  const [f, setF] = useState({ category: CATS[0], amount: 0, payment_account_id: 0, description: "", spent_at: toLocalIso(new Date()) });
-  async function save() {
-    try {
-      await api("/api/expenses", { body: { ...f, payment_account_id: f.payment_account_id || accounts[0]?.id } });
-      toast("هزینه ثبت شد");
-      setOpen(false);
-      reload();
-    } catch (e: any) {
-      toast(e.message, "error");
-    }
+  const { user } = useAuth();
+  const [month, setMonth] = useState<YM>(thisMonth());
+  const [q, setQ] = useState("");
+  const [cat, setCat] = useState("");
+  const { data, reload } = useApi<any>(`/api/expenses?jy=${month[0]}&jm=${month[1]}&q=${encodeURIComponent(q)}&category=${encodeURIComponent(cat)}`, [month[0], month[1], q, cat]);
+  const [adding, setAdding] = useState(false);
+  const [editCats, setEditCats] = useState(false);
+  const profit = data?.profit?.total ?? 0;
+  const general = (data?.total ?? 0) - (data?.salaries ?? 0);
+  const biggest = data?.by_category?.[0];
+  async function voidOne(e: any) {
+    const reason = window.prompt(`هزینهٔ «${e.category}» ${money(e.amount)} باطل شود؟ (مثلاً دو بار ثبت شده) دلیل:`, "");
+    if (reason === null) return;
+    try { await api(`/api/expenses/${e.id}/void`, { body: { reason } }); toast("باطل شد؛ پول به همان حساب برگشت"); reload(); } catch (err: any) { toast(err.message, "error"); }
   }
   return (
     <div className="space-y-5">
-      <PageHeader title="هزینه‌ها" subtitle="اجاره، حقوق، مواد مصرفی و سایر هزینه‌های سالن" icon={<Wallet size={22} />}
-        actions={<button className="btn btn-primary" onClick={() => setOpen(true)}><Plus size={16} />ثبت هزینه</button>} />
-      <Card pad={false}>
-        <div className="overflow-x-auto">
-          {!data ? <Loading /> : data.length === 0 ? <Empty /> : (
-            <table className="table">
-              <thead><tr><th>تاریخ</th><th>دسته</th><th>مبلغ</th><th>از حساب</th><th>شرح</th></tr></thead>
-              <tbody>{data.map((e) => (
-                <tr key={e.id}><td className="num muted">{jdate(e.spent_at)}</td><td className="font-semibold">{e.category}</td><td className="num">{money(e.amount)}</td>
-                  <td>{accounts.find((a) => a.id === e.payment_account_id)?.name}</td><td className="muted">{e.description}</td></tr>
-              ))}</tbody>
-            </table>
-          )}
-        </div>
-      </Card>
-      <Modal open={open} onClose={() => setOpen(false)} title="ثبت هزینه">
-        <div className="space-y-3">
-          <Field label="دسته"><select className="input" value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>{CATS.map((c) => <option key={c}>{c}</option>)}</select></Field>
-          <Field label="مبلغ"><MoneyInput value={f.amount} onChange={(v) => setF({ ...f, amount: v })} /></Field>
-          <Field label="پرداخت از"><select className="input" value={f.payment_account_id || accounts[0]?.id} onChange={(e) => setF({ ...f, payment_account_id: Number(e.target.value) })}>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
-          <Field label="تاریخ"><JalaliPicker pastOnly value={f.spent_at} onChange={(v) => setF({ ...f, spent_at: v })} /></Field>
-          <Field label="شرح"><input className="input" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></Field>
-          <button className="btn btn-primary w-full" disabled={!f.amount} onClick={save}>ثبت</button>
-        </div>
+      <PageHeader title="هزینه‌های کلینیک" subtitle="قهوه و پذیرایی، دستمال کاغذی، اجاره، قبوض، تعمیرات... همه از سود کم می‌شوند" icon={<Wallet size={22} />}
+        actions={<div className="flex flex-wrap gap-2">
+          {can(user, "settings") && <button className="btn" onClick={() => setEditCats(true)}><Settings2 size={16} />دسته‌ها</button>}
+          <button className="btn btn-primary" onClick={() => setAdding(true)}><Plus size={16} />ثبت هزینه</button>
+        </div>} />
+      <MonthNav month={month} onChange={setMonth} />
+      {!data ? <Loading /> : (
+        <>
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <Stat label={`هزینه‌های ${monthName(month)}`} value={cmoney(data.total)} tone="pink" icon={<Coffee size={18} />}
+              help="جمع همهٔ هزینه‌های این ماه در دفاتر: خریدهای کلینیک و حقوق کارمندان (هزینه‌ای که باطل شده حساب نمی‌شود)." />
+            <Stat label="هزینه‌های عمومی" value={cmoney(general)} tone="amber" hint={biggest ? `بیشترین: ${biggest.name}` : undefined} />
+            <Link to="/employees"><Stat label="حقوق کارمندان" value={cmoney(data.salaries)} tone="sky" hint="از صفحهٔ کارمندان" /></Link>
+            <Stat label={`سود ${monthName(month)}`} value={cmoney(profit)} tone={profit < 0 ? "pink" : "emerald"}
+              hint={sameMonth(month, thisMonth()) ? "تا امروز" : undefined}
+              help="درآمد این ماه (خدمات، محصولات، بیعانهٔ سوخت‌شده) منهای سهم پرسنل، بهای کالاها و همهٔ هزینه‌ها؛ همان سود دفاتر." />
+          </div>
+          <div className="grid gap-5 lg:grid-cols-[1fr_1.6fr]">
+            <Card title="به تفکیک دسته" className="min-w-0">
+              {data.by_category.length === 0 ? <Empty text="هزینه‌ای در این ماه نیست" /> : (
+                <div className="space-y-2">
+                  {data.by_category.map((c: any) => (
+                    <button key={c.name} className={`block w-full text-right ${cat === c.name ? "font-bold" : ""}`} onClick={() => setCat(cat === c.name ? "" : c.name)}>
+                      <div className="flex justify-between text-sm"><span>{c.name}</span><span className="num">{money(c.value)}</span></div>
+                      <div className="mt-1 h-2 overflow-hidden rounded-full" style={{ background: "var(--surface)" }}>
+                        <div className="h-full rounded-full bg-violet-500" style={{ width: `${Math.max(2, Math.round((c.value / (data.total || 1)) * 100))}%` }} />
+                      </div>
+                    </button>
+                  ))}
+                  <p className="muted pt-1 text-xs">روی هر دسته بزنید تا فقط هزینه‌های آن را ببینید.</p>
+                </div>
+              )}
+            </Card>
+            <Card className="min-w-0" title={<span className="flex items-center gap-2"><ListChecks size={16} />هزینه‌های ثبت‌شده{cat && <span className="badge">{cat} <button className="mr-1" onClick={() => setCat("")}>✕</button></span>}</span>} pad={false}
+              actions={<div className="relative"><Search size={14} className="muted absolute right-2 top-2.5" /><input className="input w-32 py-1.5 pr-7 text-sm sm:w-40" placeholder="جستجو در شرح" value={q} onChange={(e) => setQ(e.target.value)} /></div>}>
+              <div className="overflow-x-auto">
+                {data.rows.length === 0 ? <Empty text="موردی نیست" /> : (
+                  <table className="table">
+                    <thead><tr><th>تاریخ</th><th>دسته</th><th>مبلغ</th><th>از حساب</th><th>شرح</th><th></th></tr></thead>
+                    <tbody>{data.rows.map((e: any) => (
+                      <tr key={e.id} className={e.voided_at ? "opacity-50" : ""}>
+                        <td className="num muted">{jdate(e.spent_at)}</td>
+                        <td className="font-semibold">{e.category}</td>
+                        <td className={`num ${e.voided_at ? "line-through" : ""}`}>{money(e.amount)}</td>
+                        <td>{e.account ?? "—"}</td>
+                        <td className="muted">{e.description}{e.voided_at && <div className="text-xs text-rose-600">باطل شد{e.void_reason ? `: ${e.void_reason}` : ""}</div>}</td>
+                        <td>{!e.voided_at && can(user, "void") && <button className="btn btn-sm px-2 text-rose-600" title="باطل کردن (اشتباه ثبت شده)" onClick={() => voidOne(e)}><Ban size={13} /></button>}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                )}
+              </div>
+              <p className="muted px-5 py-3 text-xs leading-6">هزینه‌ای که اشتباه ثبت شده را «باطل» کنید (در همان تاریخ خودش برمی‌گردد) و درستش را دوباره ثبت کنید. سهم پرسنل و حقوق کارمندان در صفحه‌های خودشان ثبت می‌شوند.</p>
+            </Card>
+          </div>
+        </>
+      )}
+      <Modal open={adding} onClose={() => setAdding(false)} title="ثبت هزینه">
+        {adding && <QuickAdd onDone={() => reload()} />}
+      </Modal>
+      <Modal open={editCats} onClose={() => setEditCats(false)} title="دسته‌های هزینه">
+        {editCats && <CategoryEditor onDone={() => setEditCats(false)} />}
       </Modal>
     </div>
   );

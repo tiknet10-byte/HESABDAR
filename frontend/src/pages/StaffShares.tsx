@@ -1,25 +1,15 @@
-import { ChevronLeft, ChevronRight, HandCoins, Landmark, Pencil, UsersRound } from "lucide-react";
+import { FileText, HandCoins, Landmark, Pencil, Upload, UsersRound, Wallet } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Card, Empty, Field, HelpTip, Loading, Modal, MoneyInput, PageHeader, Stat, Tabs } from "../components/ui";
+import MonthNav from "../components/MonthNav";
+import { PayoutForm, ReceiptBatch, Statement } from "../components/StaffPay";
+import { Card, Empty, Field, HelpTip, Loading, Modal, PageHeader, Stat, Tabs } from "../components/ui";
 import { api } from "../lib/api";
 import { cmoney, daysAgo, isoDate, money, num } from "../lib/format";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
-import { J_MONTHS, faDigits, toJalali } from "../lib/jalali";
+import { faDigits, monthName, sameMonth, thisMonth, type YM } from "../lib/jalali";
 
 const RANGES = [["month", "ماهانه"], ["1", "امروز"], ["7", "۷ روز"], ["30", "۳۰ روز"], ["90", "۳ ماه"], ["365", "یک سال"]] as const;
 type Range = (typeof RANGES)[number][0];
-type YM = [number, number];
-
-const thisMonth = (): YM => {
-  const d = new Date();
-  const [jy, jm] = toJalali(d.getFullYear(), d.getMonth() + 1, d.getDate());
-  return [jy, jm];
-};
-const step = ([jy, jm]: YM, by: number): YM => {
-  const n = jy * 12 + (jm - 1) + by;
-  return [Math.floor(n / 12), (n % 12) + 1];
-};
-const monthName = ([jy, jm]: YM) => `${J_MONTHS[jm - 1]} ${faDigits(jy)}`;
 /** hundredths of a percent -> «۴۲٫۵٪» */
 const pct = (bp: number) => `${faDigits(String(+(bp / 100).toFixed(2))).replace(".", "٫")}٪`;
 /** what the user typed («۴۲٫۵», "42.5", "42/5", «٤٢») -> hundredths of a percent, or null */
@@ -30,33 +20,6 @@ const parseBp = (s: string): number | null => {
   const bp = Math.round(parseFloat(t) * 100);
   return bp >= 0 && bp <= 10000 ? bp : null;
 };
-
-function Payout({ row, onDone }: { row: any; onDone: () => void }) {
-  const toast = useToast();
-  const accounts = useApi<any[]>("/api/accounts").data ?? [];
-  const [amount, setAmount] = useState(Math.max(0, row.balance));
-  const [acc, setAcc] = useState(0);
-  const [desc, setDesc] = useState("");
-  return (
-    <div className="space-y-3">
-      <div className="rounded-2xl bg-violet-500/10 p-3 text-sm">مانده قابل پرداخت به <b>{row.name}</b> تا امروز (همهٔ ماه‌ها): <b className="num">{money(row.balance)}</b></div>
-      <Field label="مبلغ پرداخت"><MoneyInput value={amount} onChange={setAmount} /></Field>
-      <Field label="پرداخت از">
-        <select className="input" value={acc || accounts[0]?.id || 0} onChange={(e) => setAcc(Number(e.target.value))}>
-          {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-        </select>
-      </Field>
-      <Field label="توضیح"><input className="input" value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="مثلاً تسویه مهر ماه" /></Field>
-      <button className="btn btn-primary w-full" disabled={!amount} onClick={async () => {
-        try {
-          await api(`/api/staff/${row.staff_id}/payout`, { body: { amount, payment_account_id: acc || accounts[0]?.id, description: desc } });
-          toast("پرداخت ثبت شد");
-          onDone();
-        } catch (e: any) { toast(e.message, "error"); }
-      }}>ثبت پرداخت</button>
-    </div>
-  );
-}
 
 /** Set a line's treasury for a month: the preview shows each staff member's share before and after, then save. */
 function RateEditor({ rate, month, onDone }: { rate: any; month: YM; onDone: () => void }) {
@@ -96,13 +59,14 @@ function RateEditor({ rate, month, onDone }: { rate: any; month: YM; onDone: () 
       {pv && (
         <div className="space-y-3 text-sm">
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            <div className="rounded-xl p-2" style={{ background: "var(--surface)" }}><div className="muted text-xs">درآمد فاکتورهای این ماه</div><div className="num font-bold">{money(pv.revenue)}</div></div>
+            <div className="rounded-xl p-2" style={{ background: "var(--surface)" }}><div className="muted text-xs">درآمد فاکتورهای این ماه</div><div className="num font-bold">{money(pv.revenue)}</div>
+              {pv.forfeits > 0 && <div className="muted text-[11px]">+ {money(pv.forfeits)} بیعانهٔ سوخت‌شده</div>}</div>
             <div className="rounded-xl p-2" style={{ background: "var(--surface)" }}><div className="muted text-xs">خزانه (الان ← بعد)</div><div className="num font-bold">{money(pv.treasury_before)} ← {money(pv.treasury_after)}</div></div>
-            <div className="rounded-xl p-2" style={{ background: "var(--surface)" }}><div className="muted text-xs">فاکتورهایی که دوباره حساب می‌شوند</div><div className="num font-bold">{num(pv.invoices)}</div></div>
+            <div className="rounded-xl p-2" style={{ background: "var(--surface)" }}><div className="muted text-xs">فاکتورهایی که دوباره حساب می‌شوند</div><div className="num font-bold">{num(pv.invoices)}{pv.forfeits_changed > 0 && <span className="muted text-xs font-normal"> + {num(pv.forfeits_changed)} بیعانهٔ سوخت‌شده</span>}</div></div>
           </div>
           {pv.staff.length > 0 && (
             <table className="table text-xs">
-              <thead><tr><th>پرسنل</th><th>سهم از فاکتورهای این ماه (الان)</th><th>بعد از تغییر</th><th>تفاوت</th><th>مانده بعد</th></tr></thead>
+              <thead><tr><th>پرسنل</th><th>سهم از کارکرد این ماه (الان)</th><th>بعد از تغییر</th><th>تفاوت</th><th>مانده بعد</th></tr></thead>
               <tbody>{pv.staff.map((s: any) => (
                 <tr key={s.staff_id}><td className="font-semibold">{s.name}</td><td className="num">{money(s.before)}</td><td className="num">{money(s.after)}</td>
                   <td className={`num font-semibold ${s.change < 0 ? "text-rose-600" : s.change > 0 ? "text-emerald-600" : ""}`}>{s.change ? money(s.change) : "—"}</td>
@@ -149,11 +113,14 @@ export default function StaffShares() {
   const start = range === "1" ? isoDate(new Date()) : isMonth ? "" : daysAgo(Number(range) - 1);
   const { data, reload } = useApi<any>(!allowed ? null : isMonth ? `/api/reports/staff-shares?jy=${month[0]}&jm=${month[1]}` : `/api/reports/staff-shares?start=${start}&end=${isoDate(new Date())}`, [range, month[0], month[1]]);
   const rates = useApi<any>(allowed && isMonth ? `/api/treasury?jy=${month[0]}&jm=${month[1]}` : null, [range, month[0], month[1]]);
-  const [payout, setPayout] = useState<any>(null);
+  const [payout, setPayout] = useState<{ row: any; kind: string } | null>(null);
+  const [statement, setStatement] = useState<any>(null);
+  const [batch, setBatch] = useState(false);
   const [editing, setEditing] = useState<any>(null);
   const t = data?.totals;
   const cur = thisMonth();
-  const atCurrent = month[0] === cur[0] && month[1] === cur[1];
+  const atCurrent = sameMonth(month, cur);
+  const money_ok = can(user, "finance");
   const rateOf = (lineId: number | null) => rates.data?.lines?.find((r: any) => r.line_id === lineId);
   const thisMonthRates = isMonth && atCurrent ? (rates.data?.lines ?? []) : [];
   const inherited = thisMonthRates.filter((r: any) => !r.own); // no rate of its own: the line's latest earlier one
@@ -168,16 +135,12 @@ export default function StaffShares() {
   );
   return (
     <div className="space-y-5">
-      <PageHeader title="پرسنل و سهم‌ها" subtitle="درآمد هر پرسنل و هر لاین، خزانهٔ ماه، سهم پرسنل، سهم سالن و تسویه با پرسنل" icon={<UsersRound size={22} />}
-        actions={<Tabs value={range} onChange={setRange} items={RANGES.map(([value, label]) => ({ value, label }))} />} />
-      {isMonth && (
-        <div className="flex flex-wrap items-center justify-center gap-2">
-          <button className="btn btn-sm" onClick={() => setMonth(step(month, -1))} title="ماه قبل"><ChevronRight size={16} />ماه قبل</button>
-          <div className="min-w-32 rounded-2xl sm:min-w-40 px-4 py-2 text-center text-lg font-bold" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>{monthName(month)}</div>
-          <button className="btn btn-sm" disabled={atCurrent} onClick={() => setMonth(step(month, 1))} title="ماه بعد">ماه بعد<ChevronLeft size={16} /></button>
-          {!atCurrent && <button className="btn btn-sm" onClick={() => setMonth(cur)}>این ماه</button>}
-        </div>
-      )}
+      <PageHeader title="پرسنل و سهم‌ها" subtitle="کارکرد هر پرسنل و هر لاین، خزانهٔ ماه، سهم پرسنل و سالن، برداشتی‌ها و تسویهٔ آخر ماه" icon={<UsersRound size={22} />}
+        actions={<div className="flex flex-wrap items-center gap-2">
+          {money_ok && <button className="btn btn-sm" onClick={() => setBatch(true)}><Upload size={14} />ثبت چند رسید پرداخت</button>}
+          <Tabs value={range} onChange={setRange} items={RANGES.map(([value, label]) => ({ value, label }))} />
+        </div>} />
+      {isMonth && <MonthNav month={month} onChange={setMonth} />}
       {(inherited.length > 0 || kept.length > 0) && (
         <div className="space-y-1 rounded-2xl bg-amber-500/10 p-3 text-sm leading-7 text-amber-800 dark:text-amber-200">
           {inherited.length > 0 && <div>
@@ -200,15 +163,16 @@ export default function StaffShares() {
               help="درصدی از درآمد هر لاین که اول برداشته می‌شود (مال سالن است)؛ سهم پرسنل از باقیماندهٔ آن حساب می‌شود. درصد هر لاین برای هر ماه جدا تعیین می‌شود." />
             <Stat label="سهم پرسنل" value={cmoney(t.staff_share)} tone="amber" />
             <Stat label="سهم سالن (مدیریت)" value={cmoney(t.salon_share)} tone="emerald"
-              hint={t.forfeits ? `به‌علاوهٔ ${cmoney(t.forfeits)} بیعانهٔ سوخت‌شده` : undefined}
-              help="درآمد منهای خزانه و منهای سهم پرسنل. خزانه + سهم پرسنل + سهم سالن = درآمد خدمات." />
-            <Stat label="مانده بدهی به پرسنل (تا امروز)" value={cmoney(t.balance)} hint={`پرداخت‌شده در دوره: ${cmoney(t.paid)}`} tone="sky" />
+              hint={t.forfeits ? `شامل سهم سالن از ${cmoney(t.forfeits)} بیعانهٔ سوخت‌شده` : undefined}
+              help="درآمد منهای خزانه و منهای سهم پرسنل. خزانه + سهم پرسنل + سهم سالن = درآمد خدمات + بیعانه‌های سوخت‌شده." />
+            <Stat label="مانده با پرسنل (تا امروز)" value={cmoney(t.balance)} hint={`پرداخت‌شده در دوره (برداشتی و تسویه): ${cmoney(t.paid)}`} tone="sky"
+              help="جمع چیزی که سالن به پرسنل بدهکار است (سهم‌هایی که هنوز پرداخت نشده)، منهای پرسنلی که بیشتر از سهمشان برداشته‌اند." />
           </div>
           <Card title={isMonth ? `خزانه و تقسیم سهم - ${monthName(month)}` : "به تفکیک لاین"} pad={false}
             actions={<HelpTip title="خزانه چیست؟">برای هر لاین و هر ماه: اول «درصد خزانه» از درآمد خدمات برداشته می‌شود. باقیمانده با درصد هر پرسنل بین پرسنل و سالن تقسیم می‌شود. مثال: درآمد ۱۰۰ میلیون، خزانه ۴۲٪ = ۴۲ میلیون، باقیمانده ۵۸ میلیون؛ پرسنل ۳۰٪ = ۱۷٫۴ میلیون، سالن ۴۰٫۶ میلیون.</HelpTip>}>
             <div className="overflow-x-auto">
               <table className="table">
-                <thead><tr><th>لاین</th><th>تعداد خدمت</th><th>درآمد</th>{isMonth && <th>درصد خزانه</th>}<th>خزانه</th><th>باقیمانده</th><th>سهم پرسنل</th><th>سهم سالن</th><th>بیعانهٔ سوخت‌شده</th></tr></thead>
+                <thead><tr><th>لاین</th><th>تعداد خدمت</th><th>درآمد خدمات</th><th>بیعانهٔ سوخت‌شده</th>{isMonth && <th>درصد خزانه</th>}<th>خزانه</th><th>باقیمانده</th><th>سهم پرسنل</th><th>سهم سالن</th></tr></thead>
                 <tbody>{(() => {
                   const rows = [...data.lines];
                   if (isMonth) for (const r of rates.data?.lines ?? []) if (!rows.some((x: any) => x.line_id === r.line_id))
@@ -219,6 +183,7 @@ export default function StaffShares() {
                       <tr key={r.line_id ?? 0}>
                         <td className="font-semibold">{r.name}{r.returned > 0 && <div className="muted text-[11px] font-normal">شامل {money(r.returned)} برگشتی از فروش‌های قبل</div>}</td>
                         <td className="num">{num(r.services)}</td><td className="num">{money(r.revenue)}</td>
+                        <td className="num">{r.forfeits ? money(r.forfeits) : "—"}</td>
                         {isMonth && <td>{rate ? (
                           <span className="inline-flex items-center gap-1">
                             <span className={`badge ${rate.own && rate.source !== "auto" ? "bg-violet-500/15 text-violet-700 dark:text-violet-300" : "bg-amber-500/15 text-amber-700 dark:text-amber-300"}`}
@@ -228,9 +193,8 @@ export default function StaffShares() {
                             {mayEdit && <button className="btn btn-sm px-2 py-0.5" title="تعیین درصد خزانهٔ این ماه" onClick={() => setEditing(rate)}><Pencil size={13} /></button>}
                           </span>) : <span className="muted">—</span>}</td>}
                         <td className="num font-semibold text-violet-600">{money(r.treasury)}</td>
-                        <td className="num">{money(r.revenue - r.treasury)}</td>
+                        <td className="num">{money(r.revenue + r.forfeits - r.treasury)}</td>
                         <td className="num text-amber-600">{money(r.staff_share)}</td><td className="num font-semibold text-emerald-600">{money(r.salon_share)}</td>
-                        <td className="num text-emerald-600">{r.forfeits ? money(r.forfeits) : "—"}</td>
                       </tr>
                     );
                   });
@@ -238,7 +202,8 @@ export default function StaffShares() {
               </table>
             </div>
             <p className="muted px-5 py-3 text-xs leading-6">
-              خزانه + سهم پرسنل + سهم سالن = درآمد خدمات (در دفاتر تا آخرین ریال یکی است؛ اعداد جدول به تومان گرد شده‌اند و ممکن است ۱ تومان اختلاف دیده شود). بیعانهٔ مشتری‌ای که نیامد، درآمد همان لاین است و همه‌اش سهم سالن است (پرسنل از آن سهمی ندارد و خزانه هم از آن برداشته نمی‌شود).
+              خزانه + سهم پرسنل + سهم سالن = درآمد خدمات + بیعانهٔ سوخت‌شده (در دفاتر تا آخرین ریال یکی است؛ اعداد جدول به تومان گرد شده‌اند و ممکن است ۱ تومان اختلاف دیده شود).
+              بیعانهٔ مشتری‌ای که نیامد، مثل درآمد همان لاین است: خزانهٔ ماه از آن برداشته می‌شود و از باقیمانده، پرسنلِ آن بیعانه سهمش را می‌گیرد (اگر بیعانه پرسنل نداشته باشد، باقیمانده مال سالن است). بیعانه‌هایی که پیش از نسخهٔ ۱.۲۲ سوخت شده‌اند همان‌طور که بودند (همه‌اش سهم سالن) می‌مانند.
               {isMonth && mayEdit && " درصد خزانهٔ ماه‌های گذشته را هم می‌توانید عوض کنید؛ قبل از ذخیره نشان می‌دهد سهم هر پرسنل چقدر عوض می‌شود."}
             </p>
           </Card>
@@ -246,16 +211,21 @@ export default function StaffShares() {
             <div className="overflow-x-auto">
               {data.staff.length === 0 ? <Empty text="پرسنلی ثبت نشده؛ از تنظیمات ← پرسنل و کاربران اضافه کنید" /> : (
                 <table className="table">
-                  <thead><tr><th>پرسنل</th><th>لاین</th><th>درصد</th><th>تعداد خدمت</th><th>درآمد</th><th>خزانه</th><th>سهم پرسنل</th><th>سهم سالن</th><th>پرداخت در دوره</th><th>مانده تا امروز</th><th></th></tr></thead>
+                  <thead><tr><th>پرسنل</th><th>لاین</th><th>درصد</th><th>تعداد خدمت</th><th>درآمد</th><th>بیعانهٔ سوخت‌شده</th><th>خزانه</th><th>سهم پرسنل</th><th>سهم سالن</th><th>پرداخت در دوره</th><th>مانده تا امروز</th><th></th></tr></thead>
                   <tbody>{data.staff.map((r: any) => (
                     <tr key={r.staff_id ?? 0} className={r.staff_id ? "" : "text-amber-700 dark:text-amber-300"}>
-                      <td className="font-semibold">{r.name}{r.active === false && <span className="badge mr-2 bg-slate-500/15 text-[10px] text-slate-500" title="این پرسنل غیرفعال شده ولی هنوز با او حساب داریم">غیرفعال</span>}</td><td className="muted">{r.line ?? "—"}</td>
+                      <td className="font-semibold">{r.staff_id && money_ok ? <button className="font-semibold text-violet-700 hover:underline dark:text-violet-300" onClick={() => setStatement(r)} title="صورت‌حساب ماه">{r.name}</button> : r.name}{r.active === false && <span className="badge mr-2 bg-slate-500/15 text-[10px] text-slate-500" title="این پرسنل غیرفعال شده ولی هنوز با او حساب داریم">غیرفعال</span>}</td><td className="muted">{r.line ?? "—"}</td>
                       <td className="num" title="درصد فعلی؛ از باقیماندهٔ بعد از خزانه">{faDigits(String(+Number(r.percent || 0).toFixed(2))).replace(".", "٫")}٪</td>
-                      <td className="num">{num(r.services)}</td><td className="num">{money(r.revenue)}</td><td className="num text-violet-600">{money(r.treasury)}</td>
+                      <td className="num">{num(r.services)}</td><td className="num">{money(r.revenue)}</td><td className="num">{r.forfeits ? money(r.forfeits) : "—"}</td><td className="num text-violet-600">{money(r.treasury)}</td>
                       <td className="num font-semibold text-amber-600">{money(r.staff_share)}</td><td className="num font-semibold text-emerald-600">{money(r.salon_share)}</td>
                       <td className="num">{money(r.paid)}</td>
-                      <td className={`num font-bold ${r.balance < 0 ? "text-rose-600" : ""}`} title={r.balance < 0 ? "بیشتر از سهمش گرفته (پیش‌پرداخت)؛ از سهم ماه‌های بعد کم می‌شود" : undefined}>{money(r.balance)}{r.balance < 0 && <div className="text-[10px] font-normal">پیش‌پرداخت</div>}</td>
-                      <td>{r.staff_id && r.balance > 0 && can(user, "finance") && <button className="btn btn-sm" onClick={() => setPayout(r)}><HandCoins size={14} />تسویه</button>}</td>
+                      <td className={`num font-bold ${r.balance < 0 ? "text-rose-600" : ""}`} title={r.balance < 0 ? "بیشتر از سهمش گرفته؛ از سهم ماه‌های بعد کم می‌شود" : undefined}>{money(r.balance)}{r.balance < 0 && <div className="text-[10px] font-normal">بدهکار</div>}</td>
+                      <td>{r.staff_id && money_ok && (
+                        <div className="flex flex-wrap gap-1">
+                          <button className="btn btn-sm" onClick={() => setPayout({ row: r, kind: "advance" })} title="پولی که در طول ماه می‌گیرد"><Wallet size={14} />برداشتی</button>
+                          {r.balance > 0 && <button className="btn btn-sm" onClick={() => setPayout({ row: r, kind: "settlement" })} title="باقیماندهٔ سهم"><HandCoins size={14} />تسویه</button>}
+                          <button className="btn btn-sm px-2" onClick={() => setStatement(r)} title="صورت‌حساب ماه"><FileText size={14} /></button>
+                        </div>)}</td>
                     </tr>
                   ))}</tbody>
                 </table>
@@ -265,8 +235,16 @@ export default function StaffShares() {
           </Card>
         </>
       )}
-      <Modal open={!!payout} onClose={() => setPayout(null)} title="تسویه با پرسنل">
-        {payout && <Payout row={payout} onDone={() => { setPayout(null); reload(); }} />}
+      <Modal open={!!payout} onClose={() => { setPayout(null); reload(); }} title={payout?.kind === "advance" ? `برداشتی - ${payout.row.name}` : `تسویه با ${payout?.row.name ?? ""}`}>
+        {payout && <PayoutForm person={{ staff_id: payout.row.staff_id, name: payout.row.name, mobile: payout.row.mobile, balance: payout.row.balance }}
+          kind={payout.kind} amount={payout.kind === "settlement" ? Math.max(0, payout.row.balance) : 0} month={isMonth ? month : undefined}
+          onDone={() => { setPayout(null); reload(); }} />}
+      </Modal>
+      <Modal open={!!statement} onClose={() => { setStatement(null); reload(); }} title="صورت‌حساب ماه" wide>
+        {statement && <Statement staffId={statement.staff_id} month={isMonth ? month : undefined} onChanged={reload} />}
+      </Modal>
+      <Modal open={batch} onClose={() => { setBatch(false); reload(); }} title="ثبت چند رسید پرداخت" wide>
+        {batch && <ReceiptBatch onDone={() => { setBatch(false); reload(); }} />}
       </Modal>
       <Modal open={!!editing} onClose={() => { setEditing(null); rates.reload(); }} title="درصد خزانهٔ ماه" wide>
         {editing && <RateEditor rate={editing} month={month} onDone={() => { setEditing(null); reloadAll(); }} />}

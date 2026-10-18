@@ -678,7 +678,7 @@ function StaffAndUsers() {
   const { user } = useAuth();
   const staff = useApi<any[]>("/api/staff");
   const users = useApi<any[]>(can(user, "users") ? "/api/auth/users" : null);
-  const [s, setS] = useState({ full_name: "", commission_percent: 30, line_id: 0 });
+  const [s, setS] = useState({ full_name: "", mobile: "", commission_percent: 30, line_id: 0 });
   const lines = useApi<any[]>("/api/lines");
   const [drafts, setDrafts] = useState<Record<number, any>>({});
   const dirtyIds = Object.keys(drafts).map(Number);
@@ -732,7 +732,7 @@ function StaffAndUsers() {
   }
   return (
     <div className="space-y-4">
-      <Card title="پرسنل" actions={dirtyIds.length > 0 ? <button className="btn btn-primary btn-sm" onClick={saveAll}><Save size={14} />ذخیره همه ({num(dirtyIds.length)})</button> : null}>
+      <Card title="پرسنل (سهم‌بگیر از خدمات)" actions={dirtyIds.length > 0 ? <button className="btn btn-primary btn-sm" onClick={saveAll}><Save size={14} />ذخیره همه ({num(dirtyIds.length)})</button> : null}>
         {!canEdit && <p className="muted mb-2 text-xs">پرسنل را فقط مدیر می‌تواند اضافه یا تغییر دهد؛ این‌جا فقط برای دیدن است.</p>}
         <fieldset disabled={!canEdit} className="space-y-2">
           <div className="muted hidden grid-cols-12 gap-2 px-1 text-xs font-bold sm:grid">
@@ -768,18 +768,20 @@ function StaffAndUsers() {
           })}
         </fieldset>
         {canEdit && <div className="mt-4 grid grid-cols-12 gap-2 rounded-2xl border border-dashed p-2" style={{ borderColor: "var(--border)" }}>
-          <input className="input col-span-12 sm:col-span-4" placeholder="نام پرسنل جدید" value={s.full_name} onChange={(e) => setS({ ...s, full_name: e.target.value })} />
-          <select className="input col-span-6 sm:col-span-4" value={s.line_id} onChange={(e) => setS({ ...s, line_id: Number(e.target.value) })}>
+          <input className="input col-span-12 sm:col-span-3" placeholder="نام پرسنل جدید" value={s.full_name} onChange={(e) => setS({ ...s, full_name: e.target.value })} />
+          <input className="input num col-span-6 sm:col-span-2" dir="ltr" placeholder="موبایل" value={s.mobile} onChange={(e) => setS({ ...s, mobile: e.target.value })} />
+          <select className="input col-span-6 sm:col-span-3" value={s.line_id} onChange={(e) => setS({ ...s, line_id: Number(e.target.value) })}>
             <option value={0}>لاین…</option>
             {(lines.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
           <span className="col-span-3 flex items-center gap-1 sm:col-span-2"><input className="input num" type="number" title="درصد سهم پرسنل" value={s.commission_percent} onChange={(e) => setS({ ...s, commission_percent: Number(e.target.value) })} /><span className="muted text-xs">٪</span></span>
           <button className="btn btn-primary col-span-3 sm:col-span-2" disabled={!s.full_name} onClick={async () => {
-            try { await api("/api/staff", { body: { ...s, line_id: s.line_id || null } }); toast(`${s.full_name} اضافه شد`); setS({ full_name: "", commission_percent: 30, line_id: 0 }); staff.reload(); }
+            try { await api("/api/staff", { body: { ...s, mobile: s.mobile || null, line_id: s.line_id || null } }); toast(`${s.full_name} اضافه شد`); setS({ full_name: "", mobile: "", commission_percent: 30, line_id: 0 }); staff.reload(); }
             catch (e: any) { toast(e.message, "error"); }
           }}><Plus size={14} />افزودن</button>
         </div>}
-        <p className="muted mt-2 text-xs leading-6">هر پرسنل به یک لاین وصل می‌شود؛ با انتخاب هر خدمت، پرسنل همان لاین خودکار انتخاب می‌شود (اگر لاین چند پرسنل داشته باشد، فقط پرسنل همان لاین نمایش داده می‌شوند). درصد = سهم پرسنل از مبلغ خالص هر خدمت بعد از برداشتن خزانهٔ آن ماهِ لاین؛ باقیمانده سهم سالن است (خزانهٔ هر ماه در صفحهٔ «پرسنل و سهم‌ها» تعیین می‌شود). گزارش در منوی «پرسنل و سهم‌ها». ردیف‌های تغییرکرده زرد می‌شوند تا ذخیره کنید.</p>
+        <p className="muted mt-2 text-xs leading-6">هر پرسنل به یک لاین وصل می‌شود؛ با انتخاب هر خدمت، پرسنل همان لاین خودکار انتخاب می‌شود (اگر لاین چند پرسنل داشته باشد، فقط پرسنل همان لاین نمایش داده می‌شوند). درصد = سهم پرسنل از مبلغ خالص هر خدمت بعد از برداشتن خزانهٔ آن ماهِ لاین؛ باقیمانده سهم سالن است (خزانهٔ هر ماه در صفحهٔ «پرسنل و سهم‌ها» تعیین می‌شود). گزارش، برداشتی و تسویه در منوی «پرسنل و سهم‌ها». موبایل برای فرستادن رسید پرداخت در واتساپ و شناختن رسیدهاست. ردیف‌های تغییرکرده زرد می‌شوند تا ذخیره کنید.
+          کارمندان با حقوق ثابت (منشی، نظافت...) اینجا نیستند: آن‌ها را در منوی <a href="/employees" className="font-bold underline">کارمندان و حقوق</a> اضافه کنید.</p>
       </Card>
       {can(user, "users") && (
         <Card title="کاربران سیستم و سطح دسترسی">

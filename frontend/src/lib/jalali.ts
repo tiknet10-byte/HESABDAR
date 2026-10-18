@@ -82,3 +82,23 @@ export function formatJShort(s: string): string {
   const [, jm, jd] = toJalali(d.getFullYear(), d.getMonth() + 1, d.getDate());
   return `${J_WEEKDAYS[jWeekday(d)]} ${faDigits(jd)} ${J_MONTHS[jm - 1]} · ${faDigits(pad(d.getHours()))}:${faDigits(pad(d.getMinutes()))}`;
 }
+
+/** a Jalali month [year, month] (pages that show one month: staff, employees, expenses) */
+export type YM = [number, number];
+export const thisMonth = (): YM => {
+  const d = new Date();
+  const [jy, jm] = toJalali(d.getFullYear(), d.getMonth() + 1, d.getDate());
+  return [jy, jm];
+};
+export const stepMonth = ([jy, jm]: YM, by: number): YM => {
+  const n = jy * 12 + (jm - 1) + by;
+  return [Math.floor(n / 12), (n % 12) + 1];
+};
+export const monthName = ([jy, jm]: YM) => `${J_MONTHS[jm - 1]} ${faDigits(jy)}`;
+export const sameMonth = (a: YM, b: YM) => a[0] === b[0] && a[1] === b[1];
+/** the Jalali month of a local ISO date / Date */
+export const monthOf = (s: string | Date): YM => {
+  const d = typeof s === "string" ? parseLocal(s) : s;
+  const [jy, jm] = toJalali(d.getFullYear(), d.getMonth() + 1, d.getDate());
+  return [jy, jm];
+};

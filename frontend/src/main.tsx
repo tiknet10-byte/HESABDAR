@@ -22,6 +22,8 @@ import Reports from "./pages/Reports";
 import Scan from "./pages/Scan";
 import PrintAppointments from "./pages/PrintAppointments";
 import PrintInvoice from "./pages/PrintInvoice";
+import PrintStaff from "./pages/PrintStaff";
+import Employees from "./pages/Employees";
 import SettingsPage from "./pages/Settings";
 import StaffShares from "./pages/StaffShares";
 import { Loading } from "./components/ui";
@@ -94,6 +96,7 @@ function App() {
             <Routes>
               <Route path="print/appointments" element={<PrintAppointments />} />
               <Route path="print/invoice/:id" element={<PrintInvoice />} />
+              <Route path="print/staff/:id" element={<PrintStaff />} />
               <Route element={<Layout />}>
                 <Route index element={<Dashboard />} />
                 <Route path="invoices" element={<Invoices />} />
@@ -106,6 +109,7 @@ function App() {
                 <Route path="assistant" element={<Assistant />} />
                 <Route path="reports" element={<Reports />} />
                 <Route path="staff" element={<StaffShares />} />
+                <Route path="employees" element={<Employees />} />
                 <Route path="expenses" element={<Expenses />} />
                 <Route path="capital" element={<Capital />} />
                 <Route path="ledger" element={<Ledger />} />

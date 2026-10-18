@@ -20,6 +20,9 @@ const REF_STYLE: Record<string, string> = {
   expense: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
   commission: "bg-fuchsia-500/15 text-fuchsia-600 dark:text-fuchsia-400",
   staff_payout: "bg-orange-500/15 text-orange-600 dark:text-orange-400",
+  forfeit_commission: "bg-fuchsia-500/15 text-fuchsia-600 dark:text-fuchsia-400",
+  salary: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
+  expense_void: "bg-zinc-500/15 text-zinc-500",
 };
 const REF_FILTERS: { value: string; label: string }[] = [
   { value: "", label: "همه اسناد" },
@@ -29,7 +32,10 @@ const REF_FILTERS: { value: string; label: string }[] = [
   { value: "deposit_apply", label: "تسویه بیعانه با فاکتور" },
   { value: "expense", label: "هزینه" },
   { value: "commission", label: "سهم پرسنل" },
-  { value: "staff_payout", label: "پرداخت به پرسنل" },
+  { value: "forfeit_commission", label: "سهم پرسنل از بیعانهٔ سوخت‌شده" },
+  { value: "staff_payout", label: "پرداخت به پرسنل و کارمندان (برداشتی، تسویه)" },
+  { value: "salary", label: "حقوق کارمندان" },
+  { value: "expense_void", label: "ابطال هزینه" },
   { value: "invoice_void", label: "ابطال فاکتور" },
 ];
 const RANGES: Record<string, { label: string; days: number | null }> = {
@@ -76,7 +82,18 @@ function explain(e: Entry): string {
     case "commission":
       return `سهم پرسنل از این فاکتور (${amt}) به‌عنوان هزینه سالن و طلب پرسنل ثبت شد؛ هنوز پولی پرداخت نشده است.`;
     case "staff_payout":
-      return `${amt} از ${names(cashOut)} به پرسنل پرداخت شد و به همین اندازه از طلب پرسنل کم شد.`;
+      if (cashIn.length || dr.every((l) => !l.code.startsWith("22"))) return `پرداخت ${amt} به پرسنل باطل شد؛ پول به ${names(dr)} برگشت و طلب پرسنل به همان اندازه برگشت.`;
+      return cashOut.length
+        ? `${amt} از ${names(cashOut)} به پرسنل/کارمند پرداخت شد (برداشتی یا تسویه) و به همین اندازه از طلب او کم شد (اگر بیشتر از طلبش باشد، بدهکار می‌شود).`
+        : `${amt} از جیب مدیر به پرسنل/کارمند پرداخت شد؛ از طلب او کم و به سرمایهٔ مدیر اضافه شد.`;
+    case "forfeit_commission":
+      return `سهم پرسنل از بیعانهٔ سوخت‌شده (${amt}، بعد از خزانهٔ ماه) به‌عنوان هزینه سالن و طلب پرسنل ثبت شد.`;
+    case "salary":
+      return dr.some((l) => l.code.startsWith("51"))
+        ? `حقوق ماه کارمند (${amt}) به‌عنوان هزینهٔ کلینیک و طلب کارمند ثبت شد؛ هنوز پولی پرداخت نشده است.`
+        : `حقوق ثبت‌شدهٔ کارمند (${amt}) باطل شد.`;
+    case "expense_void":
+      return `هزینهٔ ${amt} که اشتباه ثبت شده بود باطل شد و پول به ${names(dr)} برگشت.`;
     case "invoice_void":
       return `فاکتور باطل شد؛ همان سند قبلی دقیقاً برعکس ثبت شد تا اثر آن از دفاتر پاک شود.`;
     default:
