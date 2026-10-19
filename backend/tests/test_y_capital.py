@@ -101,6 +101,10 @@ def test_old_forfeits_are_moved_to_their_line(client, accounts, services):
             ln.line_id = None
             if ln.credit:
                 ln.account_id = plain.id
+        d = db.get(Deposit, dep["id"])  # and without the shares kept since 1.22
+        d.forfeit_line_id = d.treasury_bp = d.treasury_amount = d.commission_percent = d.commission_amount = None
+        for e in db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "forfeit_commission", JournalEntry.ref_id == dep["id"])):
+            db.delete(e)
         db.commit()
         assert accounting.reclass_forfeits(db) == 1
         assert accounting.reclass_forfeits(db) == 0  # once only

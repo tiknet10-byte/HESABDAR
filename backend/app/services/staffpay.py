@@ -233,7 +233,7 @@ def _payout_row(db: Session, p: StaffPayout, accounts: dict[int, str]) -> dict:
     return {"id": p.id, "kind": p.kind, "amount": p.amount, "paid_at": p.paid_at.isoformat(timespec="minutes"),
             "jy": p.jy, "jm": p.jm, "account": "از جیب مدیر" if p.from_owner else accounts.get(p.payment_account_id),
             "payment_account_id": p.payment_account_id, "from_owner": p.from_owner, "reference": p.reference,
-            "description": p.description, "source": p.source, "status": p.status, "has_image": bool(p.image_path),
+            "description": p.description, "source": p.source, "status": p.status, "has_image": bool(p.image_sha256),
             "void_reason": p.void_reason}
 
 

@@ -570,6 +570,9 @@ def link_deposit(did: int, appointment_id: int, db: Session = Depends(get_db), u
     a = _get(db, Appointment, appointment_id, "نوبت")
     if a.customer_id != d.customer_id:
         raise HTTPException(400, "نوبت متعلق به مشتری دیگری است")
+    if d.status != "held":
+        # a forfeited deposit's line and shares are booked with it; a used / refunded one is closed
+        raise HTTPException(400, "بیعانه‌ای که بسته شده (استفاده، استرداد یا سوخت) به نوبت دیگری وصل نمی‌شود")
     d.appointment_id = a.id
     if not d.service_id:
         d.service_id = a.service_id

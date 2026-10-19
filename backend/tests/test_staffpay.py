@@ -472,3 +472,68 @@ def _ledger_before_today(prefix: str) -> int:
                              .where(LedgerAccount.code.like(f"{prefix}%"),
                                     (JournalEntry.at < datetime.combine(TODAY, time.min))
                                     | (JournalEntry.at > datetime.combine(TODAY, time.max)))) or 0)
+
+
+def test_review_fixes_receipt_owner_dates_links_and_backups(client, accounts):
+    """The receipt of someone else is pointed out (and its card not learned for the wrong person); a date with a unit in
+    the words never breaks reading; a closed deposit is not linked to an appointment; a booked receipt's picture is
+    kept in the database (in every backup), the waiting copy on disk is not needed any more."""
+    line, svc, sara = setup(client, "رسید سارا", percent=50)
+    negar = client.post("/api/staff", json={"full_name": "نگار رضایی‌فر", "line_id": line["id"], "commission_percent": 50}).json()
+    text = RECEIPT.format(src="0000", name="نگار رضایی‌فر", ref="66001").replace("4321", "9876")
+    r = client.post("/api/staff/payout-receipt", data={"text": text, "caption": "برداشتی نگار", "staff_id": str(sara["id"])}).json()
+    assert r["suggest"]["staff_id"] == negar["id"]  # the form for Sara now warns: it looks like Negar's
+    assert pay(client, sara, 2_500_000, kind="advance", payment_account_id=accounts["صندوق نقدی"], receipt=r["receipt"]).status_code == 200
+    from app.models import ReceiptImage, Staff
+
+    with _db() as db:
+        assert "9876" not in (db.get(Staff, sara["id"]).cards or [])  # not learned for the wrong person
+    # dates and odd numbers in the words
+    for caption in ("تسویه مهر 1405/07/30 هزار", "برداشتی ۱.۵۰۰.۰۰۰ هزار", "مساعده ۲/۵/۱۴۰۵ م"):
+        assert client.post("/api/staff/payout-receipt", data={"text": text, "caption": caption}).status_code == 200
+    # a forfeited deposit can't be moved to another appointment (its line and shares are booked)
+    dep = deposit(client, accounts, svc, sara, 1_000_000)
+    forfeit(client, dep)
+    from app.models import Appointment, Deposit
+
+    with _db() as db:
+        d = db.get(Deposit, dep["id"])
+        a = Appointment(customer_id=d.customer_id, service_id=svc["id"], start_at=datetime.now() + timedelta(days=2))
+        db.add(a)
+        db.commit()
+        aid = a.id
+    assert client.post(f"/api/deposits/{dep['id']}/appointment", params={"appointment_id": aid}).status_code == 400
+    # the picture of a booked receipt lives in the database
+    png = b"\x89PNG\r\n\x1a\n" + b"backup-me"
+    tok = client.post("/api/staff/payout-receipt", files={"file": ("r.png", png, "image/png")}, data={"caption": ""}).json()["token"]
+    p = pay(client, sara, 700_000, payment_account_id=accounts["صندوق نقدی"], receipt_token=tok).json()["payout"]
+    from app.services import payout_receipt
+
+    for f in payout_receipt.receipts_dir().iterdir():
+        f.unlink()
+    with _db() as db:
+        assert db.get(ReceiptImage, tok).data == png
+    img = client.get(f"/api/staff/payouts/{p['id']}/image")
+    assert img.status_code == 200 and img.content == png and img.headers["x-content-type-options"] == "nosniff"
+    # a token whose picture is gone (or never was) is refused
+    assert pay(client, sara, 1, payment_account_id=accounts["صندوق نقدی"], receipt_token="a" * 64).status_code == 400
+
+
+def test_a_new_forfeit_keeps_the_line_it_was_booked_with(client, accounts):
+    """A forfeit booked with no known line (4800) stays there when its staff member later gets a line: its shares were
+    worked out without a line, so moving only its income would make the line's report disagree with the books."""
+    person = client.post("/api/staff", json={"full_name": "پرسنل بی‌لاین سوخت", "commission_percent": 40}).json()
+    body = {"customer_name": "غایب بی‌لاین", "customer_mobile": _mobile(), "amount": 1_000_000,
+            "payment_account_id": accounts["صندوق نقدی"], "staff_id": person["id"]}
+    dep = client.post("/api/deposits", json=body).json()
+    forfeit(client, dep)
+    line = client.post("/api/lines", json={"name": "لاین بعدی سوخت"}).json()
+    client.put(f"/api/staff/{person['id']}", json={"full_name": person["full_name"], "line_id": line["id"], "commission_percent": 40})
+    from app.services.accounting import reclass_forfeits
+
+    with _db() as db:
+        reclass_forfeits(db)
+        db.commit()
+    assert ledger("48", line_id=line["id"]) == 0  # still on 4800 (no line), with its share
+    assert ledger("5200", staff_id=person["id"]) == 400_000
+    balanced(client)

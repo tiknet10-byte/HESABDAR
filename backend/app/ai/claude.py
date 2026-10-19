@@ -93,8 +93,9 @@ def extract_json(text: str) -> Any:
     return json.loads(body[start:])
 
 
-def vision_extract(image_bytes: bytes, media_type: str, instruction: str) -> Any:
-    """Send an image (receipt screenshot, sales-book photo, PDF) to Claude and get JSON back."""
+def vision_extract(image_bytes: bytes, media_type: str, instruction: str, timeout: float | None = None) -> Any:
+    """Send an image (receipt screenshot, sales-book photo, PDF) to Claude and get JSON back. timeout: seconds to wait at
+    most (a person is waiting on the form)."""
     data = base64.standard_b64encode(image_bytes).decode()
     block = ({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}}
              if media_type == "application/pdf"
@@ -102,6 +103,7 @@ def vision_extract(image_bytes: bytes, media_type: str, instruction: str) -> Any
     resp = create(
         output_config={"effort": "medium"},
         messages=[{"role": "user", "content": [block, {"type": "text", "text": instruction + "\nOnly output JSON."}]}],
+        **({"timeout": timeout} if timeout else {}),
     )
     if resp.stop_reason == "refusal":
         raise RuntimeError("AI declined the request")

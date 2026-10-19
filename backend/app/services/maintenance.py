@@ -40,6 +40,7 @@ from ..models import (
     ServiceLine,
     Setting,
     Staff,
+    ReceiptImage,
     SalaryAccrual,
     StaffPayout,
     StockMove,
@@ -60,7 +61,7 @@ from ..models import (
 # products; history rows point at their invoice headers; appointments point at the invoice that settled them.
 TRANSACTIONS = [WooOutbox, WooOrder, WooLog, StockMove, CapitalMove, HoldingMove, SupplierPayment, PurchaseItem, Purchase, TradeHistory, TradeDoc,
                 WaitlistEntry, InboundReceipt, BankTransaction, Payment, Deposit, Appointment, InvoiceItem, Invoice, Expense,
-                StaffPayout, SalaryAccrual,
+                StaffPayout, SalaryAccrual, ReceiptImage,
                 JournalLine, JournalEntry, Alert, ConversationMessage, ConversationState, ImportBatch]
 # kept by "transactions" and "customers", wiped by "factory" (then the defaults are seeded again); children first too
 CATALOG = [TreasuryRate, WooProduct, Product, Supplier, Holding, Service, Staff, PaymentAccount, ServiceLine, KnowledgeItem, LedgerAccount, Setting,

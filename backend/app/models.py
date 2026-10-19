@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    LargeBinary,
     JSON,
     BigInteger,
     Boolean,
@@ -144,6 +145,15 @@ class StaffPayout(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
     voided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     void_reason: Mapped[str] = mapped_column(String(256), default="")
+
+
+class ReceiptImage(Base):
+    """The picture of a booked payout receipt, kept in the database so every backup and restore carries it (1.22)."""
+    __tablename__ = "receipt_images"
+    sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    media_type: Mapped[str] = mapped_column(String(32))
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
 
 
 class SalaryAccrual(Base):

@@ -48,16 +48,33 @@ class ReceiptError(ValueError):
 
 
 # ------------------------------------------------------------------ the saved picture
+# A picture read for the form waits on disk (data/receipts/staff/pending, cleaned after two days); once its payout is
+# booked it is kept in the database (ReceiptImage), so every backup and restore carries it.
+PENDING_DAYS = 2
+
+
 def receipts_dir() -> Path:
     from ..core.config import get_settings
 
-    d = get_settings().backup_dir.parent / "receipts" / "staff"
+    d = get_settings().backup_dir.parent / "receipts" / "staff" / "pending"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
+def _clean_pending(d: Path) -> None:
+    import time
+
+    limit = time.time() - PENDING_DAYS * 86400
+    for f in d.iterdir():
+        try:
+            if f.is_file() and f.stat().st_mtime < limit:
+                f.unlink()
+        except OSError:
+            pass  # in use / already gone: next time
+
+
 def save_image(data: bytes, media_type: str) -> tuple[str, Path]:
-    """Keep the picture under its sha256 (the same receipt twice is one file, and is found again by it)."""
+    """Keep the picture under its sha256 until its payout is booked (the same receipt twice is one file)."""
     if media_type not in IMAGE_EXT:
         raise ReceiptError("فقط عکس (jpg / png / webp) یا PDF رسید را بفرستید")
     if not data:
@@ -66,24 +83,51 @@ def save_image(data: bytes, media_type: str) -> tuple[str, Path]:
         raise ReceiptError("فایل رسید بیش از ۱۰ مگابایت است")
     sha = hashlib.sha256(data).hexdigest()
     d = receipts_dir()
+    _clean_pending(d)
     path = d / f"{sha}.{IMAGE_EXT[media_type]}"
     if path.resolve().parent != d.resolve():
         raise ReceiptError("نام فایل نامعتبر است")
-    if not path.exists():
-        path.write_bytes(data)
+    path.write_bytes(data)  # (again: its date is now, so it is not cleaned while the form is open)
     return sha, path
 
 
-def image_for(sha: str | None) -> Path | None:
-    """The saved picture of a receipt read before (by its sha256), or None."""
-    if not sha or not re.fullmatch(r"[0-9a-f]{64}", sha):
-        return None
+def _pending(sha: str) -> tuple[bytes, str] | None:
     d = receipts_dir()
-    for ext in IMAGE_EXT.values():
+    for media, ext in IMAGE_EXT.items():
         p = d / f"{sha}.{ext}"
         if p.is_file() and p.resolve().parent == d.resolve():
-            return p
+            return p.read_bytes(), media
     return None
+
+
+def keep_image(db: Session, sha: str | None) -> bool:
+    """The payout is booked: its picture goes into the database (once per picture). False: no such picture."""
+    from ..models import ReceiptImage
+
+    if not sha or not re.fullmatch(r"[0-9a-f]{64}", sha):
+        return False
+    if db.get(ReceiptImage, sha) is not None:
+        return True
+    found = _pending(sha)
+    if found is None:
+        return False
+    data, media = found
+    if hashlib.sha256(data).hexdigest() != sha:
+        return False
+    db.add(ReceiptImage(sha256=sha, media_type=media, data=data))
+    return True
+
+
+def image(db: Session, sha: str | None) -> tuple[bytes, str] | None:
+    """The picture of a receipt (from the database, else still waiting on disk), with its media type."""
+    from ..models import ReceiptImage
+
+    if not sha or not re.fullmatch(r"[0-9a-f]{64}", sha):
+        return None
+    row = db.get(ReceiptImage, sha)
+    if row is not None:
+        return row.data, row.media_type
+    return _pending(sha)
 
 
 # ------------------------------------------------------------------ the receipt itself
@@ -123,7 +167,7 @@ def read_image(data: bytes, media_type: str) -> dict | None:
     if not claude.available():
         return None
     try:
-        v = claude.vision_extract(data, media_type, PAYOUT_VISION_PROMPT)
+        v = claude.vision_extract(data, media_type, PAYOUT_VISION_PROMPT, timeout=90)
     except Exception:
         log.exception("payout receipt: vision failed")
         return None
@@ -157,10 +201,15 @@ def _caption_amount(text: str) -> list[int]:
         digits, unit = m.group(1), m.group(2) or ""
         if normalize_mobile(digits) or (not unit and len(re.sub(r"\D", "", digits)) < 5):
             continue  # a mobile number, a year or a day
-        if unit in ("میلیون", "ملیون", "م", "هزار"):
-            n = float(digits.replace(",", "").replace("/", "."))
-        else:
-            n = float(re.sub(r"\D", "", digits))
+        if re.fullmatch(r"\d{1,3}(,\d{3})+", digits):
+            digits = digits.replace(",", "")
+        if len(re.findall(r"[.,/]", digits)) > 1:
+            continue  # a date (1405/07/30) or a number written another way: not an amount
+        try:
+            n = float(digits.replace(",", ".").replace("/", ".")) if unit in ("میلیون", "ملیون", "م", "هزار") \
+                else float(re.sub(r"\D", "", digits))
+        except ValueError:
+            continue
         toman = n * (1_000_000 if unit in ("میلیون", "ملیون", "م") else 1_000 if unit == "هزار" else 1)
         if unit == "ریال":
             return [int(round(n))]
@@ -266,7 +315,14 @@ def read(db: Session, *, image: bytes | None = None, media_type: str | None = No
         warnings.append("مبلغی که در پیام نوشته شده با مبلغ رسید یکی نیست؛ مبلغ رسید پیشنهاد شد، بررسی کنید")
     people = match_people(db, mobile=cap["mobile"], dest_card=receipt["dest_card"],
                           texts=[caption, receipt.get("dest_name") or "", receipt.get("description") or ""])
-    chosen = staff_id or (people[0]["staff_id"] if people and (len(people) == 1 or people[0]["score"] > people[1]["score"]) else None)
+    # whose it looks like, from the receipt and the words alone; the person the form was opened for only when nothing
+    # points at someone else (the form then warns: «به نظر می‌رسد این رسید مال ... است»)
+    best = people[0]["staff_id"] if people and (len(people) == 1 or people[0]["score"] > people[1]["score"]) else None
+    if staff_id and best and best != staff_id:
+        mine = next((p["score"] for p in people if p["staff_id"] == staff_id), 0)
+        if mine >= people[0]["score"]:
+            best = staff_id
+    chosen = best or staff_id
     when = paid_at or local_now()
     kind = cap["kind"]
     if kind is None:  # no word for it: in the middle of the month an advance, around its end the settlement
@@ -300,6 +356,22 @@ def read(db: Session, *, image: bytes | None = None, media_type: str | None = No
                         "paid_at": paid_at.isoformat(timespec="minutes") if paid_at else None,
                         "reference": receipt["reference"], "payment_account_id": _account_for_card(db, receipt["source_card"]),
                         "description": description}}
+
+
+def may_learn(db: Session, person: Staff, receipt: dict) -> bool:
+    """Learn the receipt's card for the person only when nothing on it points at someone else (a card already known
+    as another person's, or another person's name as the receiver)."""
+    card = _last4(receipt.get("dest_card"))
+    if not card:
+        return False
+    if any(card in (p.cards or []) for p in db.scalars(select(Staff).where(Staff.id != person.id))):
+        return False
+    name = receipt.get("dest_name")
+    if name:
+        named = match_people(db, mobile=None, dest_card=None, texts=[str(name)])
+        if named and all(x["staff_id"] != person.id for x in named):
+            return False
+    return True
 
 
 def learn_card(person: Staff, last4: str | None) -> None:

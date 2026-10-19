@@ -557,7 +557,8 @@ def reclass_forfeits(db: Session) -> int:
     48xx account of its line (same entry, same date and amount; only the income account and the line change)."""
     plain = account(db, FORFEITED)
     n = 0
-    for dep in db.scalars(select(Deposit).where(Deposit.status == "forfeited")):
+    # forfeits since 1.22 keep the line (and shares) they were booked with: never moved afterwards
+    for dep in db.scalars(select(Deposit).where(Deposit.status == "forfeited", Deposit.treasury_bp.is_(None))):
         legs = db.scalars(select(JournalLine).join(JournalEntry, JournalEntry.id == JournalLine.entry_id).where(
             JournalEntry.ref_type == "deposit", JournalEntry.ref_id == dep.id, JournalEntry.description.like("سوخت%"))).all()
         income = [ln for ln in legs if ln.account_id == plain.id and ln.credit > 0]

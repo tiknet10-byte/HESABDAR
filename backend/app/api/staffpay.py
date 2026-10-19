@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -52,6 +52,18 @@ class PayoutIn(BaseModel):
     force: bool = False  # it looked like a payment already entered, and the person confirmed it is another one
 
 
+def _small(parsed: dict | None) -> dict | None:
+    """What was read from the receipt, kept with the payout: known fields only, short."""
+    if not isinstance(parsed, dict):
+        return None
+    keys = ("amount", "reference", "paid_at", "bank", "source_card", "dest_card", "dest_name", "iban", "success", "description")
+    out = {k: parsed.get(k) for k in keys if isinstance(parsed.get(k), (str, int, float, bool)) or parsed.get(k) is None}
+    out = {k: (v[:200] if isinstance(v, str) else v) for k, v in out.items()}
+    if isinstance(parsed.get("raw_text"), str):
+        out["raw_text"] = parsed["raw_text"][:4000]
+    return out
+
+
 @router.post("/staff/{pid}/payout")
 def pay(pid: int, body: PayoutIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
     person = db.get(Staff, pid) or _404("شخص")
@@ -64,25 +76,24 @@ def pay(pid: int, body: PayoutIn, db: Session = Depends(get_db), user=Depends(re
             raise HTTPException(400, "حسابی که پول از آن پرداخت شد را انتخاب کنید")
         if not pa.is_active:
             raise HTTPException(400, f"حساب «{pa.name}» بایگانی شده است؛ حساب دیگری انتخاب کنید")
-    image_path = sha = None
+    sha = None
     if body.receipt_token:
-        img = payout_receipt.image_for(body.receipt_token)
-        if img is None:
-            raise HTTPException(400, "عکس رسید پیدا نشد؛ رسید را دوباره بفرستید")
-        image_path, sha = str(img), body.receipt_token
+        if not payout_receipt.keep_image(db, body.receipt_token):
+            raise HTTPException(400, "عکس رسید پیدا نشد؛ رسید را دوباره انتخاب کنید")
+        sha = body.receipt_token
     parsed = body.receipt if isinstance(body.receipt, dict) else None
     try:
         p = staffpay.pay(db, person, body.amount, kind=body.kind, payment_account=pa, from_owner=body.from_owner,
                          paid_at=body.paid_at, jy=body.jy, jm=body.jm, reference=(body.reference or "").strip(),
                          description=(body.description or "").strip(), source="receipt" if (sha or parsed) else "manual",
-                         image_path=image_path, image_sha256=sha, parsed=parsed, force=body.force, user=user)
+                         image_path=None, image_sha256=sha, parsed=_small(parsed), force=body.force, user=user)
     except staffpay.Duplicate as exc:
         db.rollback()
         raise HTTPException(409, str(exc)) from exc
     except (staffpay.PayError, ValueError) as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
-    if parsed and parsed.get("dest_card"):
+    if parsed and payout_receipt.may_learn(db, person, parsed):
         payout_receipt.learn_card(person, parsed.get("dest_card"))
     db.commit()
     return {"ok": True, "payout": staffpay._payout_row(db, p, _accounts(db)), "balance": staffpay.balance_at(db, pid),
@@ -90,12 +101,13 @@ def pay(pid: int, body: PayoutIn, db: Session = Depends(get_db), user=Depends(re
 
 
 @router.post("/staff/payout-receipt")
-async def read_receipt(file: UploadFile | None = File(None), text: str = Form(""), caption: str = Form(""),
-                       staff_id: int | None = Form(None), db: Session = Depends(get_db), _=Depends(require("finance"))):
-    """Read a payout receipt (its picture or text) and the words sent with it; nothing is booked."""
+def read_receipt(file: UploadFile | None = File(None), text: str = Form(""), caption: str = Form(""),
+                 staff_id: int | None = Form(None), db: Session = Depends(get_db), _=Depends(require("finance"))):
+    """Read a payout receipt (its picture or text) and the words sent with it; nothing is booked. A plain function: the
+    assistant may take a while to read a picture, and the server keeps answering everyone else meanwhile."""
     data, media = None, None
     if file is not None:
-        data = await file.read(payout_receipt.MAX_BYTES + 1)
+        data = file.file.read(payout_receipt.MAX_BYTES + 1)
         media = (file.content_type or "").split(";")[0].strip().lower()
         if media == "image/jpg":
             media = "image/jpeg"
@@ -143,11 +155,13 @@ def void_payout(payout_id: int, body: VoidIn, db: Session = Depends(get_db), use
 @router.get("/staff/payouts/{payout_id}/image")
 def payout_image(payout_id: int, db: Session = Depends(get_db), _=Depends(require("finance"))):
     p = db.get(StaffPayout, payout_id) or _404("پرداخت")
-    img = payout_receipt.image_for(p.image_sha256)
-    if img is None:
+    found = payout_receipt.image(db, p.image_sha256)
+    if found is None:
         _404("عکس رسید")
-    media = {v: k for k, v in payout_receipt.IMAGE_EXT.items()}.get(img.suffix.lstrip("."), "application/octet-stream")
-    return FileResponse(img, media_type=media, headers={"Cache-Control": "private, max-age=3600"})
+    data, media = found
+    return Response(content=data, media_type=media, headers={"Cache-Control": "private, max-age=3600",
+                                                             "X-Content-Type-Options": "nosniff",
+                                                             "Content-Disposition": "inline"})
 
 
 @router.get("/staff/{pid}/statement")
