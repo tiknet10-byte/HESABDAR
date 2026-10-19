@@ -69,6 +69,10 @@ entry whose ref_id was the staff id) get their row at start (`backfill_payouts`)
 is read by `services/payout_receipt.py` to fill the form (nothing is booked by it); its picture is kept under
 `data/receipts/staff/<sha256>`. The capital page shows people who owe us as an asset, not as less owed to the others.
 
+**Amounts** above `accounting.MAX_RIAL` (10^15 Rial) are refused (a key held down); a number too big for the database
+gives a Persian 400, never a broken sum. Receipt pictures of booked payouts are kept in the database
+(`receipt_images`), so backups carry them.
+
 **Expenses in the reports** (summary, daily series, by category) come from the ledger 51xx (`reports.expense_rows`),
 so salaries and voided expenses agree with the profit.
 

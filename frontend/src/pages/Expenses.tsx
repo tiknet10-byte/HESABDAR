@@ -19,7 +19,7 @@ const EXAMPLES: Record<string, string> = {
   "شارژ ساختمان": "شارژ ماهانه",
   "قبوض": "آب، برق، گاز",
   "اینترنت و تلفن": "اینترنت، تلفن ثابت، شارژ موبایل کلینیک",
-  "تعمیر و نگهداری": "تعمیر دستگاه، سرویس، لوازم یدکی",
+  "نگهداری و تعمیرات": "تعمیر دستگاه، سرویس، لوازم یدکی",
   "تجهیزات": "دستگاه و وسیلهٔ تازه",
   "لوازم اداری": "کاغذ، کارتریج، خودکار",
   "تبلیغات": "تبلیغ اینستاگرام، چاپ تراکت",
@@ -124,7 +124,7 @@ export default function Expenses() {
   const [editCats, setEditCats] = useState(false);
   const profit = data?.profit?.total ?? 0;
   const general = (data?.total ?? 0) - (data?.salaries ?? 0);
-  const biggest = data?.by_category?.[0];
+  const biggest = data?.by_category?.find((c: any) => c.name !== SALARY); // the general expenses' biggest (not salaries)
   async function voidOne(e: any) {
     const reason = window.prompt(`هزینهٔ «${e.category}» ${money(e.amount)} باطل شود؟ (مثلاً دو بار ثبت شده) دلیل:`, "");
     if (reason === null) return;
@@ -168,7 +168,12 @@ export default function Expenses() {
             <Card className="min-w-0" title={<span className="flex items-center gap-2"><ListChecks size={16} />هزینه‌های ثبت‌شده{cat && <span className="badge">{cat} <button className="mr-1" onClick={() => setCat("")}>✕</button></span>}</span>} pad={false}
               actions={<div className="relative"><Search size={14} className="muted absolute right-2 top-2.5" /><input className="input w-32 py-1.5 pr-7 text-sm sm:w-40" placeholder="جستجو در شرح" value={q} onChange={(e) => setQ(e.target.value)} /></div>}>
               <div className="overflow-x-auto">
-                {data.rows.length === 0 ? <Empty text="موردی نیست" /> : (
+                {cat === SALARY && (
+                  <p className="m-4 rounded-xl bg-sky-500/10 p-3 text-xs leading-6">
+                    حقوق کارمندانی که در صفحهٔ <Link to="/employees" className="font-bold underline">کارمندان و حقوق</Link> ثبت می‌شود اینجا جدا فهرست نمی‌شود
+                    (جمعش در کادر «به تفکیک دسته» هست)؛ جزئیات هر نفر در همان صفحه است.{data.rows.length ? " ردیف‌های زیر دستمزدهایی است که همین‌جا ثبت شده‌اند." : ""}
+                  </p>)}
+                {data.rows.length === 0 ? (cat === SALARY ? null : <Empty text="موردی نیست" />) : (
                   <table className="table">
                     <thead><tr><th>تاریخ</th><th>دسته</th><th>مبلغ</th><th>از حساب</th><th>شرح</th><th></th></tr></thead>
                     <tbody>{data.rows.map((e: any) => (

@@ -225,6 +225,24 @@ def _reverse(db: Session, ref_type: str, ref_id: int, description: str, at: date
                                    line_id=ln.line_id, staff_id=ln.staff_id) for ln in e.lines], f"{ref_type}_void", ref_id, at=at)
 
 
+def staff_from_pocket(db: Session, s: datetime | None = None, e: datetime | None = None) -> list[dict]:
+    """Payments to staff / employees the owner made from their own pocket (Dr 2200 / Cr 3100), as capital moves (they
+    are voided from the person's statement, not here)."""
+    from ..models import Staff, StaffPayout
+
+    q = select(StaffPayout).where(StaffPayout.from_owner.is_(True), StaffPayout.status == "booked")
+    if s is not None:
+        q = q.where(StaffPayout.paid_at >= s)
+    if e is not None:
+        q = q.where(StaffPayout.paid_at < e)
+    names = {p.id: p.full_name for p in db.scalars(select(Staff))}
+    return [{"id": f"staff-{p.id}", "at": p.paid_at.isoformat(timespec="minutes"), "kind": "staff",
+             "kind_label": "از جیب خودتان به پرسنل دادید", "amount": p.amount, "signed": p.amount, "account": None,
+             "purchase_id": None, "purchase": None, "supplier": None, "customer_id": None, "customer": names.get(p.staff_id),
+             "deposit_id": None, "notes": p.description or "", "status": "active", "staff_id": p.staff_id}
+            for p in db.scalars(q)]
+
+
 def move_out(db: Session, m: CapitalMove) -> dict:
     pa = db.get(PaymentAccount, m.payment_account_id) if m.payment_account_id else None
     pur = db.get(Purchase, m.purchase_id) if m.purchase_id else None
@@ -518,7 +536,9 @@ def position(db: Session, start: date | None = None, end: date | None = None) ->
     moves = list(db.scalars(select(CapitalMove).where(CapitalMove.status == "active", CapitalMove.at >= s, CapitalMove.at < e)))
     hmoves = list(db.scalars(select(HoldingMove).where(HoldingMove.status == "active", HoldingMove.kind.in_(("owner_in", "owner_out")),
                                                        HoldingMove.at >= s, HoldingMove.at < e)))
-    put_in = sum(m.amount for m in moves if m.kind != "withdraw") + sum(m.amount for m in hmoves if m.kind == "owner_in")
+    staff_paid = staff_from_pocket(db, s, e)  # staff / employees paid from the owner's own pocket: money put in too
+    put_in = sum(m.amount for m in moves if m.kind != "withdraw") + sum(m.amount for m in hmoves if m.kind == "owner_in") \
+        + sum(x["amount"] for x in staff_paid)
     taken_out = sum(m.amount for m in moves if m.kind == "withdraw") + sum(m.amount for m in hmoves if m.kind == "owner_out")
     profit = profit_breakdown(db, s, e)
     opening_acc = account(db, accounting.OPENING)
@@ -547,7 +567,7 @@ def position(db: Session, start: date | None = None, end: date | None = None) ->
                    "profit_to_date": t["revenue"] - t["expense"]},
         "flow": flow, "worth_start": before["worth"],
         "profit": profit,
-        "moves": [move_out(db, m) for m in sorted(moves, key=lambda m: (m.at, m.id), reverse=True)],
+        "moves": sorted([move_out(db, m) for m in moves] + staff_paid, key=lambda m: m["at"], reverse=True),
         # equity + profit must equal assets - liabilities (the books balance); 0 when everything is right
         "check": t["asset"] - t["liability"] - t["equity"] - (t["revenue"] - t["expense"]),
     }

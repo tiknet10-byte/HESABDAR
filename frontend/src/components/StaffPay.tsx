@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, getToken } from "../lib/api";
 import { jdatetime, money, num } from "../lib/format";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
-import { faDigits, monthName, monthOf, thisMonth, toLocalIso, type YM } from "../lib/jalali";
+import { faDigits, monthName, monthOf, sameMonth, stepMonth, thisMonth, toJalali, toLocalIso, type YM } from "../lib/jalali";
 import AccountSelect from "./AccountSelect";
 import JalaliPicker from "./JalaliPicker";
 import MonthNav, { MonthSelect } from "./MonthNav";
@@ -91,7 +91,8 @@ export function SendWhatsApp({ person, text, file }: { person: Person; text: str
           <ClipboardCopy size={14} />کپی متن</button>
         {file && file.type.startsWith("image/") && <button className="btn btn-sm" onClick={copyImage}><ClipboardCopy size={14} />کپی عکس رسید</button>}
       </div>
-      {!waNumber(person.mobile) && <div className="muted text-xs">شمارهٔ موبایل این شخص ثبت نشده؛ در واتساپ خودتان او را انتخاب کنید (یا موبایلش را در تنظیمات بنویسید).</div>}
+      {!waNumber(person.mobile) && <div className="muted text-xs">شمارهٔ موبایل این شخص ثبت نشده؛ در واتساپ خودتان او را انتخاب کنید
+        {person.employee ? " (یا موبایلش را در صفحهٔ «کارمندان و حقوق» با دکمهٔ ویرایش بنویسید)." : " (یا موبایلش را در «تنظیمات ← پرسنل و کاربران» بنویسید)."}</div>}
     </div>
   );
 }
@@ -110,11 +111,13 @@ export const payoutText = (person: Person, kind: string, ym: YM, amount: number,
     .filter(Boolean).join("\n");
 
 /** the receipt part of the form: a picture (or the receipt's text) read to fill the rest */
-function ReceiptPicker({ person, caption, onRead }: { person?: Person; caption: string; onRead: (r: any, file: File | null) => void }) {
+function ReceiptPicker({ person, caption, kind, onRead, onBusy }:
+  { person?: Person; caption: string; kind?: string; onRead: (r: any, file: File | null) => void; onBusy?: (b: boolean) => void }) {
   const toast = useToast();
   const [file, setFile] = useState<File | null>(null);
   const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy0] = useState(false);
+  const setBusy = (b: boolean) => { setBusy0(b); onBusy?.(b); };
   const input = useRef<HTMLInputElement>(null);
   const camera = useRef<HTMLInputElement>(null);
   const preview = useObjectUrl(file);
@@ -127,6 +130,7 @@ function ReceiptPicker({ person, caption, onRead }: { person?: Person; caption: 
       form.append("text", t);
       form.append("caption", caption);
       if (person) form.append("staff_id", String(person.staff_id));
+      if (kind) form.append("kind", kind);
       onRead(await api("/api/staff/payout-receipt", { form }), f);
     } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
   }
@@ -158,16 +162,31 @@ function ReceiptPicker({ person, caption, onRead }: { person?: Person; caption: 
 }
 
 /** Give money to a staff member / an employee: an advance during the month, or the month-end settlement / salary. */
+/** the month a payment is for, by default: an advance is for this month; a settlement made in the first half of a month
+ * is for the month before (Shahrivar's share paid on 2 Mehr) */
+const defaultMonth = (kind: string, month?: YM): YM => {
+  const cur = thisMonth();
+  const m = month ?? cur;
+  if (kind !== "settlement" || !sameMonth(m, cur)) return m;
+  const d = new Date();
+  return toJalali(d.getFullYear(), d.getMonth() + 1, d.getDate())[2] <= 15 ? stepMonth(cur, -1) : cur;
+};
+
 export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amount0 = 0, onDone }:
   { person: Person; kind?: string; month?: YM; amount?: number; onDone: () => void }) {
   const toast = useToast();
   const { user } = useAuth();
-  const [kind, setKind] = useState(kind0);
+  const [kind, setKind0] = useState(kind0);
+  const [monthTouched, setMonthTouched] = useState(false);
+  const [monthNote, setMonthNote] = useState("");
+  const [reading, setReading] = useState(false);
   const [amount, setAmount] = useState(amount0);
   const [acc, setAcc] = useState(0);
   const [fromOwner, setFromOwner] = useState(false);
   const [paidAt, setPaidAt] = useState(toLocalIso(new Date()));
-  const [ym, setYm] = useState<YM>(month ?? thisMonth());
+  const [ym, setYm0] = useState<YM>(defaultMonth(kind0, month));
+  const setYm = (m: YM) => { setYm0(m); setMonthTouched(true); setMonthNote(""); };
+  const setKind = (k: string) => { setKind0(k); if (!monthTouched) setYm0(defaultMonth(k, month)); };
   const [reference, setReference] = useState("");
   const [description, setDescription] = useState("");
   const [receipt, setReceipt] = useState<any>(null);
@@ -180,13 +199,20 @@ export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amo
     setReceipt(r);
     setFile(f);
     const s = r.suggest;
+    if (done) return; // read after the payment was already booked: nothing to fill
     if (s.amount) setAmount(s.amount);
     if (s.paid_at) { setPaidAt(s.paid_at); }
+    if (s.kind && s.kind !== kind) setKind0(s.kind); // the words said so («برداشتی» / «تسویه»)
+    if (s.jy && s.jm && !monthTouched) {
+      setYm0([s.jy, s.jm]);
+      setMonthNote(s.month_from === "words" ? "ماه از روی پیام خوانده شد" : "ماه از روی تاریخ رسید پیشنهاد شد");
+    }
     if (s.reference) setReference(s.reference);
     if (s.payment_account_id) { setAcc(s.payment_account_id); setFromOwner(false); }
     if (!description && s.description) setDescription(s.description);
   }
   async function save(force = false) {
+    if (receipt?.failed && !force && !window.confirm("این رسید «ناموفق» یا نامعلوم به نظر می‌رسد. مطمئنید پول واقعاً پرداخت شده و ثبت شود؟")) return;
     setBusy(true);
     try {
       const r = await api(`/api/staff/${person.staff_id}/payout`, {
@@ -233,7 +259,7 @@ export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amo
             {balance - amount < 0 && <span className="text-xs"> (بدهکار می‌شود و از ماه بعد کم می‌شود)</span>}</>}
         </div>
       )}
-      <ReceiptPicker person={person} caption={description} onRead={applyRead} />
+      <ReceiptPicker person={person} caption={description} kind={kind} onRead={applyRead} onBusy={setReading} />
       {receipt && (
         <div className="space-y-1 text-xs">
           {receipt.via === "ai" && <div className="text-emerald-600">رسید با دستیار هوشمند خوانده شد؛ ارقام را یک بار نگاه کنید.</div>}
@@ -245,7 +271,7 @@ export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amo
       <Field label="مبلغ"><MoneyInput value={amount} onChange={setAmount} /></Field>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="تاریخ پرداخت"><JalaliPicker pastOnly value={paidAt} onChange={(v) => { setPaidAt(v); if (kind === "advance") setYm(monthOf(v)); }} /></Field>
-        <Field label="بابت ماه" hint="تسویهٔ مهر که اول آبان داده می‌شود، «مهر» است"><MonthSelect value={ym} onChange={setYm} /></Field>
+        <Field label="بابت ماه" hint={monthNote || "تسویهٔ مهر که اول آبان داده می‌شود، «مهر» است"}><MonthSelect value={ym} onChange={setYm} /></Field>
       </div>
       <Field label="پرداخت از">
         {fromOwner ? <div className="input muted">از جیب خود مدیر (به سرمایهٔ مدیر اضافه می‌شود)</div> : <AccountSelect value={acc} onChange={setAcc} />}
@@ -261,7 +287,8 @@ export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amo
           <button className="btn btn-sm btn-danger" disabled={busy} onClick={() => save(true)}>بله، این پرداخت جداگانه‌ای است؛ ثبت شود</button>
         </div>
       )}
-      <button className="btn btn-primary w-full py-3" disabled={!amount || busy || (!fromOwner && !acc)} onClick={() => save(false)}>
+      {reading && <div className="muted text-center text-xs">صبر کنید تا رسید خوانده شود…</div>}
+      <button className="btn btn-primary w-full py-3" disabled={!amount || busy || reading || (!fromOwner && !acc)} onClick={() => save(false)}>
         <HandCoins size={16} />ثبت {kindLabel(person.employee, kind)} {amount ? money(amount) : ""}
       </button>
     </div>
@@ -349,7 +376,7 @@ export function Statement({ staffId, month: month0, onChanged }: { staffId: numb
       {can(user, "finance") && (
         <div className="grid grid-cols-2 gap-2">
           <button className="btn" onClick={() => setPaying({ kind: "advance", amount: 0 })}><Wallet size={15} />{kindLabel(st.employee, "advance")} جدید</button>
-          <button className="btn btn-primary" onClick={() => setPaying({ kind: "settlement", amount: Math.max(0, st.remaining) })}><HandCoins size={15} />{kindLabel(st.employee, "settlement")}{st.remaining > 0 ? ` (${money(st.remaining)})` : ""}</button>
+          <button className="btn btn-primary" onClick={() => setPaying({ kind: "settlement", amount: Math.max(0, Math.min(st.remaining, st.balance_now)) })}><HandCoins size={15} />{kindLabel(st.employee, "settlement")}{Math.min(st.remaining, st.balance_now) > 0 ? ` (${money(Math.min(st.remaining, st.balance_now))})` : ""}</button>
         </div>
       )}
       <Modal open={!!paying} onClose={() => { setPaying(null); changed(); }} title={`${paying ? kindLabel(st.employee, paying.kind) : ""} - ${st.name}`}>
@@ -373,13 +400,19 @@ function SendPayout({ person, payout }: { person: Person; payout: any }) {
  * checks each row and books it. */
 export function ReceiptBatch({ onDone }: { onDone: () => void }) {
   const toast = useToast();
+  const { user } = useAuth();
+  const ownerOk = can(user, "capital");
   const people = (useApi<any[]>("/api/staff?kind=all").data ?? []).filter((p) => p.is_active);
   const [rows, setRows] = useState<any[]>([]);
   const [reading, setReading] = useState(0);
+  const [bookingAll, setBookingAll] = useState(false);
   const input = useRef<HTMLInputElement>(null);
+  const latest = useRef<any[]>([]); // the rows as they are now (a loop started earlier must not use old ones)
+  latest.current = rows;
+  const inflight = useRef(new Set<string>()); // rows being booked right now: never sent twice
   async function add(files: FileList | null) {
     const list = Array.from(files ?? []);
-    setReading(list.length);
+    setReading((n) => n + list.length);
     for (const f of list) {
       try {
         const form = new FormData();
@@ -387,23 +420,34 @@ export function ReceiptBatch({ onDone }: { onDone: () => void }) {
         form.append("caption", "");
         const r: any = await api("/api/staff/payout-receipt", { form });
         const s = r.suggest;
-        setRows((x) => [...x, { key: `${f.name}-${Math.random()}`, file: f, read: r, staff_id: s.staff_id ?? 0, kind: s.kind, ym: [s.jy, s.jm] as YM,
-          amount: s.amount ?? 0, paid_at: s.paid_at ?? toLocalIso(new Date()), acc: s.payment_account_id ?? 0, reference: s.reference ?? "",
-          description: s.description ?? "", state: r.duplicate ? "dup" : "ready", error: r.duplicate ? "این رسید قبلاً ثبت شده" : "" }]);
+        const state = r.duplicate ? "dup" : r.failed ? "failed" : "ready";
+        setRows((x) => [...x, { key: `${f.name}-${f.size}-${x.length}`, file: f, read: r, staff_id: s.staff_id ?? 0, kind: s.kind, ym: [s.jy, s.jm] as YM,
+          amount: s.amount ?? 0, paid_at: s.paid_at ?? toLocalIso(new Date()), acc: s.payment_account_id ?? 0, accFromReceipt: !!s.payment_account_id,
+          fromOwner: false, reference: s.reference ?? "", description: s.description ?? "", state,
+          error: r.duplicate ? "این رسید قبلاً ثبت شده" : r.failed ? "این رسید «ناموفق» یا نامعلوم به نظر می‌رسد" : "" }]);
       } catch (e: any) { toast(`${f.name}: ${e.message}`, "error"); }
       setReading((n) => n - 1);
     }
   }
-  const set = (key: string, patch: any) => setRows((x) => x.map((r) => (r.key === key ? { ...r, ...patch } : r)));
-  async function book(r: any, force = false) {
-    if (!r.staff_id || !r.amount || !r.acc) { set(r.key, { error: "شخص، مبلغ و حساب را انتخاب کنید" }); return false; }
-    set(r.key, { state: "saving", error: "" });
+  // a booked row stays booked: a late answer (e.g. «already booked» from a second click) never changes it back
+  const set = (key: string, patch: any) => setRows((x) => x.map((r) => (r.key === key && r.state !== "done" ? { ...r, ...patch } : r)));
+  async function book(key: string, force = false) {
+    const r = latest.current.find((x) => x.key === key);
+    if (!r || r.state === "done" || inflight.current.has(key)) return false;
+    if (!r.staff_id || !r.amount || (!r.acc && !r.fromOwner)) { set(key, { error: "شخص، مبلغ و حساب را انتخاب کنید" }); return false; }
+    if (r.state === "failed" && !window.confirm("این رسید «ناموفق» یا نامعلوم به نظر می‌رسد. مطمئنید پول پرداخت شده و ثبت شود؟")) return false;
+    inflight.current.add(key);
+    set(key, { state: "saving", error: "" });
     try {
-      await api(`/api/staff/${r.staff_id}/payout`, { body: { amount: r.amount, kind: r.kind, payment_account_id: r.acc, paid_at: r.paid_at, jy: r.ym[0], jm: r.ym[1],
-        reference: r.reference, description: r.description, receipt_token: r.read.token, receipt: r.read.receipt, force } });
-      set(r.key, { state: "done" });
+      await api(`/api/staff/${r.staff_id}/payout`, { body: { amount: r.amount, kind: r.kind, payment_account_id: r.fromOwner ? null : r.acc,
+        from_owner: r.fromOwner, paid_at: r.paid_at, jy: r.ym[0], jm: r.ym[1], reference: r.reference, description: r.description,
+        receipt_token: r.read.token, receipt: r.read.receipt, force } });
+      set(key, { state: "done" });
       return true;
-    } catch (e: any) { set(r.key, { state: e.status === 409 ? "dup" : "ready", error: e.message }); return false; }
+    } catch (e: any) {
+      set(key, { state: e.status === 409 ? "dup" : r.state === "failed" ? "failed" : "ready", error: e.message });
+      return false;
+    } finally { inflight.current.delete(key); }
   }
   const ready = rows.filter((r) => r.state === "ready");
   return (
@@ -416,10 +460,14 @@ export function ReceiptBatch({ onDone }: { onDone: () => void }) {
         <button className="btn btn-primary" onClick={() => input.current?.click()}><Upload size={15} />انتخاب رسیدها</button>
         <input ref={input} type="file" multiple accept="image/*,application/pdf" className="hidden" onChange={(e) => { add(e.target.files); e.target.value = ""; }} />
         {reading > 0 && <span className="muted text-sm">در حال خواندن {faDigits(reading)} رسید…</span>}
-        {ready.length > 1 && <button className="btn" onClick={async () => { for (const r of ready) await book(r); }}><Check size={15} />ثبت همهٔ ردیف‌های آماده</button>}
+        {ready.length > 1 && <button className="btn" disabled={bookingAll} onClick={async () => {
+          setBookingAll(true);
+          try { for (const k of ready.map((r) => r.key)) await book(k); } finally { setBookingAll(false); }
+        }}><Check size={15} />{bookingAll ? "در حال ثبت…" : "ثبت همهٔ ردیف‌های آماده"}</button>}
       </div>
       {rows.map((r) => (
-        <div key={r.key} className={`space-y-2 rounded-2xl border p-3 ${r.state === "done" ? "border-emerald-500/50 bg-emerald-500/5" : ""}`} style={r.state === "done" ? undefined : { borderColor: "var(--border)" }}>
+        <div key={r.key} className={`space-y-2 rounded-2xl border p-3 ${r.state === "done" ? "border-emerald-500/50 bg-emerald-500/5" : r.state === "failed" ? "border-rose-500/50" : ""}`}
+          style={r.state === "done" || r.state === "failed" ? undefined : { borderColor: "var(--border)" }}>
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <BatchThumb file={r.file} />
             <span className="muted">{r.file.name}</span>
@@ -438,11 +486,16 @@ export function ReceiptBatch({ onDone }: { onDone: () => void }) {
               <MonthSelect value={r.ym} onChange={(m) => set(r.key, { ym: m })} />
               <MoneyInput value={r.amount} onChange={(v) => set(r.key, { amount: v })} />
               <JalaliPicker pastOnly value={r.paid_at} onChange={(v) => set(r.key, { paid_at: v })} />
-              <AccountSelect value={r.acc} onChange={(id) => set(r.key, { acc: id })} />
+              <div>
+                {r.fromOwner ? <div className="input muted text-xs">از جیب خود مدیر</div> : <AccountSelect value={r.acc} onChange={(id) => set(r.key, { acc: id })} />}
+                {!r.accFromReceipt && !r.fromOwner && <div className="muted mt-0.5 text-[11px]">حساب از روی رسید شناخته نشد؛ درستش را انتخاب کنید</div>}
+                {ownerOk && <label className="mt-0.5 flex items-center gap-1 text-[11px]"><input type="checkbox" checked={r.fromOwner} onChange={(e) => set(r.key, { fromOwner: e.target.checked })} />از جیب خودم</label>}
+              </div>
               <input className="input sm:col-span-2" value={r.description} onChange={(e) => set(r.key, { description: e.target.value })} placeholder="توضیح (همان که در واتساپ می‌نویسید)" />
               <div className="flex gap-2">
-                <button className="btn btn-primary flex-1" disabled={r.state === "saving"} onClick={() => book(r, r.state === "dup")}>{r.state === "dup" ? "باز هم ثبت شود" : "ثبت"}</button>
-                <button className="btn" onClick={() => setRows((x) => x.filter((y) => y.key !== r.key))}>حذف</button>
+                <button className="btn btn-primary flex-1" disabled={r.state === "saving" || bookingAll} onClick={() => book(r.key, r.state === "dup")}>
+                  {r.state === "dup" ? "باز هم ثبت شود" : r.state === "failed" ? "با این حال ثبت شود" : r.state === "saving" ? "…" : "ثبت"}</button>
+                <button className="btn" disabled={r.state === "saving"} onClick={() => setRows((x) => x.filter((y) => y.key !== r.key))}>حذف</button>
               </div>
             </div>
           )}

@@ -537,3 +537,154 @@ def test_a_new_forfeit_keeps_the_line_it_was_booked_with(client, accounts):
     assert ledger("48", line_id=line["id"]) == 0  # still on 4800 (no line), with its share
     assert ledger("5200", staff_id=person["id"]) == 400_000
     balanced(client)
+
+
+# ---------------------------------------------------------------------------------------------- review of 1.22 (2)
+def test_receipt_cards_failures_and_words_read_carefully(client, accounts):
+    from app.services.payout_receipt import _caption_amount, read_caption, read_text
+
+    # the salon's own card on a bank SMS is where the money came from, not where it went
+    card = client.post("/api/accounts", json={"kind": "card", "name": "کارت پیامک سالن", "card_number": "6219861900005566"}).json()
+    sms = "بانک سامان\nکارت:5566\nبرداشت:5,000,000\n1405/07/20 10:45\nمانده:12,000,000"
+    r = client.post("/api/staff/payout-receipt", data={"text": sms, "caption": ""}).json()
+    assert r["receipt"]["dest_card"] is None and r["receipt"]["source_card"] == "5566"
+    assert r["suggest"]["payment_account_id"] == card["id"]
+    # labels with a half-space, short masks, a date after the card on the same line
+    assert read_text("کارت پرداخت‌کننده: 6104-33**-****-1111\nکارت دریافت‌کننده: 6037-99**-****-2222")["dest_card"] == "2222"
+    assert read_text("به کارت 6037***4321 مبلغ 1,000,000 ریال")["dest_card"] == "4321"
+    assert read_text("به کارت 6037-4321")["dest_card"] == "4321"
+    assert read_text("به کارت 6037-99**-****-4321 1405/07/20")["dest_card"] == "4321"
+    # transfers that did not go through
+    for status in ("تراکنش نا‌موفق", "وضعیت: نامشخص", "تراکنش رد شد", "انتقال انجام نشد", "موجودی کافی نیست"):
+        assert read_text(f"انتقال وجه\nمبلغ: 1,000,000 ریال\n{status}")["success"] is False, status
+    # amounts in the words: Persian decimal sign, dots between thousands, tracking / card numbers, very long numbers
+    assert 25_000_000 in _caption_amount("مساعده ۲٫۵ میلیون")
+    assert 25_000_000 in _caption_amount("مساعده ۲.۵۰۰ هزار تومان")
+    assert _caption_amount("تسویه سارا پیگیری ۱۲۳۴۵۶۷۸") == [] and _caption_amount("به کارت ۶۰۳۷۹۹۱۲۳۴۵۶۷۸۹۰") == []
+    assert _caption_amount("مساعده " + "9" * 400) == []
+    assert _caption_amount("تسویه حساب ۵ میلیون") == [50_000_000]
+    # month names are whole words («دیروز», «احمدی», «مهرناز» are not months)
+    assert read_caption("برداشتی دیروز")["month"] is None and read_caption("تسویه خانم احمدی")["month"] is None
+    assert read_caption("برداشتی مهرناز")["month"] is None and read_caption("تسویه مهر")["month"][1] == 7
+    # a settlement read without words, early in a month: last month's (the form's own kind is used)
+    early = month_range(*CUR)[0] + timedelta(days=1, hours=10)
+    rec = f"انتقال وجه موفق\nمبلغ: 1,000,000 ریال\n{to_j(early)}"
+    s = client.post("/api/staff/payout-receipt", data={"text": rec, "caption": "", "kind": "settlement"}).json()["suggest"]
+    assert (s["kind"], s["jy"], s["jm"], s["month_from"]) == ("settlement", PREV[0], PREV[1], "date")
+    s = client.post("/api/staff/payout-receipt", data={"text": rec, "caption": "", "kind": "advance"}).json()["suggest"]
+    assert (s["kind"], s["jy"], s["jm"]) == ("advance", CUR[0], CUR[1])
+
+
+def to_j(d: datetime) -> str:
+    from app.services.jalali import gregorian_to_jalali
+
+    jy, jm, jd = gregorian_to_jalali(d.year, d.month, d.day)
+    return f"{jy}/{jm:02d}/{jd:02d} {d.hour:02d}:{d.minute:02d}"
+
+
+def test_cards_are_learned_only_for_their_owner_and_forgotten_on_void(client, accounts):
+    line, svc, ahmadi = setup(client, "کارت مشترک", percent=50)
+    client.put(f"/api/staff/{ahmadi['id']}", json={"full_name": "سارا احمدی‌نیا", "line_id": line["id"], "commission_percent": 50})
+    karimi = client.post("/api/staff", json={"full_name": "سارا کریمی‌پور", "line_id": line["id"], "commission_percent": 50}).json()
+    text = RECEIPT.format(src="0000", name="سارا احمدی‌نیا", ref="77001").replace("4321", "7788")
+    r = client.post("/api/staff/payout-receipt", data={"text": text, "caption": "", "staff_id": str(karimi["id"])}).json()
+    assert r["suggest"]["staff_id"] == ahmadi["id"]  # the form for Karimi warns: it is Ahmadi's
+    p = pay(client, karimi, 500_000, kind="advance", payment_account_id=accounts["صندوق نقدی"], receipt=r["receipt"]).json()["payout"]
+    from app.models import Staff
+
+    with _db() as db:
+        assert "7788" not in (db.get(Staff, karimi["id"]).cards or [])  # a shared first name is not enough
+    # booked for the right person: learned; voided: forgotten
+    p2 = pay(client, ahmadi, 600_000, kind="advance", payment_account_id=accounts["صندوق نقدی"], receipt=r["receipt"]).json()["payout"]
+    with _db() as db:
+        assert "7788" in (db.get(Staff, ahmadi["id"]).cards or [])
+    assert client.post(f"/api/staff/payouts/{p2['id']}/void", json={}).status_code == 200
+    with _db() as db:
+        assert "7788" not in (db.get(Staff, ahmadi["id"]).cards or [])
+    assert client.post(f"/api/staff/payouts/{p['id']}/void", json={}).status_code == 200
+    # a card learned for one person and another person's whole name printed: nobody is guessed
+    pay(client, karimi, 700_000, kind="advance", payment_account_id=accounts["صندوق نقدی"],
+        receipt={"dest_card": "9911", "dest_name": None})
+    named = RECEIPT.format(src="0000", name="سارا احمدی‌نیا", ref="77002").replace("4321", "9911")
+    s = client.post("/api/staff/payout-receipt", data={"text": named, "caption": ""}).json()["suggest"]
+    assert s["staff_id"] is None
+
+
+def test_odd_answers_from_the_assistant_never_break_reading(client, accounts, monkeypatch):
+    from app.ai import claude
+
+    answers = []
+    monkeypatch.setattr(claude, "available", lambda: True)
+    monkeypatch.setattr(claude, "vision_extract", lambda *a, **k: answers[-1])
+    png = b"\x89PNG\r\n\x1a\n" + b"assistant-answers"
+    def read(answer: dict) -> dict:  # noqa: E306
+        answers.append(answer)
+        r = client.post("/api/staff/payout-receipt", files={"file": ("a.png", png, "image/png")}, data={"caption": ""})
+        assert r.status_code == 200, r.text
+        return r.json()
+    r = read({"amount_rial": 1_000_000, "dest_name": ["سارا", "احمدی"], "description": {"x": 1}, "raw_text": ""})
+    assert r["receipt"]["dest_name"] is None and r["receipt"]["description"] is None
+    assert read({"amount_rial": True, "raw_text": ""})["receipt"]["amount"] is None
+    assert read({"amount_rial": -5_000_000, "raw_text": ""})["receipt"]["amount"] is None
+    assert read({"amount_rial": 1_000, "status_success": "false", "raw_text": ""})["failed"] is True
+    # Toman not converted by the assistant, while the text says تومان: what is written wins, with a warning
+    r = read({"amount_rial": 500_000, "raw_text": "مبلغ: 500,000 تومان"})
+    assert r["receipt"]["amount"] == 5_000_000 and any("ریال یا تومان" in w for w in r["warnings"])
+    # the payer's card given by the assistant is never the receiver's
+    r = read({"amount_rial": 1_000_000, "source_card_last4": "8765", "dest_card_last4": None, "raw_text": "کارت:8765 مبلغ: 1,000,000 ریال"})
+    assert r["receipt"]["dest_card"] is None and r["receipt"]["source_card"] == "8765"
+
+
+def test_absurd_amounts_and_old_data_after_the_upgrade(client, accounts):
+    line, svc, person = setup(client, "سقف مبلغ", percent=50)
+    cash = accounts["صندوق نقدی"]
+    assert pay(client, person, 10**16, payment_account_id=cash).status_code == 400
+    assert pay(client, person, 10**20, payment_account_id=cash).status_code == 400
+    assert client.post("/api/expenses", json={"category": "سایر", "amount": 10**20, "payment_account_id": cash}).status_code == 400
+    emp = client.post("/api/staff", json={"full_name": "کارمند سقف", "kind": "employee", "salary": 10**20}).status_code
+    assert emp == 400
+    # a phone saved by an older version that is not a mobile: the person can still be edited / deactivated
+    from app.models import Staff
+
+    with _db() as db:
+        db.get(Staff, person["id"]).mobile = "05138001122"
+        db.commit()
+    r = client.put(f"/api/staff/{person['id']}", json={"full_name": person["full_name"], "mobile": "05138001122", "line_id": line["id"],
+                                                       "commission_percent": 50, "is_active": False})
+    assert r.status_code == 200, r.text
+    # a payout made before 1.22 early in a month while still owed from the month before: last month's settlement
+    d_prev = datetime.combine(PREV_START - timedelta(days=8), time(10))
+    invoice(client, accounts, svc, person, 4_000_000, at=d_prev)
+    from app.models import JournalEntry, PaymentAccount, StaffPayout
+    from app.services import accounting, staffpay
+
+    early = month_range(*CUR)[0] + timedelta(days=1, hours=9)
+    with _db() as db:
+        p = db.get(Staff, person["id"])
+        e = accounting.post(db, f"پرداخت سهم {p.full_name}", [
+            accounting.Leg(accounting.account(db, accounting.STAFF_PAYABLE), debit=1_000_000, staff_id=p.id),
+            accounting.Leg(accounting.cash_account_for(db, db.get(PaymentAccount, cash)), credit=1_000_000, staff_id=p.id)],
+            "staff_payout", p.id, at=early)
+        db.commit()
+        staffpay.backfill_payouts(db)
+        db.commit()
+        row = db.scalar(select(StaffPayout).where(StaffPayout.entry_id == e.id))
+        assert (row.jy, row.jm) == PREV
+        assert db.get(JournalEntry, e.id).ref_id == row.id
+    st = statement(client, person, PREV)
+    assert st["paid_later"] == 1_000_000 and st["remaining"] == 1_000_000
+
+
+def test_paid_from_the_owners_pocket_shows_on_the_capital_page(client, accounts):
+    line, svc, person = setup(client, "جیب مدیر", percent=50)
+    before = client.get("/api/capital/position").json()
+    put_in = lambda p: next(x["value"] for x in p["flow"] if x["key"] == "put_in")  # noqa: E731
+    r = pay(client, person, 1_500_000, kind="advance", from_owner=True)
+    assert r.status_code == 200
+    pos = client.get("/api/capital/position").json()
+    assert put_in(pos) == put_in(before) + 1_500_000
+    assert not any(x["key"] == "other" and x["value"] == 1_500_000 for x in pos["flow"])
+    assert any(m["kind"] == "staff" and m["customer"] == person["full_name"] for m in pos["moves"])
+    assert any(m["kind"] == "staff" for m in client.get("/api/capital/moves").json())
+    assert client.post(f"/api/staff/payouts/{r.json()['payout']['id']}/void", json={}).status_code == 200
+    assert put_in(client.get("/api/capital/position").json()) == put_in(before)

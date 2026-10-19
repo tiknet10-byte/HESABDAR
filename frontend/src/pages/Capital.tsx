@@ -191,7 +191,9 @@ function MoveRow({ m, onChange }: { m: any; onChange: () => void }) {
         <span className="muted text-xs"> · {[m.account, m.supplier && `فروشنده: ${m.supplier}`, m.purchase, m.customer, m.notes].filter(Boolean).join(" · ")}</span></span>
       <span className="flex items-center gap-2">
         <span className={`num font-bold ${m.signed < 0 ? "text-rose-600" : "text-emerald-600"}`}>{money(m.signed)}</span>
-        {m.status === "void" ? <Badge status="void" /> : <button className="btn btn-ghost btn-sm text-rose-600" onClick={voidIt}>باطل</button>}
+        {m.status === "void" ? <Badge status="void" /> : m.kind === "staff"
+          ? <span className="muted text-[11px]" title="از صورت‌حساب همان شخص در «پرسنل و سهم‌ها» یا «کارمندان و حقوق» باطل می‌شود">از صفحهٔ پرسنل</span>
+          : <button className="btn btn-ghost btn-sm text-rose-600" onClick={voidIt}>باطل</button>}
       </span>
     </div>
   );

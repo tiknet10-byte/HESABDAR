@@ -238,6 +238,11 @@ def create_app() -> FastAPI:
     async def value_error(_: Request, exc: ValueError):  # noqa: ANN202
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
+    @app.exception_handler(OverflowError)
+    async def too_big(_: Request, exc: OverflowError):  # noqa: ANN202
+        # a number too big for the database (a key held down): nothing is saved
+        return JSONResponse(status_code=400, content={"detail": "عدد وارد شده بیش از حد بزرگ است؛ آن را دوباره نگاه کنید"})
+
     dist = s.frontend_dist
     if dist.exists():
         app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")

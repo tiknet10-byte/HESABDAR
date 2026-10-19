@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
@@ -90,19 +91,27 @@ def pay(pid: int, body: PayoutIn, db: Session = Depends(get_db), user=Depends(re
     except staffpay.Duplicate as exc:
         db.rollback()
         raise HTTPException(409, str(exc)) from exc
+    except IntegrityError as exc:  # the same receipt booked from another screen at this very moment
+        db.rollback()
+        raise HTTPException(409, "این رسید همین الان (از صفحهٔ دیگری) ثبت شد؛ صورت‌حساب این شخص را نگاه کنید") from exc
     except (staffpay.PayError, ValueError) as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
     if parsed and payout_receipt.may_learn(db, person, parsed):
         payout_receipt.learn_card(person, parsed.get("dest_card"))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:  # the same receipt booked from another screen at this very moment
+        db.rollback()
+        raise HTTPException(409, "این رسید همین الان (از صفحهٔ دیگری) ثبت شد؛ صورت‌حساب این شخص را نگاه کنید") from exc
     return {"ok": True, "payout": staffpay._payout_row(db, p, _accounts(db)), "balance": staffpay.balance_at(db, pid),
             "kind_label": staffpay.kind_label(person, p.kind), "month": staffpay.month_label(p.jy, p.jm)}
 
 
 @router.post("/staff/payout-receipt")
 def read_receipt(file: UploadFile | None = File(None), text: str = Form(""), caption: str = Form(""),
-                 staff_id: int | None = Form(None), db: Session = Depends(get_db), _=Depends(require("finance"))):
+                 staff_id: int | None = Form(None), kind: str = Form(""), db: Session = Depends(get_db),
+                 _=Depends(require("finance"))):
     """Read a payout receipt (its picture or text) and the words sent with it; nothing is booked. A plain function: the
     assistant may take a while to read a picture, and the server keeps answering everyone else meanwhile."""
     data, media = None, None
@@ -115,7 +124,7 @@ def read_receipt(file: UploadFile | None = File(None), text: str = Form(""), cap
         raise HTTPException(400, "عکس رسید را انتخاب کنید یا متن آن را بنویسید")
     try:
         return payout_receipt.read(db, image=data or None, media_type=media, text=text or "", caption=caption or "",
-                                   staff_id=staff_id)
+                                   staff_id=staff_id, kind=kind or None)
     except payout_receipt.ReceiptError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -148,6 +157,7 @@ def void_payout(payout_id: int, body: VoidIn, db: Session = Depends(get_db), use
     except (staffpay.PayError, ValueError) as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
+    payout_receipt.forget_card(db, db.get(Staff, p.staff_id), p)  # a card learned from a mistake is not kept
     db.commit()
     return {"ok": True, "balance": staffpay.balance_at(db, p.staff_id)}
 

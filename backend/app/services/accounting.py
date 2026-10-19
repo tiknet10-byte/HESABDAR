@@ -154,6 +154,14 @@ class Leg:
     staff_id: int | None = None
 
 
+MAX_RIAL = 10**15  # far above any real amount of a clinic, and safe for every sum in the database
+
+
+def check_amount(amount: int, label: str = "مبلغ") -> None:
+    if int(amount) > MAX_RIAL:
+        raise AccountingError(f"{label} بیش از حد بزرگ است؛ عدد را دوباره نگاه کنید")
+
+
 def post(db: Session, description: str, legs: list[Leg], ref_type: str = "", ref_id: int | None = None,
          at: datetime | None = None) -> JournalEntry:
     legs = [l for l in legs if l.debit or l.credit]
@@ -163,6 +171,8 @@ def post(db: Session, description: str, legs: list[Leg], ref_type: str = "", ref
         raise AccountingError(f"unbalanced entry: debit={dr} credit={cr}")
     if any(l.debit < 0 or l.credit < 0 for l in legs):
         raise AccountingError("negative amounts are not allowed in journal lines")
+    if any(l.debit > MAX_RIAL or l.credit > MAX_RIAL for l in legs):
+        raise AccountingError("مبلغ بیش از حد بزرگ است؛ عدد را دوباره نگاه کنید")
     entry = JournalEntry(description=description, ref_type=ref_type, ref_id=ref_id, at=at or local_now())
     for l in legs:
         entry.lines.append(JournalLine(account_id=l.account.id, debit=l.debit, credit=l.credit,
@@ -1054,6 +1064,7 @@ def record_expense(db: Session, *, category: str, amount: int, payment_account: 
         raise AccountingError("دستهٔ هزینه را انتخاب کنید یا بنویسید")
     if amount <= 0:
         raise AccountingError("مبلغ هزینه باید مثبت باشد")
+    check_amount(amount, "مبلغ هزینه")
     ensure_not_future(spent_at, "تاریخ پرداخت هزینه")
     if staff_id is not None and db.get(Staff, staff_id) is None:
         raise AccountingError("شخص انتخاب‌شده پیدا نشد")

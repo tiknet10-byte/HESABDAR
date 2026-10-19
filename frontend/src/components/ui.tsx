@@ -193,7 +193,8 @@ export function MoneyInput({ value, onChange, placeholder }: { value: number; on
         value={text}
         placeholder={placeholder}
         onChange={(e) => {
-          const digits = e.target.value.replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))).replace(/[^\d]/g, "");
+          // at most 13 digits (a key held down can't make an absurd amount)
+          const digits = e.target.value.replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))).replace(/[^\d]/g, "").slice(0, 13);
           const n = parseInt(digits || "0", 10);
           setText(digits ? n.toLocaleString("en-US") : "");
           onChange(n * (unitLabel() === "تومان" ? 10 : 1));

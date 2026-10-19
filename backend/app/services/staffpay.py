@@ -22,6 +22,7 @@ from ..models import (JournalEntry, JournalLine, LedgerAccount, PaymentAccount, 
 from .jalali import J_MONTHS, jmonth_of, month_range
 
 KINDS = ("advance", "settlement")
+MAX_RIAL = 10**15  # as accounting.MAX_RIAL
 SALARY_CATEGORY = "حقوق و دستمزد"
 DUPLICATE_WINDOW = timedelta(minutes=10)
 
@@ -84,6 +85,8 @@ def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", pay
     amount = int(amount)
     if amount <= 0:
         raise PayError("مبلغ پرداخت باید مثبت باشد")
+    if amount > MAX_RIAL:
+        raise PayError("مبلغ پرداخت بیش از حد بزرگ است؛ عدد را دوباره نگاه کنید")
     if kind not in KINDS:
         raise PayError("نوع پرداخت نامعتبر است")
     if not from_owner and payment_account is None:
@@ -163,6 +166,13 @@ def backfill_payouts(db: Session) -> int:
         if pay_line is None:
             continue  # a reversal (credit on 2200) belongs to the payout it reverses; nothing before 1.22 had one
         jy, jm = jmonth_of(entry.at)
+        # before 1.22 a payout had no month: one made in the first half of a month while the person was still owed
+        # from the months before was that month's settlement (the Shahrivar share paid on 2 Mehr)
+        from .jalali import gregorian_to_jalali
+
+        if gregorian_to_jalali(entry.at.year, entry.at.month, entry.at.day)[2] <= 15 \
+                and balance_at(db, pay_line.staff_id, month_range(jy, jm)[0]) > 0:
+            jy, jm = (jy, jm - 1) if jm > 1 else (jy - 1, 12)
         p = StaffPayout(staff_id=pay_line.staff_id, kind="settlement", jy=jy, jm=jm, amount=int(pay_line.debit), paid_at=entry.at,
                         payment_account_id=by_ledger.get(other.account_id) if other else None,
                         from_owner=bool(other and other.account_id == equity), description=entry.description or "",
@@ -188,6 +198,8 @@ def accrue_salary(db: Session, staff: Staff, jy: int, jm: int, amount: int, desc
     amount = int(amount)
     if amount <= 0:
         raise PayError("مبلغ حقوق باید مثبت باشد")
+    if amount > MAX_RIAL:
+        raise PayError("مبلغ حقوق بیش از حد بزرگ است؛ عدد را دوباره نگاه کنید")
     _month_ok(jy, jm)
     write_lock(db)
     if db.scalar(select(SalaryAccrual.id).where(SalaryAccrual.staff_id == staff.id, SalaryAccrual.jy == jy, SalaryAccrual.jm == jm,

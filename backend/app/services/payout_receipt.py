@@ -40,7 +40,9 @@ PAYOUT_VISION_PROMPT = (
 
 ADVANCE_WORDS = ("برداشتی", "برداشت", "مساعده", "علی الحساب", "علیالحساب", "پیش پرداخت", "قرض", "قسط")
 SETTLE_WORDS = ("تسویه", "باقیمانده", "باقی مانده", "مانده", "سهم", "کارکرد", "پورسانت", "حقوق", "دستمزد", "پایان ماه")
-FAILED_WORDS = ("ناموفق", "نا موفق", "تراکنش انجام نشد", "خطا در")
+# a transfer that did not go through (matched on the normalized text: a half-space counts as a space)
+FAILED_WORDS = ("ناموفق", "نا موفق", "انجام نشد", "خطا در", "نامشخص", "رد شد", "عدم موفقیت", "موجودی کافی نیست",
+                "در انتظار", "برگشت خورد", "لغو شد")
 
 
 class ReceiptError(ValueError):
@@ -137,20 +139,42 @@ def _last4(value) -> str | None:  # noqa: ANN001
 
 
 def _labelled_card(raw: str, labels: str) -> str | None:
-    m = re.search(rf"(?:{labels})[^\d\n]{{0,25}}([\d\s\-*xX]{{8,25}}\d{{4}}|\d{{4}})", raw)
-    return _last4(m.group(1)) if m else None
+    """The last 4 digits of the card written after one of the labels («به کارت 6037-99**-****-4321», «6037***4321»,
+    «6037-4321», «4321»): a card number is at most 16 characters, so a date written after it on the line is left out."""
+    m = re.search(rf"(?:{labels})[^\d\n]{{0,25}}([\d*xX×](?:[\d*xX×\-]|[ \t](?=[\d*xX×]))*)", raw)
+    if not m:
+        return None
+    chars = re.sub(r"[\s\-]", "", m.group(1))[:16]
+    if len(chars) >= 4 and chars[-4:].isdigit():
+        return chars[-4:]
+    digits = re.sub(r"\D", "", chars)
+    return digits[-4:] if len(digits) >= 4 else None
+
+
+SOURCE_LABELS = r"مبد[اأ]|از\s*کارت|کارت\s*پرداخت\s*کننده|کارت\s*برداشت"
+DEST_LABELS = r"مقصد|به\s*کارت|کارت\s*گیرنده|کارت\s*دریافت\s*کننده|کارت\s*ذینفع"
+
+
+def _failed(raw: str) -> bool:
+    t = normalize_text(raw)
+    return any(normalize_text(w) in t for w in FAILED_WORDS)
 
 
 def read_text(text: str) -> dict:
     """What the rule-based reader finds in a receipt's text (an SMS, the text of a bank app's receipt)."""
-    raw = to_en_digits(text or "")
+    raw = to_en_digits(text or "").replace("\u200c", " ")
     p = parse_receipt(raw)
     out = {"amount": p.get("amount"), "reference": p.get("reference"), "paid_at": p.get("datetime"), "bank": p.get("bank"),
-           "source_card": _labelled_card(raw, "مبدا|مبدأ|از کارت|کارت پرداخت کننده"),
-           "dest_card": _labelled_card(raw, "مقصد|به کارت|کارت گیرنده|کارت دریافت کننده"),
-           "dest_name": None, "iban": None, "success": not any(w in raw for w in FAILED_WORDS)}
+           "source_card": _labelled_card(raw, SOURCE_LABELS), "dest_card": _labelled_card(raw, DEST_LABELS),
+           "dest_name": None, "iban": None, "success": not _failed(raw),
+           "unit_named": bool(re.search(r"ریال|تومان", raw))}
+    # a single card and nothing saying whose: on a transfer receipt it is usually the receiver's; on a bank SMS of the
+    # salon's own account (a withdrawal, the balance left) it is the payer's
+    sms = p.get("direction") == "out" or bool(re.search(r"برداشت|مانده|موجودی", raw))
     if not out["dest_card"] and not out["source_card"] and p.get("card_last4"):
-        out["dest_card"] = p["card_last4"]  # a single card on a payout receipt is usually the receiver's
+        out["source_card" if sms else "dest_card"] = p["card_last4"]
+    if out["dest_card"] and out["dest_card"] == out["source_card"]:
+        out["dest_card"] = None
     m = re.search(r"(?:نام\s*(?:دارنده|صاحب)\s*(?:کارت)?(?:\s*مقصد)?|به\s*نام|گیرنده|ذینفع|ذی\s*نفع)\s*[:：]?\s*([^\n\d:：]{3,40})", raw)
     if m:
         out["dest_name"] = m.group(1).strip(" -،,")
@@ -158,6 +182,23 @@ def read_text(text: str) -> dict:
     if m:
         out["iban"] = "IR" + re.sub(r"\D", "", m.group(1))[:24]
     return out
+
+
+def _text_or_none(value) -> str | None:  # noqa: ANN001
+    return value.strip()[:200] or None if isinstance(value, str) else None
+
+
+def _amount_of(value) -> int | None:  # noqa: ANN001
+    """A positive whole Rial amount from the assistant's answer (a number or digits), else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        n = int(value)
+    elif isinstance(value, str) and re.fullmatch(r"\s*[\d,٬]+\s*", to_en_digits(value)):
+        n = int(re.sub(r"\D", "", to_en_digits(value)))
+    else:
+        return None
+    return n if 0 < n < 10**15 else None
 
 
 def read_image(data: bytes, media_type: str) -> dict | None:
@@ -173,61 +214,75 @@ def read_image(data: bytes, media_type: str) -> dict | None:
         return None
     if not isinstance(v, dict):
         return None
-    raw = str(v.get("raw_text") or "")
+    raw = v.get("raw_text") if isinstance(v.get("raw_text"), str) else ""
     base = read_text(raw)
     when = None
-    if v.get("datetime_jalali"):
-        when = parse_receipt(str(v["datetime_jalali"])).get("datetime")
-    amount = v.get("amount_rial")
-    try:
-        amount = int(amount) if amount not in (None, "") else None
-    except (TypeError, ValueError):
-        amount = None
-    return {"amount": amount or base["amount"], "reference": (str(v["reference"]) if v.get("reference") else base["reference"]),
-            "paid_at": when or base["paid_at"], "bank": v.get("bank") or base["bank"],
-            "source_card": _last4(v.get("source_card_last4")) or base["source_card"],
-            "dest_card": _last4(v.get("dest_card_last4")) or base["dest_card"],
-            "dest_name": v.get("dest_name") or base["dest_name"], "iban": v.get("dest_iban") or base["iban"],
-            "success": bool(v.get("status_success", True)) and base["success"] and v.get("is_receipt", True) is not False,
-            "raw_text": raw, "description": v.get("description")}
+    if isinstance(v.get("datetime_jalali"), str):
+        when = parse_receipt(v["datetime_jalali"]).get("datetime")
+    source = _last4(v.get("source_card_last4")) if isinstance(v.get("source_card_last4"), (str, int)) else None
+    source = source or base["source_card"]
+    dest = _last4(v.get("dest_card_last4")) if isinstance(v.get("dest_card_last4"), (str, int)) else None
+    if not dest and base["dest_card"] != source:
+        dest = base["dest_card"]
+    ok = v.get("status_success", True) in (True, "true", "True") and v.get("is_receipt", True) not in (False, "false", "False")
+    return {"amount": _amount_of(v.get("amount_rial")) or base["amount"], "text_amount": base["amount"],
+            "unit_named": base["unit_named"],
+            "reference": _text_or_none(str(v["reference"]) if isinstance(v.get("reference"), (str, int)) else None) or base["reference"],
+            "paid_at": when or base["paid_at"], "bank": _text_or_none(v.get("bank")) or base["bank"],
+            "source_card": source, "dest_card": dest if dest != source else None,
+            "dest_name": _text_or_none(v.get("dest_name")) or base["dest_name"],
+            "iban": _text_or_none(v.get("dest_iban")) or base["iban"],
+            "success": ok and base["success"], "raw_text": raw[:4000], "description": _text_or_none(v.get("description"))}
 
 
 # ------------------------------------------------------------------ the words sent with it
 def _caption_amount(text: str) -> list[int]:
-    """An amount written in the message («۵ میلیون», «2.5م», «800 هزار تومان»), as the Rial amounts it can mean (a bare
-    number is Toman or Rial); only to compare with the receipt."""
-    t = normalize_text(text)
+    """Every amount written in the message («۵ میلیون», «۲٫۵ م», «۸۰۰ هزار تومان», «۲.۵۰۰ هزار»), as the Rial amounts each
+    can mean (a bare number is Toman or Rial); only to compare with the receipt. A tracking, card or phone number, a
+    date or a very long number is not an amount."""
+    t = normalize_text(text).replace("٫", ".")
+    out: list[int] = []
     for m in re.finditer(r"(\d+(?:[.,/]\d+)*)\s*(میلیون|ملیون|م\b|تومن|تومان|هزار|ریال)?", t):
         digits, unit = m.group(1), m.group(2) or ""
-        if normalize_mobile(digits) or (not unit and len(re.sub(r"\D", "", digits)) < 5):
-            continue  # a mobile number, a year or a day
+        plain = re.sub(r"\D", "", digits)
+        if re.search(r"پیگیری|مرجع|کارت|شبا|شماره|کد|موبایل|تلفن", t[max(0, m.start() - 25):m.start()]):
+            continue
+        if len(plain) >= 13 or normalize_mobile(digits) or (not unit and len(plain) < 5):
+            continue  # a card, a mobile number, a year or a day
         if re.fullmatch(r"\d{1,3}(,\d{3})+", digits):
             digits = digits.replace(",", "")
+        elif unit == "هزار" and re.fullmatch(r"\d{1,3}(\.\d{3})+", digits):
+            digits = digits.replace(".", "")  # ۲.۵۰۰ هزار = 2,500 thousand
         if len(re.findall(r"[.,/]", digits)) > 1:
             continue  # a date (1405/07/30) or a number written another way: not an amount
         try:
             n = float(digits.replace(",", ".").replace("/", ".")) if unit in ("میلیون", "ملیون", "م", "هزار") \
                 else float(re.sub(r"\D", "", digits))
-        except ValueError:
+            toman = n * (1_000_000 if unit in ("میلیون", "ملیون", "م") else 1_000 if unit == "هزار" else 1)
+            if unit == "ریال":
+                out.append(int(round(n)))
+            else:
+                out += [int(round(toman * 10))] + ([int(round(n))] if not unit else [])
+        except (ValueError, OverflowError):
             continue
-        toman = n * (1_000_000 if unit in ("میلیون", "ملیون", "م") else 1_000 if unit == "هزار" else 1)
-        if unit == "ریال":
-            return [int(round(n))]
-        return [int(round(toman * 10))] + ([int(round(n))] if not unit else [])
-    return []
+    return out
+
+
+def _word(name: str, t: str) -> bool:
+    return re.search(rf"(?<!\w){re.escape(name)}(?!\w)", t) is not None
 
 
 def read_caption(text: str, now: datetime | None = None) -> dict:
     """Kind (advance / settlement), month and a mobile number from the words sent with the receipt."""
     t = normalize_text(text or "")
     kind = None
-    if any(w in t for w in SETTLE_WORDS):
+    if any(_word(w, t) for w in SETTLE_WORDS):
         kind = "settlement"
-    if any(w in t for w in ADVANCE_WORDS):
+    if any(_word(w, t) for w in ADVANCE_WORDS):
         kind = "advance"  # «برداشتی از سهم مهر» is still an advance
     month = None
     for i, name in enumerate(J_MONTHS):
-        if normalize_text(name) in t:
+        if _word(normalize_text(name), t):  # a whole word: «احمدی» is not «دی», «مهرناز» is not «مهر»
             jm = i + 1
             y = re.search(r"\b(1[34]\d{2})\b", t)
             cy, cm = jmonth_of(now or local_now())
@@ -266,7 +321,7 @@ def match_people(db: Session, *, mobile: str | None, dest_card: str | None, text
             why.append("بخشی از نام")
         if score:
             out.append({"staff_id": p.id, "name": p.full_name, "score": score, "why": "، ".join(why),
-                        "employee": (p.kind or "") == "employee"})
+                        "employee": (p.kind or "") == "employee", "card": "کارت مقصد" in why, "full_name": "نام" in why})
     out.sort(key=lambda x: -x["score"])
     return out
 
@@ -287,9 +342,15 @@ def _when(value: str | None) -> datetime | None:
         return None
 
 
+def _salon_cards(db: Session) -> set[str]:
+    """The last 4 digits of the salon's own cards / accounts (money is paid FROM them, never to a staff member)."""
+    return {c for c in (_last4(pa.card_mask) for pa in db.scalars(select(PaymentAccount))) if c}
+
+
 def read(db: Session, *, image: bytes | None = None, media_type: str | None = None, text: str = "", caption: str = "",
-         staff_id: int | None = None) -> dict:
-    """Everything that can be read from one receipt, and the payout it suggests (nothing is booked)."""
+         staff_id: int | None = None, kind: str | None = None) -> dict:
+    """Everything that can be read from one receipt, and the payout it suggests (nothing is booked). kind: the kind of
+    payment the form was opened for (used when the words don't say)."""
     token, via, warnings = None, "none", []
     receipt = None
     if image:
@@ -300,12 +361,22 @@ def read(db: Session, *, image: bytes | None = None, media_type: str | None = No
         elif not text:
             warnings.append("دستیار هوشمند روشن نیست یا رسید را نخواند؛ مبلغ و تاریخ را از روی عکس وارد کنید")
     if receipt is None and text:
-        receipt = {**read_text(text), "raw_text": text, "description": None}
+        receipt = {**read_text(text), "raw_text": text[:4000], "description": None}
         via = "text"
     receipt = receipt or {"amount": None, "reference": None, "paid_at": None, "bank": None, "source_card": None, "dest_card": None,
-                          "dest_name": None, "iban": None, "success": True, "raw_text": text or "", "description": None}
+                          "dest_name": None, "iban": None, "success": True, "raw_text": (text or "")[:4000], "description": None}
+    # a card of the salon itself is where the money came from, never where it went
+    salon = _salon_cards(db)
+    if receipt.get("dest_card") in salon:
+        receipt["source_card"] = receipt.get("source_card") or receipt["dest_card"]
+        receipt["dest_card"] = None
     if not receipt["success"]:
-        warnings.append("این رسید «ناموفق» به نظر می‌رسد؛ اگر پولی جابه‌جا نشده، آن را ثبت نکنید")
+        warnings.append("این رسید «ناموفق» یا نامعلوم به نظر می‌رسد؛ اگر پولی جابه‌جا نشده، آن را ثبت نکنید")
+    t_amount = receipt.get("text_amount")
+    if via == "ai" and t_amount and receipt["amount"] and t_amount != receipt["amount"]:
+        if receipt.get("unit_named") and (t_amount == receipt["amount"] * 10 or receipt["amount"] == t_amount * 10):
+            receipt["amount"] = t_amount  # the receipt names its unit (ریال / تومان): what is written there wins
+        warnings.append("مبلغ رسید را یک بار با عکس مقایسه کنید (ریال یا تومان ممکن است اشتباه خوانده شده باشد)")
     paid_at = _when(receipt["paid_at"])
     if paid_at and paid_at > local_now():
         warnings.append("تاریخ رسید در آینده خوانده شد؛ تاریخ را درست کنید")
@@ -318,21 +389,24 @@ def read(db: Session, *, image: bytes | None = None, media_type: str | None = No
     # whose it looks like, from the receipt and the words alone; the person the form was opened for only when nothing
     # points at someone else (the form then warns: «به نظر می‌رسد این رسید مال ... است»)
     best = people[0]["staff_id"] if people and (len(people) == 1 or people[0]["score"] > people[1]["score"]) else None
+    if best and people[0]["card"] and not people[0]["full_name"] and any(x["full_name"] for x in people[1:]):
+        best = None  # a card learned for one person, another person's whole name printed on it: not guessed
     if staff_id and best and best != staff_id:
         mine = next((p["score"] for p in people if p["staff_id"] == staff_id), 0)
         if mine >= people[0]["score"]:
             best = staff_id
     chosen = best or staff_id
     when = paid_at or local_now()
-    kind = cap["kind"]
+    jd = gregorian_to_jalali(when.year, when.month, when.day)[2]
+    kind = cap["kind"] or (kind if kind in ("advance", "settlement") else None)
     if kind is None:  # no word for it: in the middle of the month an advance, around its end the settlement
-        jd = gregorian_to_jalali(when.year, when.month, when.day)[2]
         kind = "advance" if 6 <= jd <= 24 else "settlement"
     if cap["month"]:
         jy, jm = cap["month"]
+        month_from = "words"
     else:
         jy, jm = jmonth_of(when)
-        jd = gregorian_to_jalali(when.year, when.month, when.day)[2]
+        month_from = "date"
         if kind == "settlement" and jd <= 15:  # the settlement of last month, paid at the start of this one
             jy, jm = (jy, jm - 1) if jm > 1 else (jy - 1, 12)
     duplicate = None
@@ -352,26 +426,40 @@ def read(db: Session, *, image: bytes | None = None, media_type: str | None = No
             warnings.insert(0, "پرداختی با همین شمارهٔ پیگیری قبلاً ثبت شده است")
     description = " ".join((caption or "").split())[:500]
     return {"token": token, "via": via, "receipt": receipt, "warnings": warnings, "duplicate": duplicate, "people": people[:5],
-            "suggest": {"staff_id": chosen, "kind": kind, "jy": jy, "jm": jm, "amount": receipt["amount"],
+            "failed": not receipt["success"],
+            "suggest": {"staff_id": chosen, "kind": kind, "jy": jy, "jm": jm, "month_from": month_from, "amount": receipt["amount"],
                         "paid_at": paid_at.isoformat(timespec="minutes") if paid_at else None,
                         "reference": receipt["reference"], "payment_account_id": _account_for_card(db, receipt["source_card"]),
                         "description": description}}
 
 
 def may_learn(db: Session, person: Staff, receipt: dict) -> bool:
-    """Learn the receipt's card for the person only when nothing on it points at someone else (a card already known
-    as another person's, or another person's name as the receiver)."""
+    """Learn the receipt's card for the person only when nothing on it points at someone else: not a card of the salon,
+    not a card already known as another person's, and the receiver's name (when printed) is best this person's."""
     card = _last4(receipt.get("dest_card"))
-    if not card:
+    if not card or card == _last4(receipt.get("source_card")) or card in _salon_cards(db):
         return False
     if any(card in (p.cards or []) for p in db.scalars(select(Staff).where(Staff.id != person.id))):
         return False
     name = receipt.get("dest_name")
-    if name:
-        named = match_people(db, mobile=None, dest_card=None, texts=[str(name)])
-        if named and all(x["staff_id"] != person.id for x in named):
+    if isinstance(name, str) and name.strip():
+        named = match_people(db, mobile=None, dest_card=None, texts=[name])
+        mine = next((x["score"] for x in named if x["staff_id"] == person.id), 0)
+        if named and (named[0]["staff_id"] != person.id and named[0]["score"] >= mine):
             return False
     return True
+
+
+def forget_card(db: Session, person: Staff, payout: StaffPayout) -> None:
+    """A payout voided (entered by mistake): its card is forgotten unless another booked payout of the person used it."""
+    card = _last4((payout.parsed or {}).get("dest_card")) if isinstance(payout.parsed, dict) else None
+    if not card or card not in (person.cards or []):
+        return
+    for other in db.scalars(select(StaffPayout).where(StaffPayout.staff_id == person.id, StaffPayout.status == "booked",
+                                                      StaffPayout.id != payout.id, StaffPayout.parsed.is_not(None))):
+        if isinstance(other.parsed, dict) and _last4(other.parsed.get("dest_card")) == card:
+            return
+    person.cards = [c for c in (person.cards or []) if c != card]  # a new list, so it is saved
 
 
 def learn_card(person: Staff, last4: str | None) -> None:

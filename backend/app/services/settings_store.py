@@ -25,7 +25,7 @@ DEFAULTS: dict[str, Any] = {
     "booking.auto": False,  # automatically book the first free slot when a deposit is registered
     # quick categories on the expenses page (each one is its own expense account 51xx; any other name can be typed)
     "expenses.categories": ["پذیرایی", "بهداشتی و نظافت", "مواد مصرفی", "اجاره", "شارژ ساختمان", "قبوض", "اینترنت و تلفن",
-                            "تعمیر و نگهداری", "تجهیزات", "لوازم اداری", "تبلیغات", "حمل و پیک", "کارمزد بانکی",
+                            "نگهداری و تعمیرات", "تجهیزات", "لوازم اداری", "تبلیغات", "حمل و پیک", "کارمزد بانکی",
                             "مالیات و عوارض", "سایر"],
     "ai.api_key": "",
     "ai.model": "",

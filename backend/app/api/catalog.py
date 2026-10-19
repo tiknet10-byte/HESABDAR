@@ -451,9 +451,9 @@ def _staff_fields(db: Session, body: StaffIn, p: Staff | None = None) -> dict:
         raise HTTPException(400, "نام را بنویسید")
     if data["mobile"]:
         m = normalize_mobile(data["mobile"])
-        if m is None:
+        if m is None and not (p is not None and data["mobile"] == p.mobile):
             raise HTTPException(400, "شمارهٔ موبایل درست نیست (مثل 09121234567)")
-        data["mobile"] = m
+        data["mobile"] = m or data["mobile"]  # a number saved before 1.22 that is not a mobile stays as it was
     else:
         data["mobile"] = None
     kind = data["kind"] if data["kind"] in ("employee",) else None
@@ -463,6 +463,8 @@ def _staff_fields(db: Session, body: StaffIn, p: Staff | None = None) -> dict:
         data["line_id"], data["commission_percent"] = None, 0
         if data["salary"] is not None and data["salary"] < 0:
             raise HTTPException(400, "حقوق نمی‌تواند منفی باشد")
+        if data["salary"] is not None and data["salary"] > accounting.MAX_RIAL:
+            raise HTTPException(400, "حقوق بیش از حد بزرگ است؛ عدد را دوباره نگاه کنید")
     else:
         data["salary"] = None
         if not 0 <= (data["commission_percent"] or 0) <= 100:

@@ -52,7 +52,8 @@ class MoveIn(BaseModel):
 @router.get("/moves")
 def moves(limit: int = 200, db: Session = Depends(get_db), _=Depends(require("capital"))):
     rows = db.scalars(select(CapitalMove).order_by(CapitalMove.at.desc(), CapitalMove.id.desc()).limit(min(limit, 1000)))
-    return [capital.move_out(db, m) for m in rows]
+    out = [capital.move_out(db, m) for m in rows] + capital.staff_from_pocket(db)
+    return sorted(out, key=lambda m: m["at"], reverse=True)[:min(limit, 1000)]
 
 
 @router.post("/moves")
