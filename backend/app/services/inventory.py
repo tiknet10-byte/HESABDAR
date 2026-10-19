@@ -274,7 +274,8 @@ def _post_move(db: Session, m: StockMove, product: Product) -> None:
         return
     dr, cr = MOVE_ACCOUNTS[m.kind]
     post(db, f"{MOVE_LABELS[m.kind]} - {product.name} ({abs(m.qty)} {product.unit})",
-         [Leg(_acc(db, dr), debit=m.cost), Leg(_acc(db, cr), credit=m.cost)], "stock_move", m.id, at=m.at)
+         [Leg(_acc(db, dr), debit=m.cost), Leg(_acc(db, cr), credit=m.cost)], "stock_move", m.id, at=m.at,
+         check_size=False)  # a cost worked out from purchases already booked (re-booked when history changes)
 
 
 def recost(db: Session, product_id: int) -> dict:
@@ -584,7 +585,7 @@ def void_purchase(db: Session, pur: Purchase, reason: str = "", user=None) -> Pu
         raise AccountingError("این خرید همین الان تغییر کرده است؛ صفحه را تازه کنید")
     for e in list(db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "purchase", JournalEntry.ref_id == pur.id))):
         post(db, f"ابطال خرید {pur.number}", [Leg(db.get(LedgerAccount, ln.account_id), debit=ln.credit, credit=ln.debit) for ln in e.lines],
-             "purchase_void", pur.id)
+             "purchase_void", pur.id, check_size=False)
     for sp in list(db.scalars(select(SupplierPayment).where(SupplierPayment.purchase_id == pur.id, SupplierPayment.amount > 0))):
         pa = db.get(PaymentAccount, sp.payment_account_id)
         back = SupplierPayment(supplier_id=sp.supplier_id, purchase_id=pur.id, payment_account_id=sp.payment_account_id,
@@ -592,7 +593,7 @@ def void_purchase(db: Session, pur: Purchase, reason: str = "", user=None) -> Pu
         db.add(back)
         db.flush()
         post(db, f"برگشت پرداخت خرید باطل‌شده {pur.number}", [Leg(cash_account_for(db, pa), debit=sp.amount), Leg(_acc(db, PAYABLE), credit=sp.amount)],
-             "supplier_payment", back.id, at=sp.paid_at)
+             "supplier_payment", back.id, at=sp.paid_at, check_size=False)
     from . import capital
 
     capital.void_for_purchase(db, pur, user=user)  # what the owner paid on it from their own pocket goes back to them

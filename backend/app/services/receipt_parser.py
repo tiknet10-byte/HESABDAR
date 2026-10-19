@@ -38,7 +38,7 @@ def parse_receipt(text: str) -> dict:
     # Persian thousands separator «٬» (and «،» typed between digit groups) -> ',' so ۱٬۵۰۰٬۰۰۰ reads as 1,500,000
     raw = re.sub(r"(?<=\d)،(?=\d{3})", ",", to_en_digits(text or "").replace("٬", ","))
     norm = normalize_text(raw)
-    result: dict = {"amount": None, "currency": "rial", "direction": None, "reference": None,
+    result: dict = {"amount": None, "currency": "rial", "unit": None, "direction": None, "reference": None,
                     "card_last4": None, "card_mask": None, "datetime": None, "bank": None, "confidence": 0.0}
 
     for pat in AMOUNT_PATTERNS:
@@ -47,6 +47,8 @@ def parse_receipt(text: str) -> dict:
             amt_text = m.group(1).strip()
             amount = parse_amount(amt_text)
             if amount:
+                if (m.lastindex or 0) >= 2 and m.group(2):
+                    result["unit"] = m.group(2)  # written right after the amount
                 if (m.lastindex or 0) >= 2 and m.group(2) == "تومان":
                     amount *= 10
                     result["currency"] = "toman_converted"

@@ -139,12 +139,16 @@ def _last4(value) -> str | None:  # noqa: ANN001
 
 
 def _labelled_card(raw: str, labels: str) -> str | None:
-    """The last 4 digits of the card written after one of the labels («به کارت 6037-99**-****-4321», «6037***4321»,
-    «6037-4321», «4321»): a card number is at most 16 characters, so a date written after it on the line is left out."""
-    m = re.search(rf"(?:{labels})[^\d\n]{{0,25}}([\d*xX×](?:[\d*xX×\-]|[ \t](?=[\d*xX×]))*)", raw)
+    """The last 4 digits of the card written after one of the labels («به کارت 6037-99**-****-4321», «6037 99** **** 4321»,
+    «6037***4321», «6037-4321», «****4321», «4321»). The card is one run of digits / masks; more groups separated by spaces
+    are taken only as 4-character card groups, never a date, a time or an amount written after it on the line."""
+    m = re.search(rf"(?:{labels})[^\d\n]{{0,25}}([\d*xX×][\d*xX×\-]*(?:[ \t][\d*xX×]{{4}}(?![\d*xX×/:.,\-]))*)", raw)
     if not m:
         return None
-    chars = re.sub(r"[\s\-]", "", m.group(1))[:16]
+    parts = m.group(1).split()
+    if len(parts) > 1 and len(parts[0]) != 4:
+        parts = parts[:1]  # «6037***4321 1405»: what follows a whole card is not part of it
+    chars = re.sub(r"[\s\-]", "", "".join(parts))[:16]
     if len(chars) >= 4 and chars[-4:].isdigit():
         return chars[-4:]
     digits = re.sub(r"\D", "", chars)
@@ -167,7 +171,7 @@ def read_text(text: str) -> dict:
     out = {"amount": p.get("amount"), "reference": p.get("reference"), "paid_at": p.get("datetime"), "bank": p.get("bank"),
            "source_card": _labelled_card(raw, SOURCE_LABELS), "dest_card": _labelled_card(raw, DEST_LABELS),
            "dest_name": None, "iban": None, "success": not _failed(raw),
-           "unit_named": bool(re.search(r"ریال|تومان", raw))}
+           "unit_named": bool(p.get("unit"))}  # ریال / تومان written right after the amount (not just somewhere)
     # a single card and nothing saying whose: on a transfer receipt it is usually the receiver's; on a bank SMS of the
     # salon's own account (a withdrawal, the balance left) it is the payer's
     sms = p.get("direction") == "out" or bool(re.search(r"برداشت|مانده|موجودی", raw))
@@ -245,8 +249,9 @@ def _caption_amount(text: str) -> list[int]:
     for m in re.finditer(r"(\d+(?:[.,/]\d+)*)\s*(میلیون|ملیون|م\b|تومن|تومان|هزار|ریال)?", t):
         digits, unit = m.group(1), m.group(2) or ""
         plain = re.sub(r"\D", "", digits)
-        if re.search(r"پیگیری|مرجع|کارت|شبا|شماره|کد|موبایل|تلفن", t[max(0, m.start() - 25):m.start()]):
-            continue
+        if not unit and re.search(r"(?<!\w)(?:پیگیری|مرجع|کارت|شبا|شماره|کد|موبایل|تلفن)(?:\s*(?:کارت|ملی|حساب|پیگیری))?\s*[:：]?\s*$",
+                                  t[:m.start()]):
+            continue  # «پیگیری ۱۲۳۴۵۶۷۸», «کارت ۶۰۳۷...»: a number right after its label (one with a money unit is an amount)
         if len(plain) >= 13 or normalize_mobile(digits) or (not unit and len(plain) < 5):
             continue  # a card, a mobile number, a year or a day
         if re.fullmatch(r"\d{1,3}(,\d{3})+", digits):
@@ -282,7 +287,8 @@ def read_caption(text: str, now: datetime | None = None) -> dict:
         kind = "advance"  # «برداشتی از سهم مهر» is still an advance
     month = None
     for i, name in enumerate(J_MONTHS):
-        if _word(normalize_text(name), t):  # a whole word: «احمدی» is not «دی», «مهرناز» is not «مهر»
+        # a whole word, «ماه» may be joined to it («شهریورماه»): «احمدی» is not «دی», «مهرناز» is not «مهر»
+        if re.search(rf"(?<!\w){re.escape(normalize_text(name))}(?:ماه)?(?!\w)", t):
             jm = i + 1
             y = re.search(r"\b(1[34]\d{2})\b", t)
             cy, cm = jmonth_of(now or local_now())
@@ -373,9 +379,11 @@ def read(db: Session, *, image: bytes | None = None, media_type: str | None = No
     if not receipt["success"]:
         warnings.append("این رسید «ناموفق» یا نامعلوم به نظر می‌رسد؛ اگر پولی جابه‌جا نشده، آن را ثبت نکنید")
     t_amount = receipt.get("text_amount")
+    needs_check = False
     if via == "ai" and t_amount and receipt["amount"] and t_amount != receipt["amount"]:
         if receipt.get("unit_named") and (t_amount == receipt["amount"] * 10 or receipt["amount"] == t_amount * 10):
-            receipt["amount"] = t_amount  # the receipt names its unit (ریال / تومان): what is written there wins
+            receipt["amount"] = t_amount  # the unit is written right after the amount: what is written there wins
+        needs_check = True
         warnings.append("مبلغ رسید را یک بار با عکس مقایسه کنید (ریال یا تومان ممکن است اشتباه خوانده شده باشد)")
     paid_at = _when(receipt["paid_at"])
     if paid_at and paid_at > local_now():
@@ -398,6 +406,7 @@ def read(db: Session, *, image: bytes | None = None, media_type: str | None = No
     chosen = best or staff_id
     when = paid_at or local_now()
     jd = gregorian_to_jalali(when.year, when.month, when.day)[2]
+    kind_from = "words" if cap["kind"] else "form" if kind in ("advance", "settlement") else "date"
     kind = cap["kind"] or (kind if kind in ("advance", "settlement") else None)
     if kind is None:  # no word for it: in the middle of the month an advance, around its end the settlement
         kind = "advance" if 6 <= jd <= 24 else "settlement"
@@ -426,8 +435,9 @@ def read(db: Session, *, image: bytes | None = None, media_type: str | None = No
             warnings.insert(0, "پرداختی با همین شمارهٔ پیگیری قبلاً ثبت شده است")
     description = " ".join((caption or "").split())[:500]
     return {"token": token, "via": via, "receipt": receipt, "warnings": warnings, "duplicate": duplicate, "people": people[:5],
-            "failed": not receipt["success"],
-            "suggest": {"staff_id": chosen, "kind": kind, "jy": jy, "jm": jm, "month_from": month_from, "amount": receipt["amount"],
+            "failed": not receipt["success"], "needs_check": needs_check,
+            "suggest": {"staff_id": chosen, "kind": kind, "kind_from": kind_from, "jy": jy, "jm": jm, "month_from": month_from,
+                        "amount": receipt["amount"],
                         "paid_at": paid_at.isoformat(timespec="minutes") if paid_at else None,
                         "reference": receipt["reference"], "payment_account_id": _account_for_card(db, receipt["source_card"]),
                         "description": description}}

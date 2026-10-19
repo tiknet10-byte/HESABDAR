@@ -143,7 +143,7 @@ def void_payout(db: Session, p: StaffPayout, reason: str = "", user=None) -> Sta
     post(db, f"ابطال {kind_label(staff, p.kind)} {staff.full_name}" + (f" - {reason}" if reason else ""), [
         Leg(db.get(LedgerAccount, ln.account_id), debit=ln.credit, credit=ln.debit, staff_id=ln.staff_id, line_id=ln.line_id)
         for ln in entry.lines
-    ], "staff_payout", p.id, at=entry.at)
+    ], "staff_payout", p.id, at=entry.at, check_size=False)
     p.voided_at, p.void_reason = local_now(), (reason or "")[:256]
     audit(db, "staff.payout_void", "staff", p.staff_id, {"payout": p.id, "amount": p.amount, "reason": reason}, user=user)
     return p
@@ -158,7 +158,8 @@ def backfill_payouts(db: Session) -> int:
     payable, equity = account(db, STAFF_PAYABLE).id, account(db, EQUITY).id
     by_ledger = {pa.ledger_account_id: pa.id for pa in db.scalars(select(PaymentAccount)) if pa.ledger_account_id}
     n = 0
-    for entry in db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "staff_payout").order_by(JournalEntry.id)):
+    moved_back: dict[tuple[int, int, int], int] = {}  # (person, year, month) -> legacy payouts already counted for the month before
+    for entry in db.scalars(select(JournalEntry).where(JournalEntry.ref_type == "staff_payout").order_by(JournalEntry.at, JournalEntry.id)):
         if entry.id in done:
             continue
         pay_line = next((ln for ln in entry.lines if ln.account_id == payable and ln.debit > 0 and ln.staff_id), None)
@@ -170,9 +171,13 @@ def backfill_payouts(db: Session) -> int:
         # from the months before was that month's settlement (the Shahrivar share paid on 2 Mehr)
         from .jalali import gregorian_to_jalali
 
-        if gregorian_to_jalali(entry.at.year, entry.at.month, entry.at.day)[2] <= 15 \
-                and balance_at(db, pay_line.staff_id, month_range(jy, jm)[0]) > 0:
-            jy, jm = (jy, jm - 1) if jm > 1 else (jy - 1, 12)
+        # (only until what was owed at the month's start is covered: an advance after that is this month's)
+        if gregorian_to_jalali(entry.at.year, entry.at.month, entry.at.day)[2] <= 15:
+            key = (pay_line.staff_id, jy, jm)
+            owed = balance_at(db, pay_line.staff_id, month_range(jy, jm)[0])
+            if moved_back.get(key, 0) < owed:
+                moved_back[key] = moved_back.get(key, 0) + int(pay_line.debit)
+                jy, jm = (jy, jm - 1) if jm > 1 else (jy - 1, 12)
         p = StaffPayout(staff_id=pay_line.staff_id, kind="settlement", jy=jy, jm=jm, amount=int(pay_line.debit), paid_at=entry.at,
                         payment_account_id=by_ledger.get(other.account_id) if other else None,
                         from_owner=bool(other and other.account_id == equity), description=entry.description or "",
@@ -231,7 +236,7 @@ def void_salary(db: Session, a: SalaryAccrual, user=None) -> SalaryAccrual:  # n
     post(db, f"ابطال حقوق {staff.full_name} - {month_label(a.jy, a.jm)}", [
         Leg(db.get(LedgerAccount, ln.account_id), debit=ln.credit, credit=ln.debit, staff_id=ln.staff_id, line_id=ln.line_id)
         for ln in entry.lines
-    ], "salary", a.id, at=entry.at)
+    ], "salary", a.id, at=entry.at, check_size=False)
     a.voided_at = local_now()
     audit(db, "salary.void", "staff", a.staff_id, {"salary": a.id, "amount": a.amount}, user=user)
     return a

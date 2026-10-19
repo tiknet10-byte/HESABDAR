@@ -222,7 +222,8 @@ def void_for_purchase(db: Session, pur: Purchase, user=None) -> None:  # noqa: A
 def _reverse(db: Session, ref_type: str, ref_id: int, description: str, at: datetime) -> None:
     for e in list(db.scalars(select(JournalEntry).where(JournalEntry.ref_type == ref_type, JournalEntry.ref_id == ref_id))):
         post(db, description, [Leg(db.get(LedgerAccount, ln.account_id), debit=ln.credit, credit=ln.debit, customer_id=ln.customer_id,
-                                   line_id=ln.line_id, staff_id=ln.staff_id) for ln in e.lines], f"{ref_type}_void", ref_id, at=at)
+                                   line_id=ln.line_id, staff_id=ln.staff_id) for ln in e.lines], f"{ref_type}_void", ref_id, at=at,
+             check_size=False)
 
 
 def staff_from_pocket(db: Session, s: datetime | None = None, e: datetime | None = None) -> list[dict]:

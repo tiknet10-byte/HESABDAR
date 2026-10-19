@@ -688,3 +688,69 @@ def test_paid_from_the_owners_pocket_shows_on_the_capital_page(client, accounts)
     assert any(m["kind"] == "staff" for m in client.get("/api/capital/moves").json())
     assert client.post(f"/api/staff/payouts/{r.json()['payout']['id']}/void", json={}).status_code == 200
     assert put_in(client.get("/api/capital/position").json()) == put_in(before)
+
+
+# ---------------------------------------------------------------------------------------------- review of the fixes
+def test_fixes_of_the_fixes(client, accounts, monkeypatch):
+    from app.ai import claude
+    from app.services.payout_receipt import DEST_LABELS, _caption_amount, _labelled_card, read_caption
+
+    # the assistant's right amount is kept when the unit is not written right after the number
+    monkeypatch.setattr(claude, "available", lambda: True)
+    answer = {"amount_rial": 5_000_000, "raw_text": "کارت به کارت موفق\nمبلغ: 500,000\nپانصد هزار تومان"}
+    monkeypatch.setattr(claude, "vision_extract", lambda *a, **k: answer)
+    r = client.post("/api/staff/payout-receipt", files={"file": ("u.png", b"\x89PNG\r\n\x1a\nunit-apart", "image/png")},
+                    data={"caption": ""}).json()
+    assert r["receipt"]["amount"] == 5_000_000 and r["needs_check"] is True
+    # a short card followed by a date or an amount on the same line
+    for text in ("به کارت ****4321 1405/07/20 10:45", "به کارت 4321 1405/07/20", "به کارت 6037***4321 1,000,000 ریال",
+                 "به کارت 6037***4321 1405/07/20", "به کارت 6037 9912 3456 4321 1405/07/20", "به کارت 6037 99** **** 4321 مبلغ"):
+        assert _labelled_card(text, DEST_LABELS) == "4321", text
+    # «شهریورماه»; amounts after «کارت به کارت» or inside «یکدفعه»
+    assert read_caption("تسویه شهریورماه")["month"][1] == 6 and read_caption("تسویه مهرناز")["month"] is None
+    assert _caption_amount("کارت به کارت ۵ میلیون برداشتی سارا") == [50_000_000]
+    assert _caption_amount("مساعده یکدفعه ۳ میلیون") == [30_000_000]
+
+
+def test_an_absurd_amount_from_before_the_limit_can_still_be_voided(client, accounts):
+    from app.models import Expense, PaymentAccount
+    from app.services import accounting
+
+    with _db() as db:  # entered by an older version, before amounts had a limit
+        pa = db.get(PaymentAccount, accounts["صندوق نقدی"])
+        exp = Expense(category="سایر", amount=2 * 10**15, payment_account_id=pa.id, spent_at=datetime.now() - timedelta(hours=1))
+        db.add(exp)
+        db.flush()
+        accounting.post(db, "هزینه: سایر", [accounting.Leg(accounting.expense_account(db, "سایر"), debit=exp.amount),
+                                            accounting.Leg(accounting.cash_account_for(db, pa), credit=exp.amount)],
+                        "expense", exp.id, at=exp.spent_at, check_size=False)
+        db.commit()
+        eid = exp.id
+    assert client.post("/api/expenses", json={"category": "سایر", "amount": 2 * 10**15, "payment_account_id": accounts["صندوق نقدی"]}).status_code == 400
+    assert client.post(f"/api/expenses/{eid}/void", json={"reason": "عدد اشتباه"}).status_code == 200
+    balanced(client)
+
+
+def test_old_payouts_count_for_the_month_before_only_up_to_what_was_owed(client, accounts):
+    line, svc, person = setup(client, "قدیمی سقف", percent=50)
+    invoice(client, accounts, svc, person, 2_000_000, at=datetime.combine(PREV_START - timedelta(days=8), time(10)))  # owed 1,000,000
+    from app.models import PaymentAccount, Staff, StaffPayout
+    from app.services import accounting, staffpay
+
+    start = month_range(*CUR)[0]
+    with _db() as db:
+        p = db.get(Staff, person["id"])
+        pa = db.get(PaymentAccount, accounts["صندوق نقدی"])
+        ids = []
+        for amount, day in ((1_000_000, 1), (3_000_000, 8)):
+            e = accounting.post(db, f"پرداخت سهم {p.full_name}", [
+                accounting.Leg(accounting.account(db, accounting.STAFF_PAYABLE), debit=amount, staff_id=p.id),
+                accounting.Leg(accounting.cash_account_for(db, pa), credit=amount, staff_id=p.id)],
+                "staff_payout", p.id, at=start + timedelta(days=day, hours=9))
+            ids.append(e.id)
+        db.commit()
+        staffpay.backfill_payouts(db)
+        db.commit()
+        months = [(r.jy, r.jm) for r in (db.scalar(select(StaffPayout).where(StaffPayout.entry_id == i)) for i in ids)]
+    assert months == [PREV, CUR]
+    assert statement(client, person, PREV)["remaining"] == 0

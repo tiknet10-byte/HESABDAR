@@ -163,7 +163,9 @@ def check_amount(amount: int, label: str = "مبلغ") -> None:
 
 
 def post(db: Session, description: str, legs: list[Leg], ref_type: str = "", ref_id: int | None = None,
-         at: datetime | None = None) -> JournalEntry:
+         at: datetime | None = None, check_size: bool = True) -> JournalEntry:
+    """check_size=False: a correction (void, refund of a voided document, re-booking) of amounts already in the books -
+    it must always be possible, even for an absurd amount entered before 1.22 had a limit."""
     legs = [l for l in legs if l.debit or l.credit]
     dr = sum(l.debit for l in legs)
     cr = sum(l.credit for l in legs)
@@ -171,7 +173,7 @@ def post(db: Session, description: str, legs: list[Leg], ref_type: str = "", ref
         raise AccountingError(f"unbalanced entry: debit={dr} credit={cr}")
     if any(l.debit < 0 or l.credit < 0 for l in legs):
         raise AccountingError("negative amounts are not allowed in journal lines")
-    if any(l.debit > MAX_RIAL or l.credit > MAX_RIAL for l in legs):
+    if check_size and any(l.debit > MAX_RIAL or l.credit > MAX_RIAL for l in legs):
         raise AccountingError("مبلغ بیش از حد بزرگ است؛ عدد را دوباره نگاه کنید")
     entry = JournalEntry(description=description, ref_type=ref_type, ref_id=ref_id, at=at or local_now())
     for l in legs:
@@ -387,7 +389,7 @@ def _post_forfeit_commission(db: Session, dep: Deposit, at: datetime) -> None:
         post(db, f"سهم پرسنل از بیعانهٔ سوخت‌شده #{dep.id}", [
             Leg(account(db, COMMISSION), debit=dep.commission_amount, line_id=dep.forfeit_line_id, staff_id=dep.staff_id),
             Leg(account(db, STAFF_PAYABLE), credit=dep.commission_amount, line_id=dep.forfeit_line_id, staff_id=dep.staff_id),
-        ], "forfeit_commission", dep.id, at=at)
+        ], "forfeit_commission", dep.id, at=at, check_size=False)
 
 
 def repost_forfeit_commissions(db: Session, deposits: list[Deposit]) -> None:
@@ -985,13 +987,13 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payment
             Leg(db.get(LedgerAccount, l.account_id), debit=l.credit, credit=l.debit, customer_id=l.customer_id,
                 line_id=l.line_id, staff_id=l.staff_id)
             for l in original.lines
-        ], "invoice_void", inv.id, at=undo_at)
+        ], "invoice_void", inv.id, at=undo_at, check_size=False)
     # deposits that paid part of it: back to open
     for dep in list(db.scalars(select(Deposit).where(Deposit.applied_invoice_id == inv.id, Deposit.status == "applied"))):
         post(db, f"برگشت بیعانه از فاکتور باطل‌شده {inv.number}", [
             Leg(account(db, AR), debit=dep.amount, customer_id=inv.customer_id),
             Leg(account(db, DEPOSITS), credit=dep.amount, customer_id=inv.customer_id),
-        ], "deposit", dep.id, at=undo_at)
+        ], "deposit", dep.id, at=undo_at, check_size=False)
         dep.status = "held"
         dep.applied_invoice_id = None
     # money received on it
@@ -1007,7 +1009,7 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payment
             post(db, f"{'لغو دریافت' if mistake else 'استرداد وجه'} فاکتور باطل‌شده {inv.number}", [
                 Leg(account(db, AR), debit=pay.amount, customer_id=pay.customer_id),
                 Leg(cash_account_for(db, pa), credit=pay.amount, customer_id=pay.customer_id),
-            ], "payment", back.id, at=when)
+            ], "payment", back.id, at=when, check_size=False)
         else:
             credit = Deposit(customer_id=inv.customer_id, amount=pay.amount, payment_account_id=pay.payment_account_id,
                              received_at=pay.paid_at, reference=pay.reference, source="void_credit", kind="credit",
@@ -1017,7 +1019,7 @@ def void_invoice(db: Session, inv: Invoice, reason: str = "", user=None, payment
             post(db, f"انتقال وجه فاکتور باطل‌شده {inv.number} به بیعانه", [
                 Leg(account(db, AR), debit=pay.amount, customer_id=inv.customer_id),
                 Leg(account(db, DEPOSITS), credit=pay.amount, customer_id=inv.customer_id),
-            ], "deposit", credit.id)
+            ], "deposit", credit.id, check_size=False)
     inv.paid = 0
     # products come back to stock at the cost they were sold at
     from . import inventory
@@ -1106,7 +1108,7 @@ def void_expense(db: Session, exp: Expense, reason: str = "", user=None) -> Expe
         post(db, f"ابطال هزینه: {exp.category}" + (f" - {reason}" if reason else ""), [
             Leg(db.get(LedgerAccount, ln.account_id), debit=ln.credit, credit=ln.debit, staff_id=ln.staff_id, line_id=ln.line_id)
             for ln in entry.lines
-        ], "expense_void", exp.id, at=entry.at)
+        ], "expense_void", exp.id, at=entry.at, check_size=False)
     audit(db, "expense.void", "expense", exp.id, {"amount": exp.amount, "category": exp.category, "reason": reason}, user=user)
     return exp
 
