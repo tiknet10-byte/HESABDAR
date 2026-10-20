@@ -884,13 +884,16 @@ class ExpenseIn(BaseModel):
     spent_at: datetime | None = None
     description: str = ""
     staff_id: int | None = None
+    line_id: int | None = None  # the service line it was for (e.g. the laser line's consumables)
+    from_treasury: bool = False  # paid from that line's treasury (still an expense: it lowers the profit)
     force: bool = False  # the same expense was entered a moment ago, and the person confirmed it is another one
 
 
-def _expense_row(e: Expense, accounts: dict[int, str]) -> dict:
+def _expense_row(e: Expense, accounts: dict[int, str], lines: dict[int, str] | None = None) -> dict:
     return {"id": e.id, "category": e.category, "amount": e.amount, "payment_account_id": e.payment_account_id,
             "account": accounts.get(e.payment_account_id), "spent_at": e.spent_at.isoformat(), "description": e.description,
-            "staff_id": e.staff_id, "voided_at": e.voided_at.isoformat() if e.voided_at else None, "void_reason": e.void_reason}
+            "staff_id": e.staff_id, "voided_at": e.voided_at.isoformat() if e.voided_at else None, "void_reason": e.void_reason,
+            "line_id": e.line_id, "line": (lines or {}).get(e.line_id), "from_treasury": bool(e.from_treasury)}
 
 
 @router.get("/expenses")
@@ -914,7 +917,10 @@ def expenses(jy: int | None = None, jm: int | None = None, q: str = "", category
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(Expense.description.like(like), Expense.category.like(like)))
     accounts = {pa.id: pa.name for pa in db.scalars(select(PaymentAccount))}
-    rows = [_expense_row(x, accounts) for x in db.scalars(stmt.limit(2000))]
+    lines = {ln.id: ln.name for ln in db.scalars(select(ServiceLine))}
+    rows = [_expense_row(x, accounts, lines) for x in db.scalars(stmt.limit(2000))]
+    treasury_spent = int(db.scalar(select(func.coalesce(func.sum(Expense.amount), 0)).where(
+        Expense.from_treasury.is_(True), Expense.voided_at.is_(None), Expense.spent_at >= s, Expense.spent_at < e)) or 0)
     by_cat: dict[str, int] = {}
     for _, cat, amt in reports.expense_rows(db, s, e - timedelta(microseconds=1)):
         by_cat[cat] = by_cat.get(cat, 0) + amt
@@ -923,7 +929,7 @@ def expenses(jy: int | None = None, jm: int | None = None, q: str = "", category
     return {"jy": jy, "jm": jm, "current": list(jmonth_of(local_now())), "rows": rows,
             "total": sum(by_cat.values()), "salaries": salaries,
             "by_category": sorted(({"name": k, "value": v} for k, v in by_cat.items() if v), key=lambda x: -x["value"]),
-            "profit": profit}
+            "profit": profit, "treasury_spent": treasury_spent}
 
 
 def staffpay_salary_category() -> str:
@@ -965,7 +971,8 @@ def create_expense(body: ExpenseIn, db: Session = Depends(get_db), user=Depends(
     try:
         e = accounting.record_expense(db, category=body.category, amount=body.amount, payment_account=pa,
                                       spent_at=body.spent_at, description=(body.description or "").strip(),
-                                      staff_id=body.staff_id, force=body.force, user=user)
+                                      staff_id=body.staff_id, force=body.force, line_id=body.line_id,
+                                      from_treasury=body.from_treasury, user=user)
     except accounting.DuplicateExpense as exc:
         db.rollback()
         raise HTTPException(409, str(exc)) from exc
@@ -974,6 +981,42 @@ def create_expense(body: ExpenseIn, db: Session = Depends(get_db), user=Depends(
         raise HTTPException(400, str(exc)) from exc
     db.commit()
     return {"id": e.id, "category": e.category}
+
+
+class ExpenseTreasuryIn(BaseModel):
+    line_id: int | None = None
+    staff_id: int | None = None
+    from_treasury: bool = False
+
+
+@router.post("/expenses/{expense_id}/treasury")
+def expense_treasury(expense_id: int, body: ExpenseTreasuryIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+    """Which line (and staff member) an expense was for and whether it came from that line's treasury - set later.
+    The amount, date and account stay (no money moves); its entry's expense line carries the new line / person."""
+    from ..models import JournalLine, LedgerAccount
+
+    e = _get(db, Expense, expense_id, "هزینه")
+    if e.voided_at is not None:
+        raise HTTPException(400, "این هزینه باطل شده است")
+    if body.line_id is not None and db.get(ServiceLine, body.line_id) is None:
+        raise HTTPException(400, "لاین پیدا نشد")
+    if body.staff_id is not None and db.get(Staff, body.staff_id) is None:
+        raise HTTPException(400, "شخص پیدا نشد")
+    if body.from_treasury and body.line_id is None:
+        raise HTTPException(400, "برای خرج از خزانه، لاینی را که خزانه‌اش خرج شد انتخاب کنید")
+    before = {"line": e.line_id, "staff": e.staff_id, "from_treasury": bool(e.from_treasury)}
+    e.line_id, e.staff_id, e.from_treasury = body.line_id, body.staff_id, True if body.from_treasury else None
+    entry = db.scalar(select(JournalEntry).where(JournalEntry.ref_type == "expense", JournalEntry.ref_id == e.id)
+                      .order_by(JournalEntry.id).limit(1))
+    if entry is not None:
+        expense_accs = {a.id for a in db.scalars(select(LedgerAccount).where(LedgerAccount.parent_code == accounting.EXPENSE_PARENT))}
+        for ln in db.scalars(select(JournalLine).where(JournalLine.entry_id == entry.id)):
+            if ln.account_id in expense_accs:
+                ln.line_id, ln.staff_id = body.line_id, body.staff_id
+    audit(db, "expense.treasury", "expense", e.id, {"before": before, "line": body.line_id, "staff": body.staff_id,
+                                                    "from_treasury": body.from_treasury}, user=user)
+    db.commit()
+    return {"ok": True}
 
 
 class ExpenseVoidIn(BaseModel):

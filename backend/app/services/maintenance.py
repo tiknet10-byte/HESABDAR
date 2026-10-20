@@ -13,6 +13,7 @@ from ..models import (
     Alert,
     Appointment,
     AuditLog,
+    BankRule,
     BankTransaction,
     CapitalMove,
     ConversationMessage,
@@ -66,7 +67,7 @@ TRANSACTIONS = [WooOutbox, WooOrder, WooLog, StockMove, CapitalMove, HoldingMove
                 StaffPayout, SalaryAccrual, ReceiptImage, HistoryMonth, TreasuryMove,
                 JournalLine, JournalEntry, Alert, ConversationMessage, ConversationState, ImportBatch]
 # kept by "transactions" and "customers", wiped by "factory" (then the defaults are seeded again); children first too
-CATALOG = [TreasuryRate, WooProduct, Product, Supplier, Holding, Service, Staff, PaymentAccount, ServiceLine, KnowledgeItem, LedgerAccount, Setting,
+CATALOG = [BankRule, TreasuryRate, WooProduct, Product, Supplier, Holding, Service, Staff, PaymentAccount, ServiceLine, KnowledgeItem, LedgerAccount, Setting,
            PluginState, AuditLog]
 KEPT = [User]  # logins are never wiped. Every table is in exactly one of TRANSACTIONS, [Customer], CATALOG, KEPT (tested)
 SCOPES = {

@@ -8,6 +8,7 @@ Three ways to get bank data into the system, all feeding the same reconciliation
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import logging
 from datetime import datetime, timedelta
@@ -22,7 +23,7 @@ from ....api.deps import require
 from ....core.db import SessionLocal, get_db
 from ....core.security import verify_signature
 from ....models import BankTransaction, PaymentAccount
-from ....services import matching
+from ....services import bank_booking, matching
 from ....services.jalali import jalali_to_gregorian
 from ....services.receipt_parser import parse_receipt
 from ....services.textutil import parse_amount, to_en_digits
@@ -53,26 +54,39 @@ class GenericHttpProvider(BankProvider):
     """
     key = "generic_http"
 
+    OUT = ("out", "debit", "withdraw", "withdrawal", "dr", "برداشت", "بدهکار")
+    IN = ("in", "credit", "deposit", "cr", "واریز", "بستانکار")
+
     def fetch(self, account: PaymentAccount, since: datetime) -> list[dict]:
+        from ....core.security import decrypt_secret
+
         cfg = account.provider_config or {}
         url = cfg["url"].format(account=cfg.get("account", ""), since=since.isoformat())
-        resp = httpx.get(url, headers={"Authorization": f"Bearer {cfg.get('token', '')}"}, timeout=30)
+        resp = httpx.get(url, headers={"Authorization": f"Bearer {decrypt_secret(cfg.get('token', ''))}"}, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         for part in (cfg.get("items_path") or "").split("."):
             if part:
                 data = data[part]
         f = {"id": "id", "amount": "amount", "date": "date", "direction": "direction", "reference": "reference",
-             "description": "description", "card": "card", **cfg.get("fields", {})}
+             "description": "description", "card": "card", "iban": "iban", "name": "name", **cfg.get("fields", {})}
         out = []
         for it in data:
-            amount = int(it[f["amount"]])
-            direction = str(it.get(f["direction"], "in")).lower()
-            out.append({"external_id": str(it[f["id"]]), "amount": abs(amount),
-                        "direction": "out" if amount < 0 or direction in ("out", "debit", "withdraw", "برداشت") else "in",
-                        "occurred_at": datetime.fromisoformat(str(it[f["date"]]).replace("Z", "")),
-                        "reference": it.get(f["reference"]), "description": it.get(f["description"], ""),
-                        "counterparty_card": it.get(f["card"])})
+            try:  # one row the bank wrote oddly is left out (and logged), never the whole sync
+                raw = str(it[f["amount"]]).strip()
+                amount = parse_amount(raw.lstrip("+-")) or 0
+                if not amount:
+                    raise ValueError("no amount")
+                d = str(it.get(f["direction"], "")).strip().lower()
+                direction = "out" if raw.startswith("-") or d in self.OUT else "in" if d in self.IN or not d else "unknown"
+                out.append({"external_id": str(it[f["id"]]), "amount": abs(int(amount)), "direction": direction,
+                            "occurred_at": datetime.fromisoformat(str(it[f["date"]]).replace("Z", "")),
+                            "reference": it.get(f["reference"]), "description": str(it.get(f["description"]) or ""),
+                            "counterparty_card": str(it.get(f["card"]) or "") or None,
+                            "counterparty_iban": str(it.get(f["iban"]) or "") or None,
+                            "counterparty_name": str(it.get(f["name"]) or "") or None})
+            except (KeyError, TypeError, ValueError) as exc:
+                log.warning("bank row skipped for account %s: %s", account.id, exc)
         return out
 
 
@@ -114,16 +128,29 @@ def find_account_for_sms(db: Session, parsed: dict, sender: str | None) -> Payme
     return None
 
 
+def _salon_last4(db: Session) -> set[str]:
+    out = set()
+    for (m,) in db.execute(select(PaymentAccount.card_mask).where(PaymentAccount.card_mask.is_not(None))):
+        d = "".join(ch for ch in (m or "") if ch.isdigit())
+        if len(d) >= 4:
+            out.add(d[-4:])
+    return out
+
+
 def ingest_bank_sms(db: Session, text: str, sender: str | None = None, account_id: int | None = None) -> dict:
+    from ....services.bank_parties import mask_text, sms_direction
+
     p = parse_receipt(text)
     if not p["amount"]:
         return {"ok": False, "reason": "amount not found"}
+    # the sign with the amount, the card-to-card cards, then the words; unclear: "unknown" (the inbox asks)
+    p["direction"] = sms_direction(text, _salon_last4(db))
     account = db.get(PaymentAccount, account_id) if account_id else find_account_for_sms(db, p, sender)
     if not p["reference"] and not p["datetime"]:
         # no tracking number and no date in the SMS: the same text again within a day is the same SMS sent again
         # (a forwarder retry or a replayed request), not new money
         same = db.scalar(select(BankTransaction).where(
-            BankTransaction.source == "bank_sms", BankTransaction.description == text[:500],
+            BankTransaction.source == "bank_sms", BankTransaction.description == mask_text(text[:500]),
             BankTransaction.payment_account_id == account.id if account else BankTransaction.payment_account_id.is_(None),
             BankTransaction.created_at >= datetime.now() - timedelta(hours=24)).limit(1))
         if same is not None:
@@ -145,6 +172,9 @@ def parse_statement_csv(content: str) -> list[dict]:
         "deposit": ["deposit", "credit", "واریز", "بستانکار"], "withdraw": ["withdraw", "debit", "برداشت", "بدهکار"],
         "amount": ["amount", "مبلغ"], "description": ["description", "شرح", "توضیحات"],
         "reference": ["reference", "شماره پیگیری", "پیگیری", "شماره مرجع", "سند", "شماره سند"],
+        "card": ["card", "شماره کارت", "کارت مقصد", "کارت مبدا", "کارت طرف حساب"],
+        "iban": ["iban", "شبا", "شماره شبا", "شبای مقصد"],
+        "name": ["name", "نام", "نام طرف حساب", "صاحب حساب", "نام صاحب حساب", "طرف حساب", "گیرنده", "واریز کننده"],
     }
     cols = {}
     for key, names in aliases.items():
@@ -153,7 +183,8 @@ def parse_statement_csv(content: str) -> list[dict]:
                 cols[key] = h
                 break
     rows = []
-    for i, r in enumerate(reader):
+    seen: dict[str, int] = {}
+    for r in reader:
         dep = parse_amount(r.get(cols.get("deposit", ""), "") or "") or 0
         wd = parse_amount(r.get(cols.get("withdraw", ""), "") or "") or 0
         amt = parse_amount(r.get(cols.get("amount", ""), "") or "") or 0
@@ -172,8 +203,16 @@ def parse_statement_csv(content: str) -> list[dict]:
         except (ValueError, TypeError):
             when = datetime.now()
         ref = (r.get(cols.get("reference", "")) or "").strip() or None
-        rows.append({"external_id": ref or f"stmt-{when:%Y%m%d%H%M}-{amount}-{i}", "amount": amount, "direction": direction,
-                     "occurred_at": when, "reference": ref, "description": (r.get(cols.get("description", "")) or "").strip()})
+        desc = (r.get(cols.get("description", "")) or "").strip()
+        party = {k: (r.get(cols[k]) or "").strip() or None for k in ("card", "iban", "name") if k in cols}
+        # the same row in another download of the statement (longer, shorter, sorted otherwise) is the same line: its id
+        # is made of what it says (and how many identical rows came before it), not of where it is in the file
+        key = f"{when:%Y%m%d%H%M}|{amount}|{direction}|{ref or ''}|{' '.join(desc.split())}"
+        seen[key] = seen.get(key, 0) + 1
+        ext = ref or "stmt-" + hashlib.sha1(f"{key}|{seen[key]}".encode()).hexdigest()[:24]
+        rows.append({"external_id": ext, "amount": amount, "direction": direction, "occurred_at": when, "reference": ref,
+                     "description": desc, "counterparty_card": party.get("card"), "counterparty_iban": party.get("iban"),
+                     "counterparty_name": party.get("name")})
     return rows
 
 
@@ -206,6 +245,40 @@ def _warn_no_senders() -> None:
                     "افزونه‌ها ← همگام‌سازی بانک» فرستندهٔ پیامک‌های بانک را وارد کنید (همان شماره یا نامی که بالای پیامک بانک دیده می‌شود).",
                     level="danger")
         db.commit()
+
+
+class BookIn(BaseModel):
+    target: str  # staff | expense | owner | ignore
+    staff_id: int | None = None
+    kind: str | None = None  # advance | settlement (default: worked out)
+    jy: int | None = None
+    jm: int | None = None
+    category: str | None = None
+    line_id: int | None = None
+    from_treasury: bool = False
+    description: str = ""
+    remember: bool = False  # next time a line to / from this card is this too
+    auto: bool = False  # ... and booked by itself (only an exact card / IBAN)
+    force: bool = False
+
+
+class LinkIn(BaseModel):
+    type: str
+    id: int
+
+
+class DirectionIn(BaseModel):
+    direction: str  # in | out
+
+
+class UndoIn(BaseModel):
+    then: str = "inbox"  # inbox | ignore
+
+
+class RuleIn(BaseModel):
+    auto: bool | None = None
+    auto_cap: int | None = None
+    active: bool | None = None
 
 
 class SmsIn(BaseModel):
@@ -280,14 +353,167 @@ class Plugin(BasePlugin):
             return {"imported": new, "auto_matched": matched}
 
         @r.get("/transactions")
-        def transactions(status: str | None = None, limit: int = 200, db: Session = Depends(get_db), _=Depends(require("finance"))):
-            q = select(BankTransaction).order_by(BankTransaction.occurred_at.desc()).limit(min(limit, 1000))
+        def transactions(status: str | None = None, direction: str | None = None, account_id: int | None = None, limit: int = 200,
+                         db: Session = Depends(get_db), _=Depends(require("finance"))):
+            q = select(BankTransaction).order_by(BankTransaction.occurred_at.desc()).limit(max(1, min(limit, 1000)))
             if status:
                 q = q.where(BankTransaction.status == status)
-            return [{"id": t.id, "account_id": t.payment_account_id, "amount": t.amount, "direction": t.direction,
-                     "occurred_at": t.occurred_at.isoformat(), "reference": t.reference, "description": t.description,
-                     "status": t.status, "matched_type": t.matched_type, "matched_id": t.matched_id, "source": t.source}
-                    for t in db.scalars(q)]
+            if direction:
+                q = q.where(BankTransaction.direction == direction)
+            if account_id:
+                q = q.where(BankTransaction.payment_account_id == account_id)
+            accounts = {pa.id: pa.name for pa in db.scalars(select(PaymentAccount))}
+            return [bank_booking.tx_row(db, t, accounts) for t in db.scalars(q)]
+
+        # ---------------------------------------------- the inbox: lines that are not a customer's money (1.23)
+        @r.get("/inbox")
+        def inbox(db: Session = Depends(get_db), _=Depends(require("finance"))):
+            """Lines waiting for a decision (newest first), each with what it most likely is."""
+            accounts = {pa.id: pa.name for pa in db.scalars(select(PaymentAccount))}
+            rows = [bank_booking.tx_row(db, t, accounts, with_suggestions=True) for t in db.scalars(
+                select(BankTransaction).where(BankTransaction.status == "unmatched")
+                .order_by(BankTransaction.occurred_at.desc()).limit(300))]
+            return {"rows": rows, "out": sum(1 for x in rows if x["direction"] == "out"),
+                    "unknown": sum(1 for x in rows if x["direction"] == "unknown")}
+
+        @r.get("/booked")
+        def booked(days: int = 30, db: Session = Depends(get_db), _=Depends(require("finance"))):
+            """What was booked or linked from bank lines lately (by itself first), to look over and take back."""
+            from ....models import local_now
+
+            since = local_now() - timedelta(days=max(1, min(days, 365)))
+            accounts = {pa.id: pa.name for pa in db.scalars(select(PaymentAccount))}
+            q = (select(BankTransaction).where(BankTransaction.booked_at >= since, BankTransaction.status.in_(("matched", "ignored")))
+                 .order_by(BankTransaction.booked_at.desc()).limit(500))
+            return [bank_booking.tx_row(db, t, accounts) for t in db.scalars(q)]
+
+
+        def _tx(db: Session, tx_id: int) -> BankTransaction:
+            tx = db.get(BankTransaction, tx_id)
+            if tx is None:
+                raise HTTPException(404, "تراکنش پیدا نشد")
+            return tx
+
+        @r.post("/transactions/{tx_id}/book")
+        def book(tx_id: int, body: BookIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+            from ....core.security import has_permission
+            from ....services.staffpay import Duplicate
+
+            tx = _tx(db, tx_id)
+            if body.target == "owner" and not has_permission(user.role, "capital"):
+                raise HTTPException(403, "پول خود مدیر را فقط مدیر ثبت می‌کند")
+            if body.remember and not has_permission(user.role, "settings") and body.auto:
+                body.auto = False  # booking by itself: set by the owner / admin
+            try:
+                out = bank_booking.book(db, tx, target=body.target, staff_id=body.staff_id, kind=body.kind, jy=body.jy, jm=body.jm,
+                                        category=body.category, line_id=body.line_id, from_treasury=body.from_treasury,
+                                        description=body.description, force=body.force, user=user)
+                rule = None
+                if body.remember and body.target in ("staff", "expense", "owner", "ignore"):
+                    rule = bank_booking.remember(db, tx, target=body.target, staff_id=body.staff_id, category=out.get("category"),
+                                                 line_id=body.line_id, from_treasury=body.from_treasury, auto=body.auto, user=user)
+            except Duplicate as exc:
+                db.rollback()
+                raise HTTPException(409, str(exc)) from exc
+            except (bank_booking.BankBookError, ValueError) as exc:
+                db.rollback()
+                raise HTTPException(400, str(exc)) from exc
+            db.commit()
+            return {"ok": True, **out, "remembered": bool(rule), "rule_auto": bool(rule and rule.auto),
+                    "transaction": bank_booking.tx_row(db, tx)}
+
+
+        @r.post("/transactions/{tx_id}/link")
+        def link(tx_id: int, body: LinkIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+            tx = _tx(db, tx_id)
+            try:
+                bank_booking.link(db, tx, body.type, body.id, user=user)
+            except bank_booking.BankBookError as exc:
+                db.rollback()
+                raise HTTPException(400, str(exc)) from exc
+            db.commit()
+            return {"ok": True}
+
+
+        @r.post("/transactions/{tx_id}/direction")
+        def set_direction(tx_id: int, body: DirectionIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+            """An SMS whose direction was not clear: the person says it; then it is matched like any other line."""
+            from ....services.audit import audit
+
+            tx = _tx(db, tx_id)
+            if body.direction not in ("in", "out"):
+                raise HTTPException(400, "واریز یا برداشت؟")
+            if tx.status != "unmatched":
+                raise HTTPException(400, "این تراکنش ثبت شده است")
+            tx.direction = body.direction
+            audit(db, "bank_tx.direction", "bank_transaction", tx.id, {"direction": body.direction}, user=user)
+            matching.on_bank_transaction(db, tx)
+            db.commit()
+            return {"ok": True, "transaction": bank_booking.tx_row(db, tx, with_suggestions=True)}
+
+
+        @r.post("/transactions/{tx_id}/undo")
+        def undo(tx_id: int, body: UndoIn, db: Session = Depends(get_db), user=Depends(require("finance"))):
+            """Take back what was booked from a line: one booked by itself (or a link) by anyone who moves money; one a
+            person booked from the inbox voids a payout / expense: owner / admin."""
+            from ....core.security import has_permission
+
+            tx = _tx(db, tx_id)
+            if tx.status == "matched" and tx.auto_booked is False and not has_permission(user.role, "void"):
+                raise HTTPException(403, "برگرداندن ثبتی که از صندوق بانک انجام شده با مدیر است")
+            try:
+                bank_booking.undo(db, tx, user=user, then=body.then)
+            except (bank_booking.BankBookError, ValueError) as exc:
+                db.rollback()
+                raise HTTPException(400, str(exc)) from exc
+            db.commit()
+            return {"ok": True, "transaction": bank_booking.tx_row(db, tx)}
+
+        @r.post("/transactions/{tx_id}/not-duplicate")
+        def not_duplicate(tx_id: int, db: Session = Depends(get_db), user=Depends(require("finance"))):
+            """Taken for the same money seen from another source, but it is another movement: it waits like any other."""
+            from ....services.audit import audit
+
+            tx = _tx(db, tx_id)
+            if tx.status != "duplicate":
+                raise HTTPException(400, "این تراکنش تکراری علامت نخورده است")
+            tx.status, tx.duplicate_of_id = "unmatched", None
+            audit(db, "bank_tx.not_duplicate", "bank_transaction", tx.id, {}, user=user)
+            matching.on_bank_transaction(db, tx)
+            db.commit()
+            return {"ok": True}
+
+        # ---------------------------------------------- rules (who a card is)
+        @r.get("/rules")
+        def rules(db: Session = Depends(get_db), _=Depends(require("finance"))):
+            from ....models import BankRule, Staff
+
+            names = {p.id: p.full_name for p in db.scalars(select(Staff))}
+            return [{"id": x.id, "kind": x.match_kind, "text": x.match_text, "direction": x.direction, "target": x.target_type,
+                     "staff_id": x.staff_id, "staff": names.get(x.staff_id), "category": x.category, "line_id": x.line_id,
+                     "from_treasury": bool(x.from_treasury), "auto": x.auto, "auto_cap": x.auto_cap, "hits": x.hits,
+                     "undos": x.undos, "source": x.source, "active": x.is_active,
+                     "last_used_at": x.last_used_at.isoformat(timespec="minutes") if x.last_used_at else None}
+                    for x in db.scalars(select(BankRule).where(BankRule.is_active.is_(True)).order_by(BankRule.id.desc()))]
+
+
+        @r.put("/rules/{rule_id}")
+        def update_rule(rule_id: int, body: RuleIn, db: Session = Depends(get_db), user=Depends(require("settings"))):
+            from ....models import BankRule
+            from ....services.audit import audit
+
+            rule = db.get(BankRule, rule_id)
+            if rule is None:
+                raise HTTPException(404, "قانون پیدا نشد")
+            if body.auto is not None:
+                rule.auto = bool(body.auto) and rule.match_kind != "name"
+            if body.auto_cap is not None:
+                rule.auto_cap = body.auto_cap if body.auto_cap > 0 else None
+            if body.active is not None:
+                rule.is_active = bool(body.active)
+            audit(db, "bank_rule.update", "bank_rule", rule.id, body.model_dump(exclude_none=True), user=user)
+            db.commit()
+            return {"ok": True}
 
         @r.post("/transactions/{tx_id}/ignore")
         def ignore(tx_id: int, db: Session = Depends(get_db), user=Depends(require("finance"))):
@@ -314,7 +540,18 @@ class Plugin(BasePlugin):
                     except Exception:
                         db.rollback()
                         log.exception("bank sync failed for account %s", a.id)
-        return [(int(self.ctx.config.get("sync_interval_minutes", 15)) * 60, run)]
+
+        def again() -> None:  # waiting lines looked at again: an entry made by hand since, a card set since
+            with SessionLocal() as db:
+                try:
+                    if bank_booking.rematch(db):
+                        db.commit()
+                    else:
+                        db.rollback()
+                except Exception:
+                    db.rollback()
+                    log.exception("bank rematch failed")
+        return [(int(self.ctx.config.get("sync_interval_minutes", 15)) * 60, run), (3600, again)]
 
     def ai_tools(self) -> list[AITool]:
         def unmatched(db, user, limit: int = 50):  # noqa: ANN001, ANN202

@@ -77,6 +77,9 @@ def init_db() -> None:
         from .services import staffpay
 
         staffpay.backfill_payouts(db)  # payouts made before 1.22 (an entry only): their row, to list / void / show them
+        from .services import bank_parties
+
+        bank_parties.seal_old(db)  # once: no whole card number / IBAN left in bank lines and receipts, tokens encrypted
         db.commit()
         from .services.audit import rechain_once
 
@@ -113,6 +116,10 @@ INDEXES = {
     "ix_payout_ref": "staff_payouts(reference)",
     "ix_salary_staff_month": "salary_accruals(staff_id, jy, jm)",
     "ix_dep_forfeit": "deposits(status, forfeit_line_id, closed_at)",
+    "ix_btx_party": "bank_transactions(counterparty_hash)",
+    "ix_btx_status_dir": "bank_transactions(status, direction, occurred_at)",
+    "ix_payout_btx": "staff_payouts(bank_transaction_id)",
+    "ix_exp_treasury": "expenses(from_treasury, line_id)",
 }
 
 

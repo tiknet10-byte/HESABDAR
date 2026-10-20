@@ -53,6 +53,35 @@ def staff_shares(start: date | None = None, end: date | None = None, jy: int | N
     return reports.staff_shares(db, start, end)
 
 
+@router.get("/reports/staff-shares/months")
+def staff_shares_months(from_jy: int | None = None, from_jm: int | None = None, to_jy: int | None = None, to_jm: int | None = None,
+                        db: Session = Depends(get_db), _=Depends(require("reports"))):
+    """Month by month (default: the last 12), newest first; `first` = the earliest month that has any work."""
+    from sqlalchemy import func, select
+
+    from ..models import Appointment, Invoice, local_now
+    from ..services.jalali import jmonth_of
+
+    for y, m in ((from_jy, from_jm), (to_jy, to_jm)):
+        if y is not None and m is not None and (not (1 <= m <= 12) or not (1300 <= y <= 1500)):
+            raise HTTPException(400, "ماه نامعتبر است")
+    last = (to_jy, to_jm) if to_jy and to_jm else jmonth_of(local_now())
+    last = min(last, jmonth_of(local_now()))
+    if from_jy and from_jm:
+        first = (from_jy, from_jm)
+    else:
+        y, m = last
+        first = (y - 1, m + 1) if m < 12 else (y, 1)
+    if first > last:
+        raise HTTPException(400, "ماه شروع بعد از ماه پایان است")
+    if (last[0] - first[0]) * 12 + last[1] - first[1] >= 120:
+        raise HTTPException(400, "حداکثر ۱۰ سال را با هم ببینید")
+    earliest = [d for d in (db.scalar(select(func.min(Invoice.issued_at))),
+                            db.scalar(select(func.min(Appointment.start_at)).where(reports._old_service()))) if d is not None]
+    return {"first": list(jmonth_of(min(earliest))) if earliest else None, "from": list(first), "to": list(last),
+            "months": reports.staff_shares_months(db, first, last)}
+
+
 @router.get("/reports/revenue")
 def revenue_report(start: date | None = None, end: date | None = None, line_id: int | None = None, source: str = "all",
                    db: Session = Depends(get_db), _=Depends(require("reports"))):

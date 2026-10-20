@@ -92,6 +92,9 @@ def add_or_withdraw(db: Session, *, kind: str, amount: int, payment_account: Pay
     post(db, f"{'آوردن سرمایه' if kind == 'add' else 'برداشت از سرمایه'} - {payment_account.name}" + (f" - {notes}" if notes else ""),
          legs, "capital", m.id, at=m.at)
     audit(db, f"capital.{kind}", "capital", m.id, {"amount": amount, "account": payment_account.id}, user=user)
+    from .bank_booking import after_record
+
+    after_record(db, "capital", m)  # the bank line of this money, if it is already here
     return m
 
 

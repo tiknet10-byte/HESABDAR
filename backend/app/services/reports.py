@@ -545,7 +545,7 @@ def forfeit_shares(db: Session, s: datetime, e: datetime) -> list[tuple[int | No
     return out
 
 
-def staff_shares(db: Session, start: date | None = None, end: date | None = None) -> dict:
+def staff_shares(db: Session, start: date | None = None, end: date | None = None, balances: bool = True) -> dict:
     """Who did what: revenue, the line's treasury (خزانه), staff share (commission) and salon share per staff member and
     per line; revenue + forfeits = treasury + staff share + salon share, to the Rial (staff share = 5200 in the books).
 
@@ -624,20 +624,22 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
         if not f["booked"]:
             unbooked += comm
     # payouts in the period (less the ones voided) and outstanding balances
-    payable = account(db, STAFF_PAYABLE)
-    paid = dict(db.execute(select(JournalLine.staff_id, func.sum(JournalLine.debit - JournalLine.credit))
-                           .join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
-                           .where(JournalLine.account_id == payable.id, JournalEntry.ref_type == "staff_payout",
-                                  JournalEntry.at.between(s, e)).group_by(JournalLine.staff_id)).all())
-    practitioners = {pid: p for pid, p in staff.items() if (p.kind or "") != "employee"}  # employees: their own page
-    balances = {pid: staff_balance(db, pid) for pid in practitioners}
-    for pid, p in practitioners.items():
-        # also someone no longer active who is still owed money or was paid in the period (to settle with them)
-        if pid not in per_staff and (p.is_active or balances[pid] or paid.get(pid)):
-            per_staff[pid] = _staff_row(p, lines)
+    paid, owed = {}, {}
+    if balances:
+        payable = account(db, STAFF_PAYABLE)
+        paid = dict(db.execute(select(JournalLine.staff_id, func.sum(JournalLine.debit - JournalLine.credit))
+                               .join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+                               .where(JournalLine.account_id == payable.id, JournalEntry.ref_type == "staff_payout",
+                                      JournalEntry.at.between(s, e)).group_by(JournalLine.staff_id)).all())
+        practitioners = {pid: p for pid, p in staff.items() if (p.kind or "") != "employee"}  # employees: their own page
+        owed = {pid: staff_balance(db, pid) for pid in practitioners}
+        for pid, p in practitioners.items():
+            # also someone no longer active who is still owed money or was paid in the period (to settle with them)
+            if pid not in per_staff and (p.is_active or owed[pid] or paid.get(pid)):
+                per_staff[pid] = _staff_row(p, lines)
     for r in per_staff.values():
         r["paid"] = int(paid.get(r["staff_id"]) or 0) if r["staff_id"] else 0
-        r["balance"] = balances.get(r["staff_id"], 0) if r["staff_id"] else 0
+        r["balance"] = owed.get(r["staff_id"], 0) if r["staff_id"] else 0
         r["active"] = bool(staff[r["staff_id"]].is_active) if r["staff_id"] in staff else True
     staff_rows = sorted(per_staff.values(), key=lambda x: -x["revenue"])
     totals = {k: sum(r[k] for r in staff_rows) for k in ("revenue", "forfeits", "treasury", "staff_share", "salon_share", "paid",
@@ -645,6 +647,40 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
     totals["history_unbooked"] = unbooked  # staff share of the previous software's months not booked yet (not owed)
     return {"period": {"start": s.date().isoformat(), "end": e.date().isoformat()}, "staff": staff_rows,
             "lines": sorted(per_line.values(), key=lambda x: -(x["revenue"] + x["forfeits"])), "totals": totals}
+
+
+def staff_shares_months(db: Session, first: tuple[int, int], last: tuple[int, int]) -> list[dict]:
+    """Month by month (newest first): revenue, forfeits, treasury, staff share and salon share per staff member and
+    line, what was paid for each month (payouts tagged with it) and whether the previous software's work is booked."""
+    from ..models import HistoryMonth, StaffPayout
+    from .jalali import month_range, next_month
+
+    booked = {(h.jy, h.jm) for h in db.scalars(select(HistoryMonth))}
+    paid: dict[tuple, int] = {}
+    for sid, jy, jm, amount in db.execute(select(StaffPayout.staff_id, StaffPayout.jy, StaffPayout.jm, func.sum(StaffPayout.amount))
+                                          .where(StaffPayout.status == "booked")
+                                          .group_by(StaffPayout.staff_id, StaffPayout.jy, StaffPayout.jm)):
+        paid[(sid, jy, jm)] = int(amount or 0)
+    out = []
+    ym = first
+    n = 0
+    while ym <= last and n < 120:
+        s, e = month_range(*ym)
+        rep = staff_shares(db, s.date(), (e - timedelta(days=1)).date(), balances=False)
+        staff_rows = [{k: r[k] for k in ("staff_id", "name", "line", "revenue", "forfeits", "treasury", "staff_share", "salon_share",
+                                         "history", "history_share")} | {"paid_for_month": paid.get((r["staff_id"], *ym), 0)}
+                      for r in rep["staff"] if r["revenue"] or r["forfeits"] or r["staff_share"]]
+        t = rep["totals"]
+        out.append({"jy": ym[0], "jm": ym[1], "month": f"{J_MONTHS[ym[1] - 1]} {ym[0]}",
+                    **{k: t[k] for k in ("revenue", "forfeits", "treasury", "staff_share", "salon_share", "history",
+                                         "history_share", "history_unbooked")},
+                    "history_booked": ym in booked, "paid_for_month": sum(x["paid_for_month"] for x in staff_rows),
+                    "staff": staff_rows, "lines": [{k: r[k] for k in ("line_id", "name", "revenue", "forfeits", "treasury",
+                                                                       "staff_share", "salon_share", "history")} for r in rep["lines"]
+                                                   if r["revenue"] or r["forfeits"]]})
+        ym = next_month(*ym)
+        n += 1
+    return out[::-1]
 
 
 # ------------------------------------------------------------------ revenue by line / staff / service

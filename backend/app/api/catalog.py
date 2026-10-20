@@ -113,6 +113,18 @@ def _service(s: Service) -> dict:
             "line_active": bool(s.line and s.line.is_active)}
 
 
+def _is_secret(key: str) -> bool:
+    return any(x in key for x in ("token", "secret", "password", "key"))
+
+
+def _secrets_sealed(cfg: dict) -> dict:
+    """A bank API token (and any other secret of the account's connection) is kept encrypted (a new dict)."""
+    from ..core.security import encrypt_secret
+
+    return {k: (encrypt_secret(v) if _is_secret(k) and isinstance(v, str) and v and not v.startswith("enc:") else v)
+            for k, v in (cfg or {}).items()}
+
+
 def _account(a: PaymentAccount) -> dict:
     cfg = {k: ("••••" if any(x in k for x in ("token", "secret", "password", "key")) else v) for k, v in (a.provider_config or {}).items()}
     return {"id": a.id, "kind": a.kind, "name": a.name, "bank_name": a.bank_name, "card_mask": a.card_mask, "iban": a.iban,
@@ -620,6 +632,7 @@ def create_account(body: AccountIn, db: Session = Depends(get_db), user=Depends(
     if body.kind not in ("pos", "card", "bank", "cash", "gateway"):
         raise HTTPException(400, "نوع حساب نامعتبر")
     data = body.model_dump(exclude={"card_number", "opening_balance", "opening_at"})
+    data["provider_config"] = _secrets_sealed(data.get("provider_config") or {})
     a = PaymentAccount(**data, card_mask=mask_card(body.card_number))
     db.add(a)
     db.flush()
@@ -648,7 +661,7 @@ def update_account(aid: int, body: AccountIn, db: Session = Depends(get_db), use
     for k, v in body.provider_config.items():
         if v != "••••":
             merged[k] = v
-    a.provider_config = merged
+    a.provider_config = _secrets_sealed(merged)
     if a.ledger_account_id:  # its ledger account carries the same name (a later account may reuse the old name)
         acc = db.get(LedgerAccount, a.ledger_account_id)
         if acc is not None and acc.name != a.name:

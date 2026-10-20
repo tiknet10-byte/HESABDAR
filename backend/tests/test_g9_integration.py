@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core import db as dbmod
 from app.core.db import Base, SessionLocal
 from app.models import (
+    BankRule,
     HistoryMonth,
     ReceiptImage,
     SalaryAccrual,
@@ -70,7 +71,8 @@ def _fill(db: Session) -> dict:
     db.flush()
     item = InvoiceItem(invoice_id=inv.id, service_id=svc.id, product_id=product.id, line_id=line.id, staff_id=staff.id, unit_price=150)
     appt = Appointment(customer_id=c1.id, service_id=svc.id, staff_id=staff.id, start_at=now, invoice_id=inv.id)
-    db.add_all([item, appt, TreasuryRate(line_id=line.id, jy=1404, jm=1, rate_bp=4200)])
+    db.add_all([item, appt, TreasuryRate(line_id=line.id, jy=1404, jm=1, rate_bp=4200),
+               BankRule(match_kind="card", match_hash="0" * 64, match_text="6037-99**-****-0000", target_type="ignore")])
     db.flush()
     dep = Deposit(customer_id=c1.id, appointment_id=appt.id, service_id=svc.id, payment_account_id=pa.id, amount=50,
                   applied_invoice_id=inv.id, staff_id=staff.id, refund_account_id=pa.id, status="applied")

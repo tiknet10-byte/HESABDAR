@@ -189,9 +189,23 @@ def expire_pending_receipts(db: Session) -> int:
 
 
 def on_bank_transaction(db: Session, tx: BankTransaction) -> None:
-    """Called after a bank transaction is imported: try pending receipts, then manual entries."""
-    if tx.direction != "in" or tx.status != "unmatched":
+    """Called after a bank transaction is imported: try pending receipts, then manual entries; a line that is not a
+    customer's money (or going out) is then linked to an entry made by hand or booked by a rule (bank_booking)."""
+    if tx.status != "unmatched":
         return
+    if tx.direction != "in":
+        from .bank_booking import on_unmatched
+
+        on_unmatched(db, tx)
+        return
+    _customer_money(db, tx)
+    if tx.status == "unmatched":
+        from .bank_booking import on_unmatched
+
+        on_unmatched(db, tx)
+
+
+def _customer_money(db: Session, tx: BankTransaction) -> None:
     pending = list(db.scalars(select(InboundReceipt).where(InboundReceipt.status == "pending", InboundReceipt.amount == tx.amount)
                               .order_by(InboundReceipt.id)))
     # the receipt with this transaction's tracking number first, then the oldest
@@ -219,27 +233,52 @@ def on_bank_transaction(db: Session, tx: BankTransaction) -> None:
         tx.status, tx.matched_type, tx.matched_id = "matched", "payment", pay.id
 
 
+SAME_MONEY_WINDOW = timedelta(minutes=15)
+
+
 def import_bank_transaction(db: Session, *, payment_account_id: int | None, external_id: str, amount: int,
                             occurred_at: datetime, direction: str = "in", description: str = "",
                             reference: str | None = None, counterparty_card: str | None = None,
+                            counterparty_iban: str | None = None, counterparty_name: str | None = None,
                             source: str = "bank_api") -> tuple[BankTransaction, bool]:
+    """Save a bank line once (the same id of the same account is the same line). Card numbers and IBANs are never
+    kept: the other side is kept as a keyed hash + mask (+ the name), the description with every number masked. The
+    same money seen from another source (an SMS and the bank API) is kept as a duplicate that nothing acts on."""
+    from .bank_parties import counterparty, mask_text, own_ibans, own_masks
+
     existing = db.scalar(select(BankTransaction).where(BankTransaction.payment_account_id == payment_account_id,
                                                        BankTransaction.external_id == external_id))
     if existing:
         return existing, False
-    tx = BankTransaction(payment_account_id=payment_account_id, external_id=external_id, amount=amount,
-                         occurred_at=occurred_at, direction=direction, description=description, reference=reference,
-                         counterparty_card=counterparty_card, source=source)
+    party = counterparty(description, card=counterparty_card, iban=counterparty_iban, name=counterparty_name,
+                         own=own_masks(db), own_iban=own_ibans(db))
+    reference = (str(reference).strip()[:64] or None) if reference else None
+    tx = BankTransaction(payment_account_id=payment_account_id, external_id=external_id[:128], amount=amount,
+                         occurred_at=occurred_at, direction=direction if direction in ("in", "out") else "unknown",
+                         description=mask_text(description or "")[:2000], reference=reference,
+                         counterparty_card=party["mask"], counterparty_hash=party["hash"], counterparty_mask=party["mask"],
+                         counterparty_name=party["name"], source=source)
+    if payment_account_id and tx.direction in ("in", "out"):
+        same = db.scalar(select(BankTransaction).where(
+            BankTransaction.payment_account_id == payment_account_id, BankTransaction.source != source,
+            BankTransaction.direction == tx.direction, BankTransaction.amount == amount, BankTransaction.duplicate_of_id.is_(None),
+            BankTransaction.occurred_at.between(occurred_at - SAME_MONEY_WINDOW, occurred_at + SAME_MONEY_WINDOW))
+            .order_by(BankTransaction.id).limit(1))
+        if same is not None and (not reference or not same.reference or same.reference == reference):
+            tx.duplicate_of_id, tx.status = same.id, "duplicate"
+            if same.counterparty_hash is None and party["hash"]:  # the other source knew who it was: kept on the first
+                same.counterparty_hash, same.counterparty_mask = party["hash"], party["mask"]
+                same.counterparty_name = same.counterparty_name or party["name"]
     db.add(tx)
     db.flush()
-    bus.emit("bank_transaction.imported", {"id": tx.id, "amount": amount, "direction": direction}, db=db)
+    bus.emit("bank_transaction.imported", {"id": tx.id, "amount": amount, "direction": tx.direction}, db=db)
     on_bank_transaction(db, tx)
     return tx, True
 
 
 def unreconciled_summary(db: Session) -> dict:
     return {
-        "bank_unmatched": len(db.scalars(select(BankTransaction.id).where(BankTransaction.status == "unmatched", BankTransaction.direction == "in")).all()),
+        "bank_unmatched": len(db.scalars(select(BankTransaction.id).where(BankTransaction.status == "unmatched")).all()),
         "receipts_pending": len(db.scalars(select(InboundReceipt.id).where(InboundReceipt.status == "pending")).all()),
         "receipts_mismatch": len(db.scalars(select(InboundReceipt.id).where(InboundReceipt.status == "mismatch")).all()),
     }

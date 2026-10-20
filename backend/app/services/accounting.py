@@ -26,6 +26,7 @@ from ..models import (
     Payment,
     PaymentAccount,
     Service,
+    ServiceLine,
     Staff,
     local_now,
 )
@@ -1058,7 +1059,10 @@ def expense_category(name: str | None) -> str:
 
 def record_expense(db: Session, *, category: str, amount: int, payment_account: PaymentAccount,
                    spent_at: datetime | None = None, description: str = "", staff_id: int | None = None, force: bool = False,
-                   user=None) -> Expense:
+                   line_id: int | None = None, from_treasury: bool = False, user=None) -> Expense:
+    """An expense of the clinic (Dr 51xx of its category / Cr the account it was paid from). line_id: the service line
+    it was for (e.g. the laser line's consumables); from_treasury: paid from that line's treasury (1.23) - still an
+    expense that lowers the profit; the treasury page counts it as spent from the line's treasury."""
     from .audit import write_lock
 
     category = expense_category(category)
@@ -1070,6 +1074,10 @@ def record_expense(db: Session, *, category: str, amount: int, payment_account: 
     ensure_not_future(spent_at, "تاریخ پرداخت هزینه")
     if staff_id is not None and db.get(Staff, staff_id) is None:
         raise AccountingError("شخص انتخاب‌شده پیدا نشد")
+    if line_id is not None and db.get(ServiceLine, line_id) is None:
+        raise AccountingError("لاین انتخاب‌شده پیدا نشد")
+    if from_treasury and line_id is None:
+        raise AccountingError("برای خرج از خزانه، لاینی را که خزانه‌اش خرج شد انتخاب کنید")
     write_lock(db)  # a double click: the second one sees the first
     when = spent_at or local_now()
     day = datetime.combine(when.date(), datetime.min.time())
@@ -1079,14 +1087,19 @@ def record_expense(db: Session, *, category: str, amount: int, payment_account: 
             Expense.created_at >= local_now() - EXPENSE_DUPLICATE_WINDOW).limit(1)):
         raise DuplicateExpense("همین هزینه (همین دسته، مبلغ و حساب) چند لحظه پیش ثبت شد؛ اگر خرید جداگانه‌ای است، دوباره تأیید کنید")
     exp = Expense(category=category, amount=amount, payment_account_id=payment_account.id,
-                  spent_at=when, description=description, staff_id=staff_id)
+                  spent_at=when, description=description, staff_id=staff_id, line_id=line_id,
+                  from_treasury=True if from_treasury else None)
     db.add(exp)
     db.flush()
-    post(db, (f"هزینه: {category}" + (f" - {description}" if description else ""))[:256], [
-        Leg(expense_account(db, category), debit=amount, staff_id=staff_id),
+    post(db, (f"هزینه: {category}" + (" (از خزانه)" if from_treasury else "") + (f" - {description}" if description else ""))[:256], [
+        Leg(expense_account(db, category), debit=amount, staff_id=staff_id, line_id=line_id),
         Leg(cash_account_for(db, payment_account), credit=amount),
     ], "expense", exp.id, at=exp.spent_at)
-    audit(db, "expense.create", "expense", exp.id, {"amount": amount, "category": category}, user=user)
+    audit(db, "expense.create", "expense", exp.id, {"amount": amount, "category": category, "line": line_id,
+                                                    "from_treasury": bool(from_treasury)}, user=user)
+    from .bank_booking import after_record
+
+    after_record(db, "expense", exp)  # the bank line of this payment, if it is already here
     bus.emit("expense.created", {"id": exp.id, "amount": amount, "category": category}, db=db)
     return exp
 

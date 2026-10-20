@@ -119,6 +119,11 @@ def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", pay
         if reference and db.scalar(select(StaffPayout.id).where(StaffPayout.reference == reference, StaffPayout.amount == amount,
                                                                 StaffPayout.status == "booked").limit(1)):
             raise Duplicate("پرداختی با همین شمارهٔ پیگیری و همین مبلغ قبلاً ثبت شده است")
+        if source != "bank" and db.scalar(select(StaffPayout.id).where(
+                StaffPayout.staff_id == staff.id, StaffPayout.amount == amount, StaffPayout.status == "booked",
+                StaffPayout.source == "bank", StaffPayout.paid_at.between(at - timedelta(days=3), at + timedelta(days=3))).limit(1)):
+            raise Duplicate("همین مبلغ برای همین شخص از روی تراکنش بانک (خودکار) ثبت شده است؛ صورت‌حسابش را ببینید. "
+                            "اگر پرداخت جداگانه‌ای است، دوباره تأیید کنید")
         day = datetime.combine(at.date(), datetime.min.time())
         if db.scalar(select(StaffPayout.id).where(StaffPayout.staff_id == staff.id, StaffPayout.amount == amount,
                                                   StaffPayout.status == "booked", StaffPayout.paid_at >= day,
@@ -143,6 +148,10 @@ def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", pay
         Leg(credit, credit=amount, staff_id=staff.id),
     ], "staff_payout", p.id, at=at)
     p.entry_id = entry.id
+    if source != "bank" and not before_start:  # the bank line of this payment, if it is already here
+        from .bank_booking import after_record
+
+        after_record(db, "staff_payout", p)
     audit(db, "staff.payout", "staff", staff.id, {"payout": p.id, "kind": kind, "amount": amount, "month": f"{jy}/{jm:02d}",
                                                   "account": p.payment_account_id, "from_owner": bool(from_owner),
                                                   "before_start": bool(before_start), "source": source}, user=user)
@@ -276,7 +285,7 @@ def _payout_row(db: Session, p: StaffPayout, accounts: dict[int, str]) -> dict:
             "void_reason": p.void_reason}
 
 
-def statement(db: Session, staff_id: int, jy: int, jm: int) -> dict:
+def statement(db: Session, staff_id: int, jy: int, jm: int, work: bool = True) -> dict:
     """One person's month from the books: owed at the start + earned - given = owed at the end; and what was paid for
     this month after it ended (a settlement paid on the 2nd of the next month)."""
     from . import reports
@@ -303,9 +312,9 @@ def statement(db: Session, staff_id: int, jy: int, jm: int) -> dict:
         select(StaffPayout).where(StaffPayout.staff_id == staff_id, StaffPayout.jy == jy, StaffPayout.jm == jm,
                                   StaffPayout.status == "booked", StaffPayout.paid_at >= e).order_by(StaffPayout.paid_at))]
     paid_later = sum(x["amount"] for x in later)
-    work = None
-    if not is_employee(person):
-        rep = reports.staff_shares(db, s.date(), (e - timedelta(days=1)).date())
+    want_work, work = work, None
+    if want_work and not is_employee(person):
+        rep = reports.staff_shares(db, s.date(), (e - timedelta(days=1)).date(), balances=False)
         work = next((r for r in rep["staff"] if r["staff_id"] == staff_id), None)
     salaries = [{"id": a.id, "amount": a.amount, "at": a.at.isoformat(timespec="minutes"), "description": a.description,
                  "status": a.status} for a in db.scalars(select(SalaryAccrual).where(
@@ -332,10 +341,93 @@ def people_month(db: Session, jy: int, jm: int, employees: bool) -> list[dict]:
     people = [p for p in db.scalars(select(Staff).order_by(Staff.id)) if is_employee(p) == employees]
     out = []
     for p in people:
-        st = statement(db, p.id, jy, jm)
+        st = statement(db, p.id, jy, jm, work=False)
         if not p.is_active and not st["opening"] and not st["closing"] and not st["payouts"] and not st["balance_now"]:
             continue
         out.append({k: st[k] for k in ("staff_id", "name", "mobile", "job_title", "salary", "percent", "opening", "earned",
                                        "earned_total", "given", "advances", "closing", "paid_later", "remaining",
                                        "balance_now", "salaries")} | {"active": p.is_active})
     return out
+
+
+# ------------------------------------------------------------------ settling everyone at once
+def due_of(st: dict) -> int:
+    """What is still to be paid for the statement's month: what was left at its end less what was paid for it since,
+    never more than what is owed today (an advance taken for a later month is already given) and never below 0."""
+    return max(0, min(st["remaining"], st["balance_now"]))
+
+
+def settle_plan(db: Session, jy: int, jm: int, who: str = "all") -> list[dict]:
+    """Everyone (practitioners, employees or both) with what is still to be paid for the month."""
+    _month_ok(jy, jm)
+    out = []
+    for p in db.scalars(select(Staff).order_by(Staff.id)):
+        emp = is_employee(p)
+        if (who == "staff" and emp) or (who == "employee" and not emp):
+            continue
+        st = statement(db, p.id, jy, jm, work=False)
+        if not p.is_active and not st["closing"] and not st["balance_now"] and not st["payouts"]:
+            continue
+        booked_salary = any(a["status"] == "booked" for a in st["salaries"])
+        due = due_of(st)
+        if due > 0:
+            why = None
+        elif emp and not booked_salary:
+            why = "حقوق این ماه هنوز ثبت نشده"
+        elif st["balance_now"] < 0:
+            why = "بیشتر از سهمش گرفته؛ از ماه بعد کم می‌شود"
+        elif st["paid_later"] or st["given"]:
+            why = "تسویه شده"
+        else:
+            why = "چیزی برای پرداخت نیست"
+        out.append({"staff_id": p.id, "name": p.full_name, "mobile": p.mobile, "employee": emp, "active": p.is_active,
+                    "job_title": p.job_title, "salary": p.salary, "earned": st["earned_total"], "given": st["given"],
+                    "closing": st["closing"], "paid_later": st["paid_later"], "remaining": st["remaining"],
+                    "balance_now": st["balance_now"], "due": due, "why": why,
+                    "salary_missing": emp and not booked_salary and bool(p.salary)})
+    return out
+
+
+def settle_many(db: Session, jy: int, jm: int, rows: list[dict], *, payment_account: PaymentAccount | None,
+                from_owner: bool = False, paid_at: datetime | None = None, accounts: dict | None = None,
+                user=None) -> dict:  # noqa: ANN001
+    """The month's settlement of several people at once, each in its own savepoint: what is still to be paid is worked
+    out again under the write lock, so a second click (or someone else meanwhile) books nothing twice; a row whose
+    amount to pay changed since the list was shown is not booked and says so."""
+    from .audit import write_lock
+
+    _month_ok(jy, jm)
+    write_lock(db)
+    done, errors = [], []
+    for row in rows:
+        person = db.get(Staff, int(row.get("staff_id") or 0))
+        if person is None:
+            errors.append({"staff_id": row.get("staff_id"), "error": "شخص پیدا نشد"})
+            continue
+        amount = int(row.get("amount") or 0)
+        if amount <= 0:
+            continue
+        st = statement(db, person.id, jy, jm, work=False)
+        due = due_of(st)
+        if row.get("expected") is not None and int(row["expected"]) != due:
+            errors.append({"staff_id": person.id, "name": person.full_name, "due": due,
+                           "error": "ماندهٔ این شخص همین الان عوض شد (پرداخت دیگری ثبت شد)؛ فهرست را تازه کنید"})
+            continue
+        pa = payment_account
+        if row.get("payment_account_id"):
+            pa = (accounts or {}).get(int(row["payment_account_id"])) or db.get(PaymentAccount, int(row["payment_account_id"]))
+            if pa is None or not pa.is_active:
+                errors.append({"staff_id": person.id, "name": person.full_name, "error": "حساب انتخاب‌شده پیدا نشد یا بایگانی است"})
+                continue
+        try:
+            with db.begin_nested():
+                p = pay(db, person, amount, kind="settlement", payment_account=pa, from_owner=from_owner and not row.get("payment_account_id"),
+                        paid_at=paid_at, jy=jy, jm=jm, description=str(row.get("description") or "").strip(), source="bulk",
+                        force=bool(row.get("force")), user=user)
+            done.append({"staff_id": person.id, "name": person.full_name, "mobile": person.mobile, "payout_id": p.id,
+                         "amount": amount, "kind_label": kind_label(person, "settlement"), "balance": balance_at(db, person.id)})
+        except Duplicate as exc:
+            errors.append({"staff_id": person.id, "name": person.full_name, "error": str(exc), "duplicate": True})
+        except (PayError, ValueError) as exc:
+            errors.append({"staff_id": person.id, "name": person.full_name, "error": str(exc)})
+    return {"done": done, "errors": errors, "total": sum(x["amount"] for x in done)}

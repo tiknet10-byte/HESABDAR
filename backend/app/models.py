@@ -468,9 +468,45 @@ class BankTransaction(TimestampMixin, Base):
     reference: Mapped[str | None] = mapped_column(String(64), nullable=True)
     counterparty_card: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source: Mapped[str] = mapped_column(String(32), default="bank_api")  # bank_api|statement|bank_sms
-    status: Mapped[str] = mapped_column(String(16), default="unmatched")  # unmatched|matched|ignored
-    matched_type: Mapped[str | None] = mapped_column(String(16), nullable=True)  # deposit|payment|receipt
+    status: Mapped[str] = mapped_column(String(16), default="unmatched")  # unmatched|matched|ignored|duplicate
+    # deposit|payment|receipt; 1.23: staff_payout|expense|capital (booked from the line, or an entry linked to it)
+    matched_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     matched_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # who the money went to / came from (1.23): never the number itself - a keyed hash of the full card / IBAN (to know
+    # it again), its mask (shown) and the name printed with it
+    counterparty_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    counterparty_mask: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    counterparty_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    duplicate_of_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # the same money seen from another source
+    rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # the rule that booked it by itself
+    auto_booked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # booked by itself (True) / by a person here
+    booked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class BankRule(Base):
+    """What a bank line to / from one card, IBAN or name is (1.23): a staff member's payout (their card entered on the
+    staff page, or remembered from the inbox), an expense of a category, the owner's own money. Only a keyed hash and
+    a mask of the card / IBAN are kept. auto: booked by itself (only an exact card / IBAN); otherwise suggested."""
+    __tablename__ = "bank_rules"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    match_kind: Mapped[str] = mapped_column(String(8))  # card | iban | name
+    match_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    match_text: Mapped[str] = mapped_column(String(128), default="")  # the mask (card / IBAN) or the normalized name
+    direction: Mapped[str] = mapped_column(String(8), default="out")
+    target_type: Mapped[str] = mapped_column(String(16))  # staff | expense | owner | ignore
+    staff_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    from_treasury: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    auto: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_cap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # the largest amount it books by itself
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    undos: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(16), default="manual")  # staff_form | learned | manual
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class InboundReceipt(TimestampMixin, Base):
