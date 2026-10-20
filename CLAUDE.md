@@ -130,7 +130,16 @@ and how to use it. Commit messages end with the attribution lines the session as
   +; stock count = exact) and sent to the product with the same SKU. Tested against `backend/tests/fake_woo.py`
   (in-memory WooCommerce); **not yet tried on the real site**.
 
-## Status (1.22.0)
+* 1.23: the previous software's staff work month by month (`services/history_shares.py`, `api/history.py`, tab
+  «نرم‌افزار قبلی» on /staff; booked months Dr 3200 / Cr 2200, payouts `before_start` Dr 2200 / Cr 3200; importer no
+  longer matches another person by first name); the treasury as each line's (and staff member's) expense fund
+  (`services/treasury_fund.py`, page /treasury, `Expense.line_id/from_treasury`, memo `TreasuryMove`); staff shares month
+  by month (`/api/reports/staff-shares/months`); settling everyone at once (`staffpay.settle_plan/settle_many`, due =
+  max(0, min(remaining, balance now)), `expected` checked under the lock); bank lines booked by staff cards / rules
+  (`services/bank_booking.py`, `bank_parties.py`, `BankRule`; hash + mask only, inbox, undo, links to hand entries in
+  both orders, unclear SMS direction = unknown, same money from two sources = duplicate).
+
+## Status (1.23.0)
 * GitHub: `tiknet10-byte/HESABDAR`, branch `claude/beauty-salon-accounting-system-9zzoep` holds the full history
   (pushed after the Claude GitHub App was installed). Work on that branch and push to it.
 * 1.20.1: an appointment is «done» only by its invoice (PATCH/PUT refuse it; a done one's status is not changed by

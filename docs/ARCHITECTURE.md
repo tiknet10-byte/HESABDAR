@@ -26,10 +26,11 @@ backend/  (FastAPI + SQLAlchemy 2)
 | Deposit refunded | 2100 | Cash account |
 | Deposit forfeited (no-show) | 2100 | 48xx Forfeited deposits of the deposit's service line (4800 when the line is unknown) |
 | Staff share of a forfeited deposit ((amount - treasury) x staff %, ref `forfeit_commission`) | 5200 | 2200 |
-| Expense (voided: the reverse on its own date, ref `expense_void`) | 51xx Expense category | Cash account |
+| Expense (voided: the reverse on its own date, ref `expense_void`; its line on the 51xx leg; «از خزانه» is a flag on the Expense, no other entry) | 51xx Expense category | Cash account |
 | Staff commission ((net - treasury) x staff %, per row) | 5200 | 2200 Staff payable |
 | Employee's salary for a month (ref `salary`) | 51xx «حقوق و دستمزد» | 2200 (the employee) |
-| Advance / settlement to a staff member or employee (ref `staff_payout`, ref_id = StaffPayout) | 2200 (the person) | Cash account (or 3100 when the owner paid from own pocket) |
+| Advance / settlement to a staff member or employee (ref `staff_payout`, ref_id = StaffPayout) | 2200 (the person) | Cash account (or 3100 when the owner paid from own pocket; 3200 when paid before the program started, `before_start`) |
+| Staff share of a booked month of the previous software (ref `history_share`, ref_id = HistoryMonth, at the month's last moment) | 3200 Opening balances | 2200 (per staff member and line) |
 | Product sold / returned | 5400 COGS / 1300 | 1300 Inventory / 5400 |
 | Purchase on credit | 1300 Inventory | 2300 Supplier payables |
 | Owner puts money in / takes it out | Cash account / 3100 | 3100 Capital / Cash account |
@@ -48,7 +49,7 @@ Each POS terminal / card / bank account gets its own ledger sub-account (11xx), 
 hundredths of a percent (a month without its own rate takes the line's latest earlier one; none: 0). On every service
 row at issue: treasury = net x rate (integer, half up), staff share = (net - treasury) x staff % (the commission
 above), salon share = the rest; treasury + staff + salon = net. The treasury has no account of its own: it is the
-salon's (41xx stays whole); only 5200/2200 get smaller. Saving a month's rate later (owner/admin, preview first)
+salon's (41xx stays whole); only 5200/2200 get smaller (1.23: it is the fund of the line's expenses, see below). Saving a month's rate later (owner/admin, preview first)
 books that month's rows again - only that month (later months that already have invoices keep the rate they used, as
 an "auto" row): the "commission" entry of each changed invoice is deleted through the ORM and posted again on its
 date, and for a voided invoice the commission part of its "invoice_void" reversal too, on the reversal's date.
@@ -58,6 +59,36 @@ month and the deposit's staff member's share are kept on the deposit (`forfeit_l
 `commission_percent/amount`) and the share is booked 5200/2200 on the forfeit's date (`forfeit_commission`); a new
 rate for that month books them again (`accounting.repost_forfeit_commissions`). Forfeits from before 1.22
 (`treasury_bp` NULL) stay all the salon's. `reports.staff_shares`: revenue + forfeits = treasury + staff + salon.
+
+**Treasury as a fund of each line (1.23, `services/treasury_fund.py`, page /treasury).** A line's treasury is the
+fund for that line's expenses (consumables, repairs): accrued per month = the treasury of its invoice rows (sold in the
+month, returns taken back in the return's month), forfeits and the previous software's services (= the month's
+treasury on the staff page, tested); spent = expenses with `from_treasury` of that line (not voided; ordinary 51xx
+expenses: the profit falls the same) and memo rows `TreasuryMove` ("spent_before": spent before the program started;
+"opening": the fund's balance at the start) - no ledger entry for those. The balance is carried forward per line and per
+staff member (an expense's `staff_id`). Nothing of this is an account: the treasury stays inside the salon's income.
+
+**The previous software's staff work (1.23, `services/history_shares.py`).** Imported done appointments
+(`reports._old_service()`) dated before `books_start` (setting «books.start», default the first invoice / opening
+balance) are shared like invoice rows: line of the service, the month's treasury rate, the staff % (the month's stored
+`HistoryMonth.percents` or today's). Live until the month is booked; booking freezes them on the appointment (`line_id`,
+`treasury_bp/amount`, `commission_percent/amount`) and posts Dr 3200 / Cr 2200 (profit unchanged: that revenue was never
+in these books). A booked month is booked again on a new treasury rate (treasury.save), a staff member set for a name
+not matched at import (relink), an import or its undo, a service moved to a product, a moved start day. Payouts of
+those months: `StaffPayout.before_start` (Dr 2200 / Cr 3200), allowed only before the start. `reports.staff_shares`
+includes these rows (`history`, `history_share`, `totals.history_unbooked`), so staff share = 5200 + booked
+`history_share` + the unbooked (shown only).
+
+**Bank lines that are not a customer's money (1.23, `services/bank_booking.py`, `services/bank_parties.py`).** Card
+numbers / IBANs are never stored: the other side of a line is a keyed hash + mask + name, descriptions are masked
+(`seal_old` masks older rows once, and encrypts a bank API token). An out line (or an in line no customer's money
+took) is linked to an entry made by hand (payout, expense, owner's money; same account and amount within 3 days, same
+reference when both have one - in both orders, `after_record`), else booked by a `BankRule` (a staff member's card from
+their statement; exact hash, one rule, automatic, 45 days, not a duplicate of another source) through the normal
+services (`staffpay.pay(source="bank")`, `record_expense`, `capital.add_or_withdraw`), else waits in the inbox.
+`undo` voids what was booked on its own date and turns the rule's automatic booking off. The same money from two
+sources (SMS + statement/API, same account, amount and direction within 15 minutes) is kept as `duplicate`. A bank SMS
+whose direction is unclear is "unknown" (never matched).
 
 **Staff and employees' money (1.22, `services/staffpay.py`).** 2200 per `staff_id` is what we owe each person (minus:
 they owe us). Practitioners earn their share (commission, forfeit share); employees (`Staff.kind = "employee"`, no
