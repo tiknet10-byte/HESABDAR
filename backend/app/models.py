@@ -145,6 +145,29 @@ class StaffPayout(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
     voided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     void_reason: Mapped[str] = mapped_column(String(256), default="")
+    # paid before the program started (in the previous software's time): Dr 2200 / Cr 3200 opening balances, because the
+    # account balances entered at the start already reflect it (1.23)
+    before_start: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    bank_transaction_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # booked from / linked to a bank line
+
+
+class HistoryMonth(Base):
+    """A month of services brought over from the previous software whose staff shares are booked (1.23): one entry
+    Dr 3200 opening balances / Cr 2200 per staff member and line (owed to them from before the program; profit
+    unchanged), dated at the month's last moment, booked again when the month's treasury or a row's staff changes."""
+    __tablename__ = "history_months"
+    __table_args__ = (UniqueConstraint("jy", "jm"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    jy: Mapped[int] = mapped_column(Integer)
+    jm: Mapped[int] = mapped_column(Integer)
+    entry_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rows: Mapped[int] = mapped_column(Integer, default=0)
+    revenue: Mapped[int] = mapped_column(BigInteger, default=0)
+    treasury: Mapped[int] = mapped_column(BigInteger, default=0)
+    staff_share: Mapped[int] = mapped_column(BigInteger, default=0)
+    percents: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {staff id: the percent of that month}
+    booked_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+    booked_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class ReceiptImage(Base):
@@ -249,6 +272,13 @@ class Appointment(TimestampMixin, Base):
     # day known but hour not (e.g. brought over from the previous software): shown, but holds no time slot until set
     time_unknown: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
+    # a service brought over from the previous software, once its month is booked (1.23): its line, the line's treasury
+    # of that month and the staff member's share, as booked (NULL: not booked; worked out live from today's rates)
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    treasury_bp: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    treasury_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    commission_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    commission_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class WaitlistEntry(TimestampMixin, Base):
@@ -365,6 +395,28 @@ class Expense(TimestampMixin, Base):
     staff_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"), nullable=True)
     voided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # entered by mistake: reversed on its date
     void_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # the service line it was for (e.g. consumables of the laser line), and paid from that line's treasury (1.23)
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    from_treasury: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+
+class TreasuryMove(Base):
+    """A change of a line's (or a staff member's) treasury that is not an expense in the books (1.23): the balance it
+    had when the program started (opening), or money spent from it before the program started (spent_before: the
+    account balances entered at the start already reflect it). Memo only, no journal entry."""
+    __tablename__ = "treasury_moves"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    staff_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kind: Mapped[str] = mapped_column(String(16), default="spent_before")  # opening | spent_before
+    amount: Mapped[int] = mapped_column(BigInteger)  # opening: the balance (may be negative); spent: what was spent
+    at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    category: Mapped[str] = mapped_column(String(64), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(12), default="active")  # active | void
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 # ---------------------------------------------------------------- double-entry ledger

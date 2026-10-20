@@ -83,3 +83,11 @@ def month_range(jy: int, jm: int):  # noqa: ANN201
     ny, nm = next_month(jy, jm)
     return (datetime.combine(date(*jalali_to_gregorian(jy, jm, 1)), datetime.min.time()),
             datetime.combine(date(*jalali_to_gregorian(ny, nm, 1)), datetime.min.time()))
+
+
+def to_jalali_str(d) -> str:  # noqa: ANN001
+    """1405/07/20 for a date or datetime."""
+    from datetime import datetime
+
+    day = d.date() if isinstance(d, datetime) else d
+    return "%04d/%02d/%02d" % gregorian_to_jalali(day.year, day.month, day.day)

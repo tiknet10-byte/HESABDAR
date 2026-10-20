@@ -13,9 +13,11 @@ from sqlalchemy.orm import Session
 from app.core import db as dbmod
 from app.core.db import Base, SessionLocal
 from app.models import (
+    HistoryMonth,
     ReceiptImage,
     SalaryAccrual,
     StaffPayout,
+    TreasuryMove,
     Alert, Appointment, AuditLog, BankTransaction, CapitalMove, ConversationMessage, ConversationState, Customer, Deposit,
     Expense, Holding, HoldingMove, ImportBatch, InboundReceipt, Invoice, InvoiceItem, JournalEntry, JournalLine, KnowledgeItem,
     LedgerAccount, Payment, PaymentAccount, PluginState, Product, Purchase, PurchaseItem, Service, ServiceLine, Setting, Staff,
@@ -82,6 +84,7 @@ def _fill(db: Session) -> dict:
                 StaffPayout(staff_id=staff.id, kind="advance", jy=1404, jm=1, amount=10, paid_at=now, payment_account_id=pa.id),
                 SalaryAccrual(staff_id=staff.id, jy=1404, jm=1, amount=10, at=now),
                 ReceiptImage(sha256="0" * 64, media_type="image/png", data=b"g9"),
+                HistoryMonth(jy=1300, jm=1), TreasuryMove(kind="opening", amount=10, at=now),
                 Alert(kind="g9", title="هشدار g9"),
                 ConversationMessage(channel="sms", peer="g9", customer_id=c1.id, direction="in", text="سلام", service_id=svc.id),
                 ConversationState(channel="sms", peer="g9"),

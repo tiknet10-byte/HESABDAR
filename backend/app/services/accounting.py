@@ -1244,6 +1244,7 @@ REF_LABELS = {
     "stock_move": "گردش انبار (بهای تمام‌شده)", "stock_opening": "موجودی اول دورهٔ کالا",
     "capital": "سرمایهٔ مدیر", "capital_void": "ابطال سرمایه", "holding": "طلا و ارز", "holding_void": "ابطال طلا و ارز",
     "forfeit_commission": "سهم پرسنل از بیعانهٔ سوخت‌شده", "salary": "حقوق کارمند", "expense_void": "ابطال هزینه",
+    "history_share": "سهم پرسنل از کارکرد نرم‌افزار قبلی",
 }
 
 
@@ -1311,6 +1312,10 @@ def _ref_details(db: Session, entries: list[JournalEntry]) -> dict[tuple[str, in
         out[("staff_payout", x.id)] = "، ".join(t for t in (f"پیگیری {x.reference}" if x.reference else "", x.description) if t)
     for x in db.scalars(select(SalaryAccrual).where(SalaryAccrual.id.in_(ids.get("salary", set())))):
         out[("salary", x.id)] = x.description or ""
+    from ..models import HistoryMonth
+
+    for x in db.scalars(select(HistoryMonth).where(HistoryMonth.id.in_(ids.get("history_share", set())))):
+        out[("history_share", x.id)] = f"{x.rows} خدمت"
     for x in db.scalars(select(Payment).where(Payment.id.in_(ids.get("payment", set())))):
         out[("payment", x.id)] = f"پیگیری {x.reference}" if x.reference else ""
     for x in db.scalars(select(Deposit).where(Deposit.id.in_(ids.get("deposit", set()) | ids.get("deposit_apply", set())))):

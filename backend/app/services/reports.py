@@ -508,7 +508,13 @@ def _staff_row(person: Staff | None, lines: dict, staff_id: int | None = None) -
             "mobile": person.mobile if person else None,
             "line": lines.get(person.line_id) if person and person.line_id else None,
             "percent": person.commission_percent if person else 0,
-            "services": 0, "revenue": 0, "forfeits": 0, "treasury": 0, "staff_share": 0, "salon_share": 0}
+            "services": 0, "revenue": 0, "forfeits": 0, "treasury": 0, "staff_share": 0, "salon_share": 0,
+            "history": 0, "history_share": 0}
+
+
+def _line_row(line_id: int | None, lines: dict) -> dict:
+    return {"line_id": line_id, "name": lines.get(line_id, "سایر"), "services": 0, "revenue": 0, "treasury": 0, "staff_share": 0,
+            "salon_share": 0, "forfeits": 0, "returned": 0, "history": 0}
 
 
 def forfeit_shares(db: Session, s: datetime, e: datetime) -> list[tuple[int | None, int | None, int, int, int]]:
@@ -575,9 +581,7 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
         r["treasury"] += tre
         r["staff_share"] += comm
         r["salon_share"] += net - tre - comm
-        lk = it.line_id or 0
-        lr = per_line.setdefault(lk, {"line_id": it.line_id, "name": lines.get(it.line_id, "سایر"), "services": 0,
-                                      "revenue": 0, "treasury": 0, "staff_share": 0, "salon_share": 0, "forfeits": 0, "returned": 0})
+        lr = per_line.setdefault(it.line_id or 0, _line_row(it.line_id, lines))
         lr["services"] += k * it.quantity
         lr["revenue"] += net
         lr["treasury"] += tre
@@ -588,9 +592,7 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
     # forfeited deposits (no-shows): income of their line, shared like its services (1.22: the month's treasury, then
     # the staff member's share of the rest, as booked on the deposit; forfeited before 1.22: all the salon's)
     for line_id, staff_id, amount, tre, comm in forfeit_shares(db, s, e):
-        lr = per_line.setdefault(line_id or 0, {"line_id": line_id, "name": lines.get(line_id, "سایر"), "services": 0,
-                                                "revenue": 0, "treasury": 0, "staff_share": 0, "salon_share": 0, "forfeits": 0,
-                                                "returned": 0})
+        lr = per_line.setdefault(line_id or 0, _line_row(line_id, lines))
         lr["forfeits"] += amount
         lr["treasury"] += tre
         lr["staff_share"] += comm
@@ -603,6 +605,24 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
         r["treasury"] += tre
         r["staff_share"] += comm
         r["salon_share"] += amount - tre - comm
+    # services of the previous software before the program started (1.23): shared like invoice rows - a booked month
+    # as booked (its staff share is on 2200, entry "history_share"), the others worked out live (not owed yet)
+    from .history_shares import history_rows
+
+    unbooked = 0
+    for f in history_rows(db, s, e + timedelta(microseconds=1)):
+        net, tre, comm = f["revenue"], f["treasury"], f["commission"]
+        lr = per_line.setdefault(f["line_id"] or 0, _line_row(f["line_id"], lines))
+        for x in (lr, per_staff.setdefault(f["share_staff_id"] or 0, _staff_row(staff.get(f["share_staff_id"]), lines))):
+            x["services"] += 1
+            x["revenue"] += net
+            x["history"] += net
+            x["treasury"] += tre
+            x["staff_share"] += comm
+            x["salon_share"] += net - tre - comm
+        per_staff[f["share_staff_id"] or 0]["history_share"] += comm
+        if not f["booked"]:
+            unbooked += comm
     # payouts in the period (less the ones voided) and outstanding balances
     payable = account(db, STAFF_PAYABLE)
     paid = dict(db.execute(select(JournalLine.staff_id, func.sum(JournalLine.debit - JournalLine.credit))
@@ -621,7 +641,8 @@ def staff_shares(db: Session, start: date | None = None, end: date | None = None
         r["active"] = bool(staff[r["staff_id"]].is_active) if r["staff_id"] in staff else True
     staff_rows = sorted(per_staff.values(), key=lambda x: -x["revenue"])
     totals = {k: sum(r[k] for r in staff_rows) for k in ("revenue", "forfeits", "treasury", "staff_share", "salon_share", "paid",
-                                                         "balance")}
+                                                         "balance", "history", "history_share")}
+    totals["history_unbooked"] = unbooked  # staff share of the previous software's months not booked yet (not owed)
     return {"period": {"start": s.date().isoformat(), "end": e.date().isoformat()}, "staff": staff_rows,
             "lines": sorted(per_line.values(), key=lambda x: -(x["revenue"] + x["forfeits"])), "totals": totals}
 
@@ -686,11 +707,12 @@ def _revenue_rows(db: Session, s: datetime, e: datetime, source: str = "all") ->
             rows.append({"day": str(day), "line_id": line_id, "staff_id": None, "service_id": None, "product_id": None,
                          "name": FORFEIT_NAME, "amount": int(total or 0), "count": 0, "old": False, "forfeit": True})
     if source in ("all", "old"):
-        q = (select(func.date(Appointment.start_at), Service.line_id, Appointment.staff_id, Appointment.service_id,
+        line_of = func.coalesce(Appointment.line_id, Service.line_id)  # a booked month's row keeps the line it was booked in
+        q = (select(func.date(Appointment.start_at), line_of, Appointment.staff_id, Appointment.service_id,
                     func.sum(Appointment.quoted_price), func.count(Appointment.id))
              .outerjoin(Service, Service.id == Appointment.service_id)
              .where(_old_service(), Appointment.start_at.between(s, e))
-             .group_by(func.date(Appointment.start_at), Service.line_id, Appointment.staff_id, Appointment.service_id))
+             .group_by(func.date(Appointment.start_at), line_of, Appointment.staff_id, Appointment.service_id))
         for day, line_id, staff_id, service_id, total, n in db.execute(q):
             rows.append({"day": str(day), "line_id": line_id, "staff_id": staff_id, "service_id": service_id, "name": None,
                          "amount": int(total or 0), "count": int(n or 0), "old": True})

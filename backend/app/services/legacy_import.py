@@ -37,7 +37,7 @@ from ..models import (
     local_now,
 )
 from . import accounting, scheduling, service_catalog
-from .jalali import jalali_to_gregorian
+from .jalali import jalali_to_gregorian, jmonth_of
 from .textutil import normalize_mobile, normalize_text, parse_amount, to_en_digits
 
 KINDS = {"customers": "مشتریان", "history": "سوابق خدمات انجام‌شده", "deposits": "بیعانه‌های نوبت‌های آینده"}
@@ -59,7 +59,8 @@ SYNONYMS: dict[str, list[str]] = {
     "appt_date": ["تاریخ نوبت", "نوبت", "زمان نوبت", "تاریخ رزرو", "تاریخ مراجعه بعدی"],
     "service": ["خدمت", "خدمات", "نام خدمت", "عنوان خدمت", "شرح خدمت", "نوع خدمت", "شرح", "عنوان", "service"],
     "line": ["لاین", "بخش", "لاین خدمت", "دپارتمان", "واحد"],
-    "staff": ["پرسنل", "آرایشگر", "کارشناس", "اپراتور", "نام پرسنل", "انجام دهنده", "متخصص", "کارمند", "staff"],
+    "staff": ["پرسنل", "آرایشگر", "کارشناس", "اپراتور", "نام پرسنل", "انجام دهنده", "متخصص", "کارمند", "پزشک", "نام پزشک", "دکتر",
+              "نام دکتر", "نام کارشناس", "نام آرایشگر", "staff"],
     "amount": ["قابل پرداخت", "مبلغ", "مبلغ بیعانه", "بیعانه", "پیش پرداخت", "مبلغ کل", "قیمت", "مبلغ پرداختی", "مبلغ دریافتی",
                "amount"],
     "status": ["وضعیت", "وضعیت بیعانه"],
@@ -78,7 +79,7 @@ KIND_SYNONYMS: dict[str, dict[str, list[str]]] = {
 # report columns that are never imported (kept out so no other field grabs them by a partial match)
 IGNORED = ["ردیف", "صندوقدار", "کد اشتراک", "کارتخوان", "دستیار", "درصد دستیار", "درصد", "سهم پرسنل", "تخفیف پرسنل", "تخفیف سالن",
            "غیرنقدی", "کدپیگیری", "کد پیگیری", "عروس", "پکیج", "مسترد کننده", "ساعت استرداد", "ویرایش کننده", "تاریخ ویرایش",
-           "ساعت ویرایش", "ساعت ثبت", "شماره قرارگاه"]
+           "ساعت ویرایش", "ساعت ثبت", "شماره قرارگاه", "درصد پرسنل", "سهم سالن", "تعداد خدمات", "تعداد"]
 FIELD_LABELS = {"customer_code": "کد مشتری (نرم‌افزار قبلی)", "receipt_no": "شماره فیش/پذیرش", "name": "نام مشتری", "first_name": "نام",
                 "last_name": "نام خانوادگی", "mobile": "موبایل", "date": "تاریخ", "time": "ساعت", "appt_date": "تاریخ نوبت / مراجعه",
                 "service": "خدمت", "line": "لاین", "staff": "پرسنل", "amount": "مبلغ", "status": "وضعیت", "settled_date": "تاریخ تسویه",
@@ -416,13 +417,11 @@ class _Catalog:
         for sv in db.scalars(select(Service).where(Service.is_active.is_(True))):
             self.line_services.setdefault(sv.line_id, []).append(sv.id)
         self.staff_line: dict[int, int | None] = {}
-        self.staff: dict[str, int] = {}
-        for p in db.scalars(select(Staff)):
+        # who did the work: practitioners only (employees earn no share of it)
+        self.people = [p for p in db.scalars(select(Staff).order_by(Staff.id)) if (p.kind or "") != "employee"]
+        for p in self.people:
             self.staff_line[p.id] = p.line_id
-            self.staff.setdefault(_key(p.full_name), p.id)
-            first = p.full_name.split()[0] if p.full_name.split() else ""
-            if first:
-                self.staff.setdefault(_key(first), p.id)
+        self._person: dict[str, int | None] = {}
 
     def line(self, name: str) -> int | None:
         if not name:
@@ -433,10 +432,17 @@ class _Catalog:
         return self.services.get(_key(name)) if name else None
 
     def person(self, name: str) -> int | None:
+        """The same full name («دکتر» / «خانم» left out), or the only staff member with that first name (and the same
+        last name when one is written): «مریم احمدی» is never taken for «مریم تاجیک». Not found: kept in the notes,
+        to be set later on the staff page («کارکرد نرم‌افزار قبلی»)."""
         if not name:
             return None
-        k = _key(name)
-        return self.staff.get(k) or self.staff.get(_key(name.split()[0]))
+        if name not in self._person:
+            from .history_shares import suggest_staff
+
+            hit = suggest_staff(name, self.people)
+            self._person[name] = hit["id"] if hit else None
+        return self._person[name]
 
 
 # ------------------------------------------------------------------ preview
@@ -876,6 +882,10 @@ def commit(db: Session, batch: ImportBatch, *, service_map: dict[str, int | str]
             created["deposits"].append(dep.id)
             fp_rec.append(dep.id)
             counts["deposits"] += 1
+    if kind == "history" and created["appointments"]:  # rows added to a booked month: its staff shares again
+        from .history_shares import rows_changed
+
+        rows_changed(db, [a for a in (db.get(Appointment, i) for i in created["appointments"]) if a is not None])
     for c in moved:  # customers whose automatic code was taken by an imported one get a fresh code
         c.legacy_code = new_code()
         auto_new[str(c.id)] = c.legacy_code
@@ -925,6 +935,7 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         removed["deposits"] += 1
     db.flush()
     gone: set[int] = set()  # receipts no longer here as appointments (e.g. moved to a product by a Tizpardaz file)
+    gone_months: set[tuple[int, int]] = set()
     for aid in created.get("appointments", []):
         a = db.get(Appointment, aid)
         if a is None:
@@ -935,6 +946,7 @@ def undo(db: Session, batch: ImportBatch) -> dict:
             if kind == "history":
                 kept_ids.add(aid)
             continue
+        gone_months.add(jmonth_of(a.start_at))
         db.delete(a)
         removed["appointments"] += 1
     db.flush()
@@ -968,6 +980,10 @@ def undo(db: Session, batch: ImportBatch) -> dict:
     auto_codes = {k: v for k, v in (s.get("auto_codes") or {}).items() if db.get(Customer, int(k)) is not None}
     batch.status = "undone"
     batch.summary = {**s, "undo": {"removed": removed, "kept": kept}, "kept_fps": kept_fps, "auto_codes": auto_codes}
+    if gone_months:  # a booked month of the previous software lost these services: its staff shares again
+        from .history_shares import rows_changed
+
+        rows_changed(db, months=gone_months)
     return {"removed": removed, "kept": kept}
 
 

@@ -11,6 +11,8 @@ share are both the salon's (revenue 41xx stays whole, no account of its own).
 
 A forfeited deposit (بیعانهٔ سوخت‌شده) is income of its line like a service (1.22): the same treasury and staff share
 on the day it was forfeited (kept on the deposit; forfeits from before 1.22 stay all the salon's).
+The services of the previous software before the program started are shared the same way (1.23, history_shares):
+worked out live until their month is booked, then as booked; a booked month is booked again when its rate changes.
 
 Changing a month's rate later books that month's rows again - only that month (later months that used the old rate
 keep it: they get a row of their own first). The commission entry of each changed invoice is posted again on its own
@@ -133,6 +135,17 @@ def _plan_forfeits(db: Session, line_id: int, jy: int, jm: int, bp: int) -> list
     return out
 
 
+def _plan_history(db: Session, line_id: int, jy: int, jm: int, bp: int) -> list[dict]:
+    """The previous software's services of the line in the month (before the program started) at rate bp."""
+    from .history_shares import line_month
+
+    out = []
+    for f in line_month(db, line_id, jy, jm):
+        t = pct_bp(f["revenue"], bp)
+        out.append({**f, "new_treasury": t, "new_c": commission_of(f["revenue"] - t, f["percent"]) if f["percent"] else 0})
+    return out
+
+
 def _payouts_since(db: Session, staff_ids: list[int], since: datetime) -> dict[int, int]:
     from .accounting import STAFF_PAYABLE, account
 
@@ -204,6 +217,20 @@ def preview(db: Session, line_id: int, jy: int, jm: int, bp: int) -> dict:
         r["before"] += p["old_c"]
         r["after"] += p["new_c"]
         r["balance_change"] += p["new_c"] - p["old_c"]
+    history = 0
+    hplan = _plan_history(db, line_id, jy, jm, bp)
+    for p in hplan:  # the previous software's services of the month: shared like invoice rows
+        revenue += p["revenue"]
+        history += p["revenue"]
+        t_before += p["treasury"]
+        t_after += p["new_treasury"]
+        if not p["share_staff_id"]:
+            continue
+        r = per.setdefault(p["share_staff_id"], {"staff_id": p["share_staff_id"], "before": 0, "after": 0, "balance_change": 0})
+        r["before"] += p["commission"]
+        r["after"] += p["new_c"]
+        if p["booked"]:  # a booked month's share is owed (2200); a month not booked yet owes nothing
+            r["balance_change"] += p["new_c"] - p["commission"]
     from .accounting import staff_balance
 
     paid = _payouts_since(db, list(per), s)
@@ -217,7 +244,8 @@ def preview(db: Session, line_id: int, jy: int, jm: int, bp: int) -> dict:
     touched = [x for x in staff_rows if x["balance_change"]]
     return {"line_id": line_id, "line": line.name, "jy": jy, "jm": jm, "old_bp": old_bp, "new_bp": int(bp),
             "own": bool(row and (row.jy, row.jm) == (jy, jm)), "inherited_from": [row.jy, row.jm] if row and (row.jy, row.jm) != (jy, jm) else None,
-            "revenue": revenue, "forfeits": forfeits, "treasury_before": t_before, "treasury_after": t_after,
+            "revenue": revenue, "forfeits": forfeits, "history": history, "treasury_before": t_before, "treasury_after": t_after,
+            "history_rows": len(hplan), "history_booked": any(p["booked"] for p in hplan),
             "forfeits_changed": sum(1 for p in fplan if p["new_c"] != p["old_c"] or (p["deposit"].treasury_amount or 0) != p["treasury"]),
             "invoices": len({p["invoice"].id for p in plan if p["new_c"] != p["old_c"] or (p["item"].treasury_amount or 0) != p["treasury"]}),
             "staff": staff_rows, "returns_elsewhere": [{"jy": y, "jm": m, **v} for (y, m), v in sorted(elsewhere.items()) if v["change"] or v["treasury_change"]],
@@ -227,7 +255,10 @@ def preview(db: Session, line_id: int, jy: int, jm: int, bp: int) -> dict:
 
 def _later_months_to_keep(db: Session, line_id: int, jy: int, jm: int, old_bp: int) -> list[dict]:
     """Later months (up to this month) that take their rate from this one or an earlier one and already have invoices
-    (or forfeited deposits) of the line: they keep the rate their invoices were booked with. Those without invoices take the new rate."""
+    (or forfeited deposits, or booked services of the previous software) of the line: they keep the rate their invoices
+    were booked with. Those without invoices take the new rate."""
+    from .history_shares import is_booked, line_month
+
     out = []
     cur = jmonth_of(local_now())
     own = {(r.jy, r.jm) for r in db.scalars(select(TreasuryRate).where(TreasuryRate.line_id == line_id))}
@@ -236,7 +267,8 @@ def _later_months_to_keep(db: Session, line_id: int, jy: int, jm: int, old_bp: i
         s, e = month_range(y, m)
         if db.scalar(select(InvoiceItem.id).join(Invoice, Invoice.id == InvoiceItem.invoice_id).where(
                 InvoiceItem.line_id == line_id, Invoice.issued_at >= s, Invoice.issued_at < e).limit(1)) is not None \
-                or db.scalar(_month_forfeits(db, line_id, y, m).with_only_columns(Deposit.id).limit(1)) is not None:
+                or db.scalar(_month_forfeits(db, line_id, y, m).with_only_columns(Deposit.id).limit(1)) is not None \
+                or (is_booked(db, y, m) and any(f["booked"] for f in line_month(db, line_id, y, m))):
             out.append({"jy": y, "jm": m, "bp": old_bp})
         y, m = next_month(y, m)
     return out
@@ -282,12 +314,22 @@ def save(db: Session, line_id: int, jy: int, jm: int, bp: int, expected_bp: int 
         if p["new_c"] != (dep.commission_amount or 0):
             dep.commission_amount = p["new_c"]
             forfeits_changed.append(dep)
+    history_rows = 0
+    from .history_shares import book_month, is_booked
+
+    if is_booked(db, jy, jm):  # a booked month of the previous software: its rows of the line at the new rate
+        for p in _plan_history(db, line_id, jy, jm, bp):
+            if p["booked"]:
+                p["appt"].treasury_bp = bp  # its percent stays; book_month works the amounts out again
+            history_rows += 1
     db.flush()
     repost_commissions(db, list(changed.values()))
     repost_forfeit_commissions(db, forfeits_changed)
+    if history_rows:
+        book_month(db, jy, jm, user=user)
     audit(db, "treasury.set", "line", line_id, {
         "month": f"{jy}/{jm:02d}", "old_bp": pv["old_bp"], "new_bp": bp, "invoices": len(changed), "forfeits": len(forfeits_changed),
-        "kept": [f"{k['jy']}/{k['jm']:02d}={k['bp']}" for k in pv["later_kept"]],
+        "history_rows": history_rows, "kept": [f"{k['jy']}/{k['jm']:02d}={k['bp']}" for k in pv["later_kept"]],
         "staff": {str(x["staff_id"]): x["change"] for x in pv["staff"] if x["change"]},
         "returns_elsewhere": {f"{x['jy']}/{x['jm']:02d}": [x["change"], x["treasury_change"]] for x in pv["returns_elsewhere"]}},
           user=user)
@@ -302,6 +344,9 @@ def month_rates(db: Session, jy: int, jm: int) -> list[dict]:
                                          .where(Invoice.issued_at >= s, Invoice.issued_at < e, InvoiceItem.line_id.is_not(None))
                                          .distinct())}
     used |= {lid for lid in db.scalars(_month_forfeits(db, None, jy, jm).with_only_columns(Deposit.forfeit_line_id).distinct()) if lid}
+    from .history_shares import history_rows
+
+    used |= {f["line_id"] for f in history_rows(db, s, e) if f["line_id"]}
     out = []
     for line in lines:
         if not line.is_active and line.id not in used:

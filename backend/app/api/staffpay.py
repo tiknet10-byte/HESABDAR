@@ -51,6 +51,7 @@ class PayoutIn(BaseModel):
     receipt_token: str | None = None  # the receipt read by /staff/payout-receipt (its picture is kept with the payout)
     receipt: dict | None = None  # what was read from it
     force: bool = False  # it looked like a payment already entered, and the person confirmed it is another one
+    before_start: bool = False  # paid before the program started (the previous software's time): Dr 2200 / Cr 3200
 
 
 def _small(parsed: dict | None) -> dict | None:
@@ -71,7 +72,9 @@ def pay(pid: int, body: PayoutIn, db: Session = Depends(get_db), user=Depends(re
     if body.from_owner and not has_permission(user.role, "capital"):
         raise HTTPException(403, "پرداخت از جیب مدیر فقط با دسترسی مدیر ثبت می‌شود")
     pa = None
-    if not body.from_owner:
+    if body.before_start:
+        body.from_owner = False
+    elif not body.from_owner:
         pa = db.get(PaymentAccount, body.payment_account_id) if body.payment_account_id else None
         if pa is None:
             raise HTTPException(400, "حسابی که پول از آن پرداخت شد را انتخاب کنید")
@@ -87,7 +90,8 @@ def pay(pid: int, body: PayoutIn, db: Session = Depends(get_db), user=Depends(re
         p = staffpay.pay(db, person, body.amount, kind=body.kind, payment_account=pa, from_owner=body.from_owner,
                          paid_at=body.paid_at, jy=body.jy, jm=body.jm, reference=(body.reference or "").strip(),
                          description=(body.description or "").strip(), source="receipt" if (sha or parsed) else "manual",
-                         image_path=None, image_sha256=sha, parsed=_small(parsed), force=body.force, user=user)
+                         image_path=None, image_sha256=sha, parsed=_small(parsed), force=body.force,
+                         before_start=body.before_start, user=user)
     except staffpay.Duplicate as exc:
         db.rollback()
         raise HTTPException(409, str(exc)) from exc

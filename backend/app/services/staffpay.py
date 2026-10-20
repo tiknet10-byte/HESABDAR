@@ -78,8 +78,11 @@ def balance_at(db: Session, staff_id: int, before: datetime | None = None) -> in
 def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", payment_account: PaymentAccount | None = None,
         from_owner: bool = False, paid_at: datetime | None = None, jy: int | None = None, jm: int | None = None,
         reference: str = "", description: str = "", source: str = "manual", image_path: str | None = None,
-        image_sha256: str | None = None, parsed: dict | None = None, force: bool = False, user=None) -> StaffPayout:  # noqa: ANN001
-    from .accounting import EQUITY, STAFF_PAYABLE, Leg, account, cash_account_for, ensure_not_future, post
+        image_sha256: str | None = None, parsed: dict | None = None, force: bool = False, before_start: bool = False,
+        bank_transaction_id: int | None = None, user=None) -> StaffPayout:  # noqa: ANN001
+    """before_start: paid before the program started (in the previous software's time, e.g. the share of a month brought
+    over from it): Dr 2200 / Cr 3200 opening balances - the account balances entered at the start already reflect it."""
+    from .accounting import EQUITY, OPENING, STAFF_PAYABLE, Leg, account, cash_account_for, ensure_not_future, post
     from .audit import audit, write_lock
 
     amount = int(amount)
@@ -89,7 +92,19 @@ def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", pay
         raise PayError("مبلغ پرداخت بیش از حد بزرگ است؛ عدد را دوباره نگاه کنید")
     if kind not in KINDS:
         raise PayError("نوع پرداخت نامعتبر است")
-    if not from_owner and payment_account is None:
+    if before_start:
+        from .history_shares import books_start
+
+        from_owner, payment_account = False, None
+        start = books_start(db)
+        if paid_at is None:
+            raise PayError("تاریخ پرداختِ پیش از شروع برنامه را بنویسید")
+        if start is not None and paid_at >= start:
+            from .jalali import to_jalali_str
+
+            raise PayError(f"«پیش از شروع برنامه» فقط برای پرداخت‌های قبل از {to_jalali_str(start)} است؛ "
+                           "این پرداخت را از حسابی که پول از آن رفته ثبت کنید")
+    elif not from_owner and payment_account is None:
         raise PayError("حسابی که پول از آن پرداخت شد را انتخاب کنید")
     ensure_not_future(paid_at, "تاریخ پرداخت")
     at = paid_at or local_now()
@@ -111,13 +126,18 @@ def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", pay
                                                   StaffPayout.created_at >= local_now() - DUPLICATE_WINDOW).limit(1)):
             raise Duplicate("همین مبلغ با همین تاریخ چند دقیقه پیش برای همین شخص ثبت شده است؛ اگر پرداخت جداگانه‌ای است، دوباره تأیید کنید")
     p = StaffPayout(staff_id=staff.id, kind=kind, jy=jy, jm=jm, amount=amount, paid_at=at,
-                    payment_account_id=None if from_owner else payment_account.id, from_owner=bool(from_owner),
+                    payment_account_id=payment_account.id if payment_account is not None else None, from_owner=bool(from_owner),
                     reference=(reference or "")[:64], description=description or "", source=source, image_path=image_path,
-                    image_sha256=image_sha256, parsed=parsed, created_by=getattr(user, "id", None))
+                    image_sha256=image_sha256, parsed=parsed, created_by=getattr(user, "id", None),
+                    before_start=True if before_start else None, bank_transaction_id=bank_transaction_id)
     db.add(p)
     db.flush()
-    credit = account(db, EQUITY) if from_owner else cash_account_for(db, payment_account)
-    text = f"{kind_label(staff, kind)} {staff.full_name} - {month_label(jy, jm)}" + (f" - {description}" if description else "")
+    if before_start:
+        credit = account(db, OPENING)
+    else:
+        credit = account(db, EQUITY) if from_owner else cash_account_for(db, payment_account)
+    text = f"{kind_label(staff, kind)} {staff.full_name} - {month_label(jy, jm)}" + (f" - {description}" if description else "") \
+        + (" (پیش از شروع برنامه)" if before_start else "")
     entry = post(db, text[:256], [
         Leg(account(db, STAFF_PAYABLE), debit=amount, staff_id=staff.id, line_id=staff.line_id),
         Leg(credit, credit=amount, staff_id=staff.id),
@@ -125,7 +145,7 @@ def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", pay
     p.entry_id = entry.id
     audit(db, "staff.payout", "staff", staff.id, {"payout": p.id, "kind": kind, "amount": amount, "month": f"{jy}/{jm:02d}",
                                                   "account": p.payment_account_id, "from_owner": bool(from_owner),
-                                                  "source": source}, user=user)
+                                                  "before_start": bool(before_start), "source": source}, user=user)
     return p
 
 
@@ -243,12 +263,14 @@ def void_salary(db: Session, a: SalaryAccrual, user=None) -> SalaryAccrual:  # n
 
 
 # ------------------------------------------------------------------ a person's month
-EARNED = {"commission": "services", "invoice_void": "services", "forfeit_commission": "forfeits", "salary": "salary"}
+EARNED = {"commission": "services", "invoice_void": "services", "forfeit_commission": "forfeits", "salary": "salary",
+          "history_share": "history"}
 
 
 def _payout_row(db: Session, p: StaffPayout, accounts: dict[int, str]) -> dict:
     return {"id": p.id, "kind": p.kind, "amount": p.amount, "paid_at": p.paid_at.isoformat(timespec="minutes"),
-            "jy": p.jy, "jm": p.jm, "account": "از جیب مدیر" if p.from_owner else accounts.get(p.payment_account_id),
+            "jy": p.jy, "jm": p.jm, "account": "پیش از شروع برنامه" if p.before_start else
+            ("از جیب مدیر" if p.from_owner else accounts.get(p.payment_account_id)), "before_start": bool(p.before_start),
             "payment_account_id": p.payment_account_id, "from_owner": p.from_owner, "reference": p.reference,
             "description": p.description, "source": p.source, "status": p.status, "has_image": bool(p.image_sha256),
             "void_reason": p.void_reason}
@@ -258,13 +280,14 @@ def statement(db: Session, staff_id: int, jy: int, jm: int) -> dict:
     """One person's month from the books: owed at the start + earned - given = owed at the end; and what was paid for
     this month after it ended (a settlement paid on the 2nd of the next month)."""
     from . import reports
+    from .history_shares import books_start
 
     person = db.get(Staff, staff_id)
     if person is None:
         raise PayError("شخص پیدا نشد")
     s, e = month_range(jy, jm)
     opening = balance_at(db, staff_id, s)
-    earned = {"services": 0, "forfeits": 0, "salary": 0, "other": 0}
+    earned = {"services": 0, "forfeits": 0, "history": 0, "salary": 0, "other": 0}
     given = 0
     for at, ref_type, _ref_id, debit, credit in db.execute(_lines(db, staff_id).where(JournalEntry.at >= s, JournalEntry.at < e)):
         if ref_type == "staff_payout":
@@ -299,7 +322,8 @@ def statement(db: Session, staff_id: int, jy: int, jm: int) -> dict:
             "opening": opening, "earned": earned, "earned_total": sum(earned.values()), "given": given, "closing": closing,
             "advances": sum(x["amount"] for x in in_month if x["kind"] == "advance" and x["status"] == "booked"),
             "payouts": in_month, "paid_later": paid_later, "later": later, "remaining": closing - paid_later,
-            "balance_now": balance_at(db, staff_id), "work": work, "salaries": salaries}
+            "balance_now": balance_at(db, staff_id), "work": work, "salaries": salaries,
+            "books_start": (st.date().isoformat() if (st := books_start(db)) else None)}
 
 
 def people_month(db: Session, jy: int, jm: int, employees: bool) -> list[dict]:

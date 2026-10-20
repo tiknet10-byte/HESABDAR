@@ -246,6 +246,12 @@ def edit_appointment(aid: int, body: AppointmentUpdate, db: Session = Depends(ge
             d.appointment_id = None
     elif "customer_id" in data:
         data.pop("customer_id")
+    from ..services.legacy_import import IMPORT_NOTE
+
+    if data.get("notes") is not None and a.status == "done" and not a.invoice_id and (a.notes or "").startswith(IMPORT_NOTE) \
+            and not data["notes"].startswith(IMPORT_NOTE):
+        # a service of the previous software stays one (its mark is what the reports and the staff shares go by)
+        data["notes"] = f"{IMPORT_NOTE} - {data['notes']}".rstrip(" -")
     for k, v in data.items():
         setattr(a, k, v)
     if "start_at" in data:

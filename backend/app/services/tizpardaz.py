@@ -48,6 +48,7 @@ from . import accounting, inventory, settings_store, woo_queue
 from .customer_merge import has_records, person_key
 from .legacy_import import ImportProblem, _amount, _key, _text, parse_date, read_table
 from .reports import _old_service
+from .jalali import jmonth_of
 from .service_catalog import keys_alike, name_key
 from .textutil import normalize_mobile, to_en_digits
 from .tizpardaz_defaults import SKU_MAP
@@ -549,6 +550,7 @@ def _relink_chehreh(db: Session, bid: int, old: int, new: int) -> None:
 def _service_to_product(db: Session, service: Service, product: Product, batch_id: int, created: dict) -> int:
     n = 0
     source = _chehreh_batches(db)
+    moved_months: set[tuple[int, int]] = set()
     for a in list(db.scalars(select(Appointment).where(Appointment.service_id == service.id, _old_service()))):
         h = TradeHistory(batch_id=batch_id, source="chehreh", kind="sale", at=a.start_at, product_id=product.id, customer_id=a.customer_id,
                          description=service.name, qty=1, unit_price=int(a.quoted_price or 0), amount=int(a.quoted_price or 0),
@@ -557,9 +559,14 @@ def _service_to_product(db: Session, service: Service, product: Product, batch_i
         created["appointments"].append({"id": a.id, "customer_id": a.customer_id, "service_id": a.service_id, "staff_id": a.staff_id,
                                         "start_at": a.start_at.isoformat(), "quoted_price": a.quoted_price, "notes": a.notes,
                                         "status": a.status, "duration_minutes": a.duration_minutes, "batch": source.get(a.id)})
+        moved_months.add(jmonth_of(a.start_at))
         db.delete(a)
         n += 1
     db.flush()
+    if moved_months:  # a booked month of the previous software lost these services: its staff shares again
+        from .history_shares import rows_changed
+
+        rows_changed(db, months=moved_months)
     created["history"] += [h.id for h in db.scalars(select(TradeHistory).where(TradeHistory.batch_id == batch_id, TradeHistory.source == "chehreh",
                                                                              TradeHistory.product_id == product.id))]
     if not db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.service_id == service.id)):
@@ -1144,6 +1151,7 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         if sup and not db.scalar(select(TradeDoc.id).where(TradeDoc.supplier_id == sid).limit(1)) \
                 and not db.scalar(select(Purchase.id).where(Purchase.supplier_id == sid).limit(1)):
             db.delete(sup)
+    restored: list[Appointment] = []
     for a in c.get("appointments", []):  # Chehreh history that had moved to a product goes back to its service
         src = db.get(ImportBatch, a["batch"]) if a.get("batch") else None
         if src is not None and src.status != "committed":  # its Chehreh file was taken back meanwhile: it stays gone
@@ -1159,6 +1167,11 @@ def undo(db: Session, batch: ImportBatch) -> dict:
         db.flush()
         if src is not None:
             _relink_chehreh(db, src.id, a["id"], appt.id)
+        restored.append(appt)
+    if restored:  # back in the previous software's months: a booked month shares them again
+        from .history_shares import rows_changed
+
+        rows_changed(db, restored)
     for sid in c.get("services", []):
         s = db.get(Service, sid)
         if s:
