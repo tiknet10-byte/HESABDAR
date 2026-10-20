@@ -188,8 +188,8 @@ const monthFor = (kind: string, iso: string): YM => {
   return kind === "settlement" && toJalali(d.getFullYear(), d.getMonth() + 1, d.getDate())[2] <= 15 ? stepMonth(m, -1) : m;
 };
 
-export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amount0 = 0, onDone }:
-  { person: Person; kind?: string; month?: YM; amount?: number; onDone: () => void }) {
+export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amount0 = 0, booksStart, onDone }:
+  { person: Person; kind?: string; month?: YM; amount?: number; booksStart?: string | null; onDone: () => void }) {
   const toast = useToast();
   const { user } = useAuth();
   const [kind, setKindState] = useState(kind0);
@@ -204,7 +204,11 @@ export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amo
   const [amount, setAmount] = useState(amount0);
   const [acc, setAcc] = useState(0);
   const [fromOwner, setFromOwner] = useState(false);
+  const [beforeStart, setBeforeStart] = useState(false);
   const [paidAt, setPaidAt] = useState(toLocalIso(new Date()));
+  // paid before the program started (in the previous software's time): not from an account here
+  const mayBeBefore = !!booksStart && paidAt.slice(0, 10) < booksStart;
+  const before = beforeStart && mayBeBefore;
   const [ym, setYm0] = useState<YM>(defaultMonth(kind0, month));
   const setYm = (m: YM) => { setYm0(m); monthTouched.current = true; setMonthNote(""); };
   const setKind = (k: string) => {
@@ -250,8 +254,8 @@ export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amo
     try {
       const r = await api(`/api/staff/${person.staff_id}/payout`, {
         body: {
-          amount, kind, payment_account_id: fromOwner ? null : acc, from_owner: fromOwner, paid_at: paidAt, jy: ym[0], jm: ym[1],
-          reference, description, receipt_token: receipt?.token ?? null, receipt: receipt?.receipt ?? null, force,
+          amount, kind, payment_account_id: fromOwner || before ? null : acc, from_owner: fromOwner && !before, paid_at: paidAt, jy: ym[0], jm: ym[1],
+          reference, description, receipt_token: receipt?.token ?? null, receipt: receipt?.receipt ?? null, force, before_start: before,
         },
       });
       setDup(null);
@@ -302,7 +306,8 @@ export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amo
           {other && <div className="rounded-xl bg-rose-500/10 p-2 text-rose-700 dark:text-rose-300">به نظر می‌رسد این رسید مال «{other.name}» است ({other.why}). اگر اشتباه انتخاب کرده‌اید، این پنجره را ببندید.</div>}
         </div>
       )}
-      <Field label="مبلغ"><MoneyInput value={amount} onChange={setAmount} /></Field>
+      <Field label="مبلغ" hint="مبلغ را بنویسید و Enter بزنید"><MoneyInput value={amount} onChange={setAmount} autoFocus
+        onEnter={() => { if (amount && !busy && !reading && (before || fromOwner || acc)) save(false); }} /></Field>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="تاریخ پرداخت"><JalaliPicker pastOnly value={paidAt} onChange={(v) => {
           setPaidAt(v);
@@ -310,10 +315,17 @@ export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amo
         }} /></Field>
         <Field label="بابت ماه" hint={monthNote || "تسویهٔ مهر که اول آبان داده می‌شود، «مهر» است"}><MonthSelect value={ym} onChange={setYm} /></Field>
       </div>
-      <Field label="پرداخت از">
-        {fromOwner ? <div className="input muted">از جیب خود مدیر (به سرمایهٔ مدیر اضافه می‌شود)</div> : <AccountSelect value={acc} onChange={setAcc} />}
+      {mayBeBefore && (
+        <label className="flex items-start gap-2 rounded-2xl bg-sky-500/10 p-3 text-xs leading-6">
+          <input type="checkbox" className="mt-1" checked={beforeStart} onChange={(e) => setBeforeStart(e.target.checked)} />
+          <span><b>پیش از شروع کار با این برنامه پرداخت شده</b> (در زمان نرم‌افزار قبلی): از هیچ صندوق و حسابی کم نمی‌شود، چون موجودی‌ای که
+            اول کار وارد کردید این پرداخت را از قبل حساب کرده؛ فقط از طلب این شخص کم می‌شود.</span>
+        </label>
+      )}
+      {!before && <Field label="پرداخت از">
+        {fromOwner ? <div className="input muted">از جیب خود مدیر (به سرمایهٔ مدیر اضافه می‌شود)</div> : <AccountSelect value={acc} onChange={setAcc} remember="payout" />}
         {can(user, "capital") && <label className="mt-1 flex items-center gap-2 text-xs"><input type="checkbox" checked={fromOwner} onChange={(e) => setFromOwner(e.target.checked)} />از جیب خودم (نه از صندوق یا حساب سالن) پرداخت کردم</label>}
-      </Field>
+      </Field>}
       <div className="grid gap-3 sm:grid-cols-[1fr_2fr]">
         <Field label="شمارهٔ پیگیری (اختیاری)"><input className="input num" value={reference} onChange={(e) => setReference(e.target.value)} /></Field>
         <Field label="توضیح (همان که در واتساپ می‌نویسید)"><input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder={kind === "advance" ? "مثلاً برداشتی برای خرید" : "مثلاً تسویهٔ مهر"} /></Field>
@@ -325,7 +337,7 @@ export function PayoutForm({ person, kind: kind0 = "advance", month, amount: amo
         </div>
       )}
       {reading && <div className="muted text-center text-xs">صبر کنید تا رسید خوانده شود…</div>}
-      <button className="btn btn-primary w-full py-3" disabled={!amount || busy || reading || (!fromOwner && !acc)} onClick={() => save(false)}>
+      <button className="btn btn-primary w-full py-3" disabled={!amount || busy || reading || (!fromOwner && !before && !acc)} onClick={() => save(false)}>
         <HandCoins size={16} />ثبت {kindLabel(person.employee, kind)} {amount ? money(amount) : ""}
       </button>
     </div>
@@ -344,7 +356,8 @@ export function Statement({ staffId, month: month0, onChanged }: { staffId: numb
   if (!st) return <Loading />;
   const person: Person = { staff_id: st.staff_id, name: st.name, employee: st.employee, mobile: st.mobile, balance: st.balance_now };
   const earnedRows = [
-    ["services", "سهم از خدمات"], ["forfeits", "سهم از بیعانهٔ سوخت‌شده"], ["salary", "حقوق ماه"], ["other", "سایر"],
+    ["services", "سهم از خدمات"], ["forfeits", "سهم از بیعانهٔ سوخت‌شده"], ["history", "سهم از کارکرد نرم‌افزار قبلی"], ["salary", "حقوق ماه"],
+    ["other", "سایر"],
   ].filter(([k]) => st.earned[k]);
   async function voidPayout(p: any) {
     const reason = window.prompt(`باطل کردن ${kindLabel(st.employee, p.kind)} ${money(p.amount)}؟ دلیل را بنویسید (مثلاً «اشتباه ثبت شد»):`, "");
@@ -417,8 +430,10 @@ export function Statement({ staffId, month: month0, onChanged }: { staffId: numb
         </div>
       )}
       <Modal open={!!paying} onClose={() => { setPaying(null); changed(); }} title={`${paying ? kindLabel(st.employee, paying.kind) : ""} - ${st.name}`}>
-        {paying && <PayoutForm person={person} kind={paying.kind} amount={paying.amount} month={month} onDone={() => { setPaying(null); changed(); }} />}
+        {paying && <PayoutForm person={person} kind={paying.kind} amount={paying.amount} month={month} booksStart={st.books_start}
+          onDone={() => { setPaying(null); changed(); }} />}
       </Modal>
+      <PayCards staffId={staffId} name={st.name} />
       <Modal open={!!sending} onClose={() => setSending(null)} title="ارسال در واتساپ">
         {sending && <SendPayout person={person} payout={sending} />}
       </Modal>
@@ -549,4 +564,139 @@ export function ReceiptBatch({ onDone }: { onDone: () => void }) {
 function BatchThumb({ file }: { file: File }) {
   const url = useObjectUrl(file);
   return url && file.type.startsWith("image/") ? <img src={url} alt="" className="h-10 w-10 rounded-lg object-cover" /> : <FileImage size={18} />;
+}
+
+/** The cards / IBANs a person is paid on: with the bank connected, money sent to one of them is booked as their payout
+ * by itself. Only a mask is kept (never the whole number). */
+export function PayCards({ staffId, name }: { staffId: number; name: string }) {
+  const toast = useToast();
+  const { user } = useAuth();
+  const { data, reload } = useApi<any[]>(`/api/staff/${staffId}/pay-cards`, [staffId]);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const mayEdit = can(user, "settings");
+  if (!data || (!data.length && !mayEdit)) return null;
+  async function add() {
+    setBusy(true);
+    try { await api(`/api/staff/${staffId}/pay-cards`, { body: { number: text } }); setText(""); toast("کارت ثبت شد"); reload(); }
+    catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
+  }
+  return (
+    <details className="rounded-2xl p-3 text-sm" style={{ background: "var(--surface)" }} open={data.length > 0}>
+      <summary className="cursor-pointer font-semibold">کارت / شبای دریافت پول {name} {data.length > 0 && <span className="badge mr-1">{faDigits(data.length)}</span>}</summary>
+      <p className="muted mt-2 text-xs leading-6">
+        وقتی برنامه به بانک وصل است (API بانک یا فایل صورت‌حساب)، پولی که از حساب‌های سالن به این کارت یا شبا برود خودکار به‌عنوان
+        برداشتی یا تسویهٔ {name} ثبت می‌شود (در «تطبیق رسید و بانک ← ثبت‌شده‌ها از بانک» می‌توانید ببینید و اگر اشتباه بود برگردانید).
+        شمارهٔ کامل در برنامه نگه داشته نمی‌شود.
+      </p>
+      <div className="mt-2 space-y-1">
+        {data.map((c) => (
+          <div key={c.id} className="flex flex-wrap items-center gap-2 rounded-xl px-2 py-1" style={{ background: "var(--surface-solid)" }}>
+            <span className="num" dir="ltr">{c.mask}</span>
+            <span className={`badge text-[10px] ${c.auto ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" : "bg-amber-500/15 text-amber-700 dark:text-amber-300"}`}>
+              {c.auto ? "ثبت خودکار" : "فقط پیشنهاد (یک بار برگردانده شد)"}</span>
+            {c.hits > 0 && <span className="muted text-xs">{faDigits(c.hits)} بار ثبت شد</span>}
+            {mayEdit && <button className="btn btn-sm mr-auto px-2 text-rose-600" title="برداشتن" onClick={async () => {
+              if (!window.confirm("این کارت برداشته شود؟")) return;
+              try { await api(`/api/staff/pay-cards/${c.id}`, { method: "DELETE" }); reload(); } catch (e: any) { toast(e.message, "error"); }
+            }}><Ban size={13} /></button>}
+          </div>
+        ))}
+      </div>
+      {mayEdit && (
+        <div className="mt-2 flex gap-2">
+          <input className="input num flex-1" dir="ltr" value={text} onChange={(e) => setText(e.target.value)} placeholder="6037 9912 3456 7890 یا IR..."
+            onKeyDown={(e) => { if (e.key === "Enter" && text.trim()) add(); }} />
+          <button className="btn btn-sm" disabled={busy || !text.trim()} onClick={add}>افزودن</button>
+        </div>
+      )}
+    </details>
+  );
+}
+
+/** «تسویهٔ همه»: everyone with what is still to be paid for the month, ticked; one account and date; one click. */
+export function SettleAll({ who, month: month0, onDone }: { who: "staff" | "employee" | "all"; month?: YM; onDone: () => void }) {
+  const toast = useToast();
+  const { user } = useAuth();
+  const [month, setMonth] = useState<YM>(month0 ?? defaultMonth("settlement"));
+  const { data, reload } = useApi<any>(`/api/staff/settle-plan?jy=${month[0]}&jm=${month[1]}&who=${who}`, [month[0], month[1], who]);
+  const [picked, setPicked] = useState<Record<number, { on: boolean; amount: number }>>({});
+  const [acc, setAcc] = useState(0);
+  const [fromOwner, setFromOwner] = useState(false);
+  const [paidAt, setPaidAt] = useState(toLocalIso(new Date()));
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [sending, setSending] = useState<any>(null);
+  useEffect(() => {
+    if (!data) return;
+    setPicked(Object.fromEntries(data.rows.map((r: any) => [r.staff_id, { on: r.due > 0, amount: r.due }])));
+  }, [data]);
+  if (!data) return <Loading />;
+  const rows = data.rows as any[];
+  const chosen = rows.filter((r) => picked[r.staff_id]?.on && picked[r.staff_id]?.amount > 0);
+  const total = chosen.reduce((a, r) => a + picked[r.staff_id].amount, 0);
+  async function run() {
+    setBusy(true);
+    try {
+      const r = await api("/api/staff/settle", { body: { jy: month[0], jm: month[1], payment_account_id: fromOwner ? null : acc, from_owner: fromOwner,
+        paid_at: paidAt, rows: chosen.map((x) => ({ staff_id: x.staff_id, amount: picked[x.staff_id].amount, expected: x.due })) } });
+      setResult(r);
+      if (r.done.length) toast(`${faDigits(r.done.length)} پرداخت ثبت شد (جمع ${money(r.total)})`);
+      reload();
+    } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
+  }
+  const person = (r: any): Person => ({ staff_id: r.staff_id, name: r.name, mobile: r.mobile, employee: rows.find((x) => x.staff_id === r.staff_id)?.employee });
+  return (
+    <div className="space-y-3">
+      <div className="rounded-2xl bg-violet-500/10 p-3 text-sm leading-7">
+        برای هر نفر، ماندهٔ <b>{monthName(month)}</b> حساب شده (سهم یا حقوق ماه منهای برداشتی‌ها و پرداخت‌های قبلی). کسانی که تیک خورده‌اند با یک دکمه
+        تسویه می‌شوند؛ مبلغ هر نفر را می‌توانید عوض کنید.
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Field label="بابت ماه"><MonthSelect value={month} onChange={(m) => { setMonth(m); setResult(null); }} /></Field>
+        <Field label="تاریخ پرداخت"><JalaliPicker pastOnly value={paidAt} onChange={setPaidAt} /></Field>
+        <Field label="پرداخت از">
+          {fromOwner ? <div className="input muted text-xs">از جیب خود مدیر</div> : <AccountSelect value={acc} onChange={setAcc} remember="payout" />}
+          {can(user, "capital") && <label className="mt-1 flex items-center gap-1 text-xs"><input type="checkbox" checked={fromOwner} onChange={(e) => setFromOwner(e.target.checked)} />از جیب خودم</label>}
+        </Field>
+      </div>
+      {rows.length === 0 ? <Empty text="کسی در این ماه نیست" /> : (
+        <div className="space-y-1">
+          {rows.map((r) => {
+            const p = picked[r.staff_id] ?? { on: false, amount: 0 };
+            const done = result?.done?.find((x: any) => x.staff_id === r.staff_id);
+            const err = result?.errors?.find((x: any) => x.staff_id === r.staff_id);
+            return (
+              <div key={r.staff_id} className={`grid items-center gap-2 rounded-xl px-3 py-2 text-sm sm:grid-cols-[auto_1fr_10rem_auto] ${done ? "bg-emerald-500/10" : ""}`}
+                style={done ? undefined : { background: "var(--surface)" }}>
+                <input type="checkbox" checked={p.on} disabled={!!done} onChange={(e) => setPicked({ ...picked, [r.staff_id]: { ...p, on: e.target.checked } })} />
+                <div className="min-w-0">
+                  <div className="font-semibold">{r.name}{r.employee && <span className="muted text-xs"> (کارمند)</span>}</div>
+                  <div className="muted text-[11px] leading-5">
+                    {r.opening > 0 && <>طلب از ماه‌های قبل {money(r.opening)} · </>}{r.opening < 0 && <>بدهکار از قبل {money(-r.opening)} · </>}
+                    {r.employee ? "حقوق" : "سهم"} ماه {money(r.earned)} · داده‌شده {money(r.given + r.paid_later)}
+                    {r.why && r.due <= 0 && <> · <span className={r.balance_now < 0 ? "text-rose-600" : ""}>{r.why}</span></>}
+                    {r.salary_missing && <> · <a href="/employees" className="underline">ثبت حقوق</a></>}
+                  </div>
+                </div>
+                {done ? <div className="font-bold text-emerald-600">ثبت شد ✓</div>
+                  : <MoneyInput value={p.amount} onChange={(v) => setPicked({ ...picked, [r.staff_id]: { on: v > 0, amount: v } })} />}
+                <div className="flex items-center gap-1">
+                  {done && <button className="btn btn-sm" title="ارسال در واتساپ" onClick={() => setSending(done)}><Send size={13} /></button>}
+                </div>
+                {err && <div className="text-xs text-rose-600 sm:col-span-4">{err.error}</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <button className="btn btn-primary w-full py-3" disabled={busy || !chosen.length || (!fromOwner && !acc)} onClick={run}>
+        <HandCoins size={16} />{busy ? "در حال ثبت…" : `تسویهٔ ${faDigits(chosen.length)} نفر - جمع ${money(total)}`}
+      </button>
+      {result && <button className="btn w-full" onClick={onDone}>تمام</button>}
+      <Modal open={!!sending} onClose={() => setSending(null)} title="ارسال در واتساپ">
+        {sending && <SendWhatsApp person={person(sending)} text={payoutText(person(sending), "settlement", month, sending.amount, "", paidAt)} />}
+      </Modal>
+    </div>
+  );
 }

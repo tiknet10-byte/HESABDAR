@@ -57,6 +57,7 @@ export const STATUS: Record<string, { label: string; cls: string }> = {
   rejected: { label: "رد شده", cls: "bg-zinc-500/15 text-zinc-500" },
   unmatched: { label: "تطبیق‌نشده", cls: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
   ignored: { label: "نادیده", cls: "bg-zinc-500/15 text-zinc-500" },
+  duplicate: { label: "تکراری", cls: "bg-zinc-500/15 text-zinc-500" },
   booked: { label: "رزرو", cls: "bg-violet-500/15 text-violet-600 dark:text-violet-400" },
   done: { label: "انجام شد", cls: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
   cancelled: { label: "لغو", cls: "bg-zinc-500/15 text-zinc-500" },

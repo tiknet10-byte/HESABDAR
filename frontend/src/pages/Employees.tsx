@@ -1,7 +1,7 @@
 import { BriefcaseBusiness, FileText, HandCoins, Pencil, Plus, Wallet } from "lucide-react";
 import { useEffect, useState } from "react";
 import MonthNav from "../components/MonthNav";
-import { PayoutForm, Statement, kindLabel } from "../components/StaffPay";
+import { PayoutForm, SettleAll, Statement, kindLabel } from "../components/StaffPay";
 import { Card, Empty, Field, Loading, Modal, MoneyInput, PageHeader, Stat } from "../components/ui";
 import { api } from "../lib/api";
 import { cmoney, money } from "../lib/format";
@@ -84,6 +84,7 @@ export default function Employees() {
   const [salaries, setSalaries] = useState(false);
   const [payout, setPayout] = useState<{ row: any; kind: string } | null>(null);
   const [statement, setStatement] = useState<any>(null);
+  const [payAll, setPayAll] = useState(false);
   const reloadAll = () => { reload(); all.reload(); };
   useEffect(() => { document.title = "کارمندان و حقوق"; }, []);
   if (!allowed) return (
@@ -107,6 +108,7 @@ export default function Employees() {
         actions={<div className="flex flex-wrap gap-2">
           {mayEdit && <button className="btn" onClick={() => setEditing({})}><Plus size={16} />کارمند جدید</button>}
           {rows.length > 0 && <button className="btn btn-primary" onClick={() => setSalaries(true)}><Wallet size={16} />ثبت حقوق {monthName(month)}</button>}
+          {rows.length > 0 && <button className="btn" onClick={() => setPayAll(true)}><HandCoins size={16} />پرداخت حقوق همه</button>}
         </div>} />
       <MonthNav month={month} onChange={setMonth} />
       {!data ? <Loading /> : (
@@ -147,7 +149,7 @@ export default function Employees() {
                         <td className={`num font-bold ${r.closing < 0 ? "text-rose-600" : ""}`}>{money(r.closing)}{r.closing < 0 && <div className="text-[10px] font-normal">بدهکار</div>}</td>
                         <td><div className="flex flex-wrap gap-1">
                           <button className="btn btn-sm" onClick={() => setPayout({ row: r, kind: "advance" })}><Wallet size={14} />{kindLabel(true, "advance")}</button>
-                          {r.closing > 0 && <button className="btn btn-sm" onClick={() => setPayout({ row: r, kind: "settlement" })}><HandCoins size={14} />{kindLabel(true, "settlement")}</button>}
+                          {Math.min(r.remaining, r.balance_now) > 0 && <button className="btn btn-sm" onClick={() => setPayout({ row: r, kind: "settlement" })}><HandCoins size={14} />{kindLabel(true, "settlement")}</button>}
                           <button className="btn btn-sm px-2" title="صورت‌حساب ماه" onClick={() => setStatement(r)}><FileText size={14} /></button>
                           {mayEdit && emp && <button className="btn btn-sm px-2" title="ویرایش" onClick={() => setEditing(emp)}><Pencil size={14} /></button>}
                         </div></td>
@@ -172,7 +174,10 @@ export default function Employees() {
       </Modal>
       <Modal open={!!payout} onClose={() => { setPayout(null); reload(); }} title={`${payout ? kindLabel(true, payout.kind) : ""} - ${payout?.row.name ?? ""}`}>
         {payout && <PayoutForm person={{ staff_id: payout.row.staff_id, name: payout.row.name, employee: true, mobile: payout.row.mobile, balance: payout.row.balance_now }}
-          kind={payout.kind} amount={payout.kind === "settlement" ? Math.max(0, payout.row.remaining) : 0} month={month} onDone={() => { setPayout(null); reload(); }} />}
+          kind={payout.kind} amount={payout.kind === "settlement" ? Math.max(0, Math.min(payout.row.remaining, payout.row.balance_now)) : 0} month={month} onDone={() => { setPayout(null); reload(); }} />}
+      </Modal>
+      <Modal open={payAll} onClose={() => { setPayAll(false); reload(); }} title="پرداخت حقوق همهٔ کارمندان" wide>
+        {payAll && <SettleAll who="employee" month={month} onDone={() => { setPayAll(false); reload(); }} />}
       </Modal>
       <Modal open={!!statement} onClose={() => { setStatement(null); reload(); }} title="صورت‌حساب ماه" wide>
         {statement && <Statement staffId={statement.staff_id} month={month} onChanged={reload} />}

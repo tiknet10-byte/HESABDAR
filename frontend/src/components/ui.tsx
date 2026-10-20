@@ -177,7 +177,8 @@ export function Field({ label, children, hint }: { label: string; children: Reac
 }
 
 /** Amount input: user types in display unit (Toman by default), value is kept in Rial. */
-export function MoneyInput({ value, onChange, placeholder }: { value: number; onChange: (rial: number) => void; placeholder?: string }) {
+export function MoneyInput({ value, onChange, placeholder, autoFocus, onEnter }:
+  { value: number; onChange: (rial: number) => void; placeholder?: string; autoFocus?: boolean; onEnter?: () => void }) {
   const [text, setText] = useState(value ? fromRial(value).toLocaleString("en-US") : "");
   useEffect(() => {
     const cur = parseInt(text.replace(/,/g, "") || "0", 10);
@@ -192,6 +193,8 @@ export function MoneyInput({ value, onChange, placeholder }: { value: number; on
         dir="ltr"
         value={text}
         placeholder={placeholder}
+        autoFocus={autoFocus}
+        onKeyDown={(e) => { if (e.key === "Enter" && onEnter) { e.preventDefault(); onEnter(); } }}
         onChange={(e) => {
           // at most 13 digits (a key held down can't make an absurd amount)
           const digits = e.target.value.replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))).replace(/[^\d]/g, "").slice(0, 13);

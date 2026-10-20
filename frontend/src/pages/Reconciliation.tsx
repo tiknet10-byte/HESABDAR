@@ -1,9 +1,12 @@
 import { Landmark, MessageSquareText, ScanLine, Send, Upload } from "lucide-react";
 import { useState } from "react";
+import { BankBooked, BankInboxList, BankRules, LtrNumbers } from "../components/BankInbox";
 import { Badge, Card, Empty, Field, Loading, Modal, PageHeader, Stat, Tabs } from "../components/ui";
 import { api } from "../lib/api";
 import { CHANNELS, jdatetime, money, num } from "../lib/format";
 import { useApi, useToast } from "../lib/hooks";
+
+const SOURCES: Record<string, string> = { bank_api: "API بانک", statement: "فایل صورت‌حساب", bank_sms: "پیامک بانک" };
 
 function AssignDialog({ receipt, onDone }: { receipt: any; onDone: () => void }) {
   const toast = useToast();
@@ -73,7 +76,7 @@ function BankInput({ onDone }: { onDone: () => void }) {
   return (
     <div className="space-y-5">
       <div className="space-y-2">
-        <div className="font-bold">پیامک بانک (واریز به حساب سالن)</div>
+        <div className="font-bold">پیامک بانک (واریز یا برداشت از حساب سالن)</div>
         <p className="muted text-xs">برای خودکارسازی، یک اپ «SMS Forwarder» روی گوشی سالن نصب کنید تا پیامک‌های بانک را به وبهوک امضاشده ارسال کند.</p>
         <select className="input" value={acc} onChange={(e) => setAcc(Number(e.target.value))}>
           <option value={0}>تشخیص خودکار حساب</option>
@@ -86,6 +89,8 @@ function BankInput({ onDone }: { onDone: () => void }) {
       </div>
       <div className="space-y-2 border-t pt-4" style={{ borderColor: "var(--border)" }}>
         <div className="font-bold">ورود صورتحساب بانک (CSV)</div>
+        <p className="muted text-xs leading-6">فایل صورت‌حساب را از اینترنت‌بانک بگیرید (مثلاً هفته‌ای یک بار). اگر همان فایل یا فایل بلندترِ همان روزها را دوباره بدهید، چیزی دو بار ثبت نمی‌شود.
+          پرداخت به کارت پرسنل خودکار ثبت می‌شود و بقیه به «صندوق بانک» می‌رود.</p>
         <select className="input" value={acc} onChange={(e) => setAcc(Number(e.target.value))}>
           <option value={0}>انتخاب حساب…</option>
           {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
@@ -107,7 +112,7 @@ function BankInput({ onDone }: { onDone: () => void }) {
 
 export default function Reconciliation() {
   const toast = useToast();
-  const [tab, setTab] = useState<"receipts" | "bank">("receipts");
+  const [tab, setTab] = useState<"receipts" | "inbox" | "booked" | "rules" | "bank">("receipts");
   const [status, setStatus] = useState("");
   // each part comes from a plugin: only ask a plugin that is turned on (Settings > plugins)
   const plugins = useApi<any[]>("/api/plugins").data;
@@ -118,7 +123,9 @@ export default function Reconciliation() {
   const bank = useApi<any[]>(bankOn ? "/api/plugins/bank_sync/transactions" : null);
   const [assign, setAssign] = useState<any>(null);
   const [modal, setModal] = useState<"sim" | "bank" | null>(null);
-  const reload = () => { receipts.reload(); bank.reload(); };
+  const inbox = useApi<any>(bankOn ? "/api/plugins/bank_sync/inbox" : null);
+  const reload = () => { receipts.reload(); bank.reload(); inbox.reload(); };
+  const bankTab = tab !== "receipts";
   const r = receipts.data ?? [];
 
   return (
@@ -129,16 +136,21 @@ export default function Reconciliation() {
         <Stat label="در انتظار بانک" value={num(r.filter((x) => x.status === "pending").length)} tone="amber" />
         <Stat label="مغایرت" value={num(r.filter((x) => x.status === "mismatch").length)} tone="pink" />
         <Stat label="ثبت‌شده" value={num(r.filter((x) => x.status === "registered").length)} tone="emerald" />
-        <Stat label="تراکنش تطبیق‌نشده" value={num((bank.data ?? []).filter((x) => x.status === "unmatched" && x.direction === "in").length)} tone="sky" />
+        <Stat label="منتظر تصمیم در صندوق بانک" value={num(inbox.data?.rows?.length ?? 0)} tone="sky" onClick={() => setTab("inbox")} />
       </div>
-      <Tabs value={tab} onChange={setTab} items={[{ value: "receipts", label: "رسیدهای مشتریان" }, { value: "bank", label: "تراکنش‌های بانک" }]} />
-      {plugins && ((tab === "receipts" && !receiptsOn) || (tab === "bank" && !bankOn)) && (
+      <Tabs value={tab} onChange={setTab} items={[{ value: "receipts", label: "رسیدهای مشتریان" },
+        { value: "inbox", label: `صندوق بانک${inbox.data?.rows?.length ? ` (${num(inbox.data.rows.length)})` : ""}` },
+        { value: "booked", label: "ثبت‌شده‌ها از بانک" }, { value: "rules", label: "کارت‌های شناخته‌شده" }, { value: "bank", label: "همهٔ تراکنش‌های بانک" }]} />
+      {plugins && ((tab === "receipts" && !receiptsOn) || (bankTab && !bankOn)) && (
         <div className="card p-4 text-sm">
           {tab === "receipts" ? "دریافت رسید مشتری‌ها (پیامک، واتساپ، اینستاگرام) خاموش است." : "دریافت تراکنش‌های بانک خاموش است."}{" "}
           برای روشن کردن به «تنظیمات ← افزونه‌ها» بروید{tab === "receipts" ? " (برای واتساپ و اینستاگرام کلید App Secret متا هم لازم است)" : ""}.
         </div>
       )}
-      {tab === "receipts" && !receiptsOn ? null : tab === "receipts" ? (
+      {bankOn && tab === "inbox" && <BankInboxList onChanged={reload} />}
+      {bankOn && tab === "booked" && <BankBooked onChanged={reload} />}
+      {bankOn && tab === "rules" && <BankRules />}
+      {(tab === "receipts" && !receiptsOn) || ["inbox", "booked", "rules"].includes(tab) ? null : tab === "receipts" ? (
         <Card pad={false}>
           <div className="p-4"><Tabs value={status} onChange={setStatus} items={[{ value: "", label: "همه" }, { value: "pending", label: "در انتظار" }, { value: "matched", label: "تطبیق (منتظر تأیید)" }, { value: "mismatch", label: "مغایرت" }, { value: "registered", label: "ثبت‌شده" }]} /></div>
           <div className="overflow-x-auto">
@@ -175,17 +187,20 @@ export default function Reconciliation() {
           <div className="overflow-x-auto">
             {!bankOn ? null : !bank.data ? <Loading /> : bank.data.length === 0 ? <Empty text="تراکنشی دریافت نشده" /> : (
               <table className="table">
-                <thead><tr><th>زمان</th><th>مبلغ</th><th>نوع</th><th>پیگیری</th><th>منبع</th><th>وضعیت</th><th>تطبیق با</th><th></th></tr></thead>
+                <thead><tr><th>زمان</th><th>مبلغ</th><th>نوع</th><th>حساب</th><th>طرف حساب / شرح</th><th>پیگیری</th><th>منبع</th><th>وضعیت</th><th>ثبت شد به‌عنوان</th><th></th></tr></thead>
                 <tbody>{bank.data.map((t) => (
                   <tr key={t.id}>
                     <td className="num muted">{jdatetime(t.occurred_at)}</td>
-                    <td className={`num font-semibold ${t.direction === "in" ? "text-emerald-600" : "text-rose-600"}`}>{t.direction === "in" ? "+" : "−"}{money(t.amount)}</td>
-                    <td>{t.direction === "in" ? "واریز" : "برداشت"}</td>
+                    <td className={`num font-semibold ${t.direction === "in" ? "text-emerald-600" : t.direction === "out" ? "text-rose-600" : "text-amber-600"}`}>{t.direction === "in" ? "+" : t.direction === "out" ? "−" : "?"}{money(t.amount)}</td>
+                    <td>{t.direction === "in" ? "واریز" : t.direction === "out" ? "برداشت" : "نامعلوم"}</td>
+                    <td className="text-xs">{t.account ?? "—"}</td>
+                    <td className="max-w-64 text-xs">{(t.counterparty_name || t.counterparty) && <div className="font-semibold">{t.counterparty_name} <span className="num muted" dir="ltr">{t.counterparty}</span></div>}
+                      <div className="muted truncate" title={t.description}><LtrNumbers text={t.description} /></div></td>
                     <td className="num">{t.reference ?? "—"}</td>
-                    <td className="muted text-xs">{t.source}</td>
+                    <td className="muted text-xs">{SOURCES[t.source] ?? t.source}</td>
                     <td><Badge status={t.status} /></td>
-                    <td className="muted text-xs">{t.matched_type ? `${t.matched_type} #${t.matched_id}` : ""}</td>
-                    <td>{t.status === "unmatched" && <button className="btn btn-sm" onClick={async () => { await api(`/api/plugins/bank_sync/transactions/${t.id}/ignore`, { method: "POST" }); bank.reload(); }}>نادیده</button>}</td>
+                    <td className="text-xs">{t.matched_label ?? ""}</td>
+                    <td>{t.status === "unmatched" && <button className="btn btn-sm" onClick={async () => { await api(`/api/plugins/bank_sync/transactions/${t.id}/ignore`, { method: "POST" }); reload(); }}>نادیده</button>}</td>
                   </tr>
                 ))}</tbody>
               </table>

@@ -1,5 +1,5 @@
 import {
-  BarChart3, Bell, BookOpenCheck, BriefcaseBusiness, Bot, CalendarClock, Camera, Gem, HandCoins, LayoutDashboard, LogOut, Menu, Moon, Package, Receipt,
+  BarChart3, Bell, BookOpenCheck, BriefcaseBusiness, Bot, CalendarClock, Camera, Gem, HandCoins, Landmark, LayoutDashboard, LogOut, Menu, Moon, Package, Receipt,
   ScanLine, Settings, Sun, Users, UsersRound, Wallet, X,
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
@@ -38,6 +38,7 @@ const NAV: { group: string; items: Item[] }[] = [
       { to: "/capital", label: "سرمایه و دارایی‌ها", icon: <Gem size={19} />, perm: "capital" },
       { to: "/reports", label: "گزارش و پیش‌بینی", icon: <BarChart3 size={19} />, perm: "reports" },
       { to: "/staff", label: "پرسنل و سهم‌ها", icon: <UsersRound size={19} />, perm: "reports" },
+      { to: "/treasury", label: "خزانهٔ لاین‌ها", icon: <Landmark size={19} />, perm: "reports" },
       { to: "/employees", label: "کارمندان و حقوق", icon: <BriefcaseBusiness size={19} />, perm: "finance" },
       { to: "/expenses", label: "هزینه‌ها", icon: <Wallet size={19} />, perm: "finance" },
       { to: "/ledger", label: "دفاتر حسابداری", icon: <BookOpenCheck size={19} />, perm: "finance" },

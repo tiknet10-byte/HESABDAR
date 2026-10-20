@@ -1,4 +1,4 @@
-import { Ban, Coffee, ListChecks, Plus, Search, Settings2, Wallet } from "lucide-react";
+import { Ban, Coffee, Landmark, ListChecks, Plus, Search, Settings2, Wallet } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import AccountSelect from "../components/AccountSelect";
@@ -30,10 +30,15 @@ const EXAMPLES: Record<string, string> = {
 const SALARY = "حقوق و دستمزد";
 const COMMISSION = "پورسانت پرسنل";
 
-function QuickAdd({ onDone }: { onDone: () => void }) {
+export function QuickAdd({ onDone, lineId: line0 = 0, fromTreasury: ft0 = false }: { onDone: () => void; lineId?: number; fromTreasury?: boolean }) {
   const toast = useToast();
   const cats = useApi<any>("/api/expenses/categories").data;
-  const [category, setCategory] = useState("");
+  const lines = (useApi<any[]>("/api/lines").data ?? []).filter((l) => l.is_active || l.id === line0);
+  const staffOfLine = (useApi<any[]>("/api/staff").data ?? []).filter((p) => p.is_active);
+  const [lineId, setLineId] = useState(line0);
+  const [fromTreasury, setFromTreasury] = useState(ft0 && !!line0);
+  const [staffId, setStaffId] = useState(0);
+  const [category, setCategory] = useState(ft0 ? "مواد مصرفی" : "");
   const [other, setOther] = useState(false);
   const [amount, setAmount] = useState(0);
   const [acc, setAcc] = useState(0);
@@ -46,8 +51,9 @@ function QuickAdd({ onDone }: { onDone: () => void }) {
   async function save(force = false) {
     setBusy(true);
     try {
-      const r: any = await api("/api/expenses", { body: { category, amount, payment_account_id: acc, spent_at: at, description, force } });
-      toast(`هزینهٔ «${r.category}» ${money(amount)} ثبت شد`);
+      const r: any = await api("/api/expenses", { body: { category, amount, payment_account_id: acc, spent_at: at, description, force,
+        line_id: lineId || null, from_treasury: fromTreasury && !!lineId, staff_id: fromTreasury && staffId ? staffId : null } });
+      toast(`هزینهٔ «${r.category}» ${money(amount)} ثبت شد${fromTreasury && lineId ? " (از خزانه)" : ""}`);
       setAmount(0);
       setDescription("");
       setDup(null);
@@ -79,8 +85,23 @@ function QuickAdd({ onDone }: { onDone: () => void }) {
           سهم پرسنل را اینجا ثبت نکنید: سهم هر خدمت خودش حساب می‌شود؛ پرداخت به پرسنل را در صفحهٔ <Link to="/staff" className="font-bold underline">پرسنل و سهم‌ها</Link> با «برداشتی» یا «تسویه» ثبت کنید (وگرنه دو بار از سود کم می‌شود).</div>}
       </Field>
       <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="برای کدام لاین؟ (اختیاری)" hint="مثلاً مواد مصرفی لاین لیزر">
+          <select className="input" value={lineId} onChange={(e) => { const v = Number(e.target.value); setLineId(v); if (!v) setFromTreasury(false); }}>
+            <option value={0}>— همهٔ کلینیک —</option>{lines.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        </Field>
+        <Field label="از خزانه؟">
+          <label className={`flex items-center gap-2 rounded-xl border p-2 text-sm ${!lineId ? "opacity-50" : ""}`} style={{ borderColor: "var(--border)" }}>
+            <input type="checkbox" disabled={!lineId} checked={fromTreasury} onChange={(e) => setFromTreasury(e.target.checked)} />از خزانهٔ همین لاین خرج شد
+          </label>
+          {fromTreasury && lineId > 0 && (
+            <select className="input mt-1 text-sm" value={staffId} onChange={(e) => setStaffId(Number(e.target.value))}>
+              <option value={0}>خزانهٔ کل لاین</option>
+              {staffOfLine.filter((p) => p.line_id === lineId).map((p) => <option key={p.id} value={p.id}>خزانهٔ {p.full_name}</option>)}
+            </select>)}
+        </Field>
         <Field label="مبلغ"><MoneyInput value={amount} onChange={setAmount} /></Field>
-        <Field label="پرداخت از"><AccountSelect value={acc} onChange={setAcc} /></Field>
+        <Field label="پرداخت از"><AccountSelect value={acc} onChange={setAcc} remember="expense" /></Field>
         <Field label="تاریخ"><JalaliPicker pastOnly value={at} onChange={setAt} /></Field>
         <Field label="توضیح (اختیاری)"><input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="مثلاً ۲ بسته قهوه" /></Field>
       </div>
@@ -93,6 +114,36 @@ function QuickAdd({ onDone }: { onDone: () => void }) {
       <button className="btn btn-primary w-full py-3" disabled={!amount || !category.trim() || !acc || busy} onClick={() => save(false)}>
         <Plus size={16} />ثبت هزینه {amount ? money(amount) : ""}
       </button>
+    </div>
+  );
+}
+
+/** an expense entered before: which line (and staff member) it was for and whether it came from that line's treasury */
+function TagExpense({ e, onDone }: { e: any; onDone: () => void }) {
+  const toast = useToast();
+  const lines = (useApi<any[]>("/api/lines").data ?? []).filter((l) => l.is_active || l.id === e.line_id);
+  const staff = (useApi<any[]>("/api/staff").data ?? []).filter((p) => p.is_active || p.id === e.staff_id);
+  const [lineId, setLineId] = useState<number>(e.line_id ?? 0);
+  const [fromTreasury, setFromTreasury] = useState<boolean>(!!e.from_treasury);
+  const [staffId, setStaffId] = useState<number>(e.staff_id ?? 0);
+  return (
+    <div className="space-y-3 text-sm">
+      <div className="rounded-2xl p-3" style={{ background: "var(--surface)" }}>{e.category} · <b className="num">{money(e.amount)}</b> · {jdate(e.spent_at)}</div>
+      <Field label="برای لاین">
+        <select className="input" value={lineId} onChange={(ev) => { const v = Number(ev.target.value); setLineId(v); if (!v) setFromTreasury(false); }}>
+          <option value={0}>— همهٔ کلینیک —</option>{lines.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+        </select>
+      </Field>
+      <label className="flex items-center gap-2"><input type="checkbox" disabled={!lineId} checked={fromTreasury} onChange={(ev) => setFromTreasury(ev.target.checked)} />از خزانهٔ همین لاین خرج شد</label>
+      {fromTreasury && <Field label="خزانهٔ کدام پرسنل؟">
+        <select className="input" value={staffId} onChange={(ev) => setStaffId(Number(ev.target.value))}>
+          <option value={0}>خزانهٔ کل لاین</option>{staff.filter((p) => p.line_id === lineId).map((p) => <option key={p.id} value={p.id}>{p.full_name}</option>)}
+        </select></Field>}
+      <p className="muted text-xs leading-6">مبلغ، تاریخ و حساب عوض نمی‌شود و هزینه همان‌طور از سود کم می‌شود؛ فقط معلوم می‌شود از خزانهٔ کدام لاین بوده.</p>
+      <button className="btn btn-primary w-full" onClick={async () => {
+        try { await api(`/api/expenses/${e.id}/treasury`, { body: { line_id: lineId || null, from_treasury: fromTreasury && !!lineId, staff_id: staffId || null } }); toast("ذخیره شد"); onDone(); }
+        catch (err: any) { toast(err.message, "error"); }
+      }}>ذخیره</button>
     </div>
   );
 }
@@ -122,6 +173,7 @@ export default function Expenses() {
   const { data, reload } = useApi<any>(`/api/expenses?jy=${month[0]}&jm=${month[1]}&q=${encodeURIComponent(q)}&category=${encodeURIComponent(cat)}`, [month[0], month[1], q, cat]);
   const [adding, setAdding] = useState(false);
   const [editCats, setEditCats] = useState(false);
+  const [tagging, setTagging] = useState<any>(null);
   const profit = data?.profit?.total ?? 0;
   const general = (data?.total ?? 0) - (data?.salaries ?? 0);
   const biggest = data?.by_category?.find((c: any) => c.name !== SALARY); // the general expenses' biggest (not salaries)
@@ -143,7 +195,7 @@ export default function Expenses() {
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
             <Stat label={`هزینه‌های ${monthName(month)}`} value={cmoney(data.total)} tone="pink" icon={<Coffee size={18} />}
               help="جمع همهٔ هزینه‌های این ماه در دفاتر: خریدهای کلینیک و حقوق کارمندان (هزینه‌ای که باطل شده حساب نمی‌شود)." />
-            <Stat label="هزینه‌های عمومی" value={cmoney(general)} tone="amber" hint={biggest ? `بیشترین: ${biggest.name}` : undefined} />
+            <Stat label="هزینه‌های عمومی" value={cmoney(general)} tone="amber" hint={[biggest ? `بیشترین: ${biggest.name}` : "", data.treasury_spent ? `از خزانهٔ لاین‌ها: ${cmoney(data.treasury_spent)}` : ""].filter(Boolean).join(" · ") || undefined} />
             <Link to="/employees"><Stat label="حقوق کارمندان" value={cmoney(data.salaries)} tone="sky" hint="از صفحهٔ کارمندان" /></Link>
             <Stat label={`سود ${monthName(month)}`} value={cmoney(profit)} tone={profit < 0 ? "pink" : "emerald"}
               hint={sameMonth(month, thisMonth()) ? "تا امروز" : undefined}
@@ -179,11 +231,16 @@ export default function Expenses() {
                     <tbody>{data.rows.map((e: any) => (
                       <tr key={e.id} className={e.voided_at ? "opacity-50" : ""}>
                         <td className="num muted">{jdate(e.spent_at)}</td>
-                        <td className="font-semibold">{e.category}</td>
+                        <td className="font-semibold">{e.category}
+                          {(e.line || e.from_treasury) && <div className="text-[11px] font-normal">{e.line && <span className="muted">{e.line}</span>}
+                            {e.from_treasury && <span className="badge mr-1 bg-violet-500/15 text-[10px] text-violet-700 dark:text-violet-300">از خزانه</span>}</div>}</td>
                         <td className={`num ${e.voided_at ? "line-through" : ""}`}>{money(e.amount)}</td>
                         <td>{e.account ?? "—"}</td>
                         <td className="muted">{e.description}{e.voided_at && <div className="text-xs text-rose-600">باطل شد{e.void_reason ? `: ${e.void_reason}` : ""}</div>}</td>
-                        <td>{!e.voided_at && can(user, "void") && <button className="btn btn-sm px-2 text-rose-600" title="باطل کردن (اشتباه ثبت شده)" onClick={() => voidOne(e)}><Ban size={13} /></button>}</td>
+                        <td><div className="flex gap-1">
+                          {!e.voided_at && e.category !== SALARY && <button className="btn btn-sm px-2" title="لاین و خزانه" onClick={() => setTagging(e)}><Landmark size={13} /></button>}
+                          {!e.voided_at && can(user, "void") && <button className="btn btn-sm px-2 text-rose-600" title="باطل کردن (اشتباه ثبت شده)" onClick={() => voidOne(e)}><Ban size={13} /></button>}
+                        </div></td>
                       </tr>
                     ))}</tbody>
                   </table>
@@ -196,6 +253,9 @@ export default function Expenses() {
       )}
       <Modal open={adding} onClose={() => setAdding(false)} title="ثبت هزینه">
         {adding && <QuickAdd onDone={() => reload()} />}
+      </Modal>
+      <Modal open={!!tagging} onClose={() => setTagging(null)} title="این هزینه برای کدام لاین بود؟">
+        {tagging && <TagExpense e={tagging} onDone={() => { setTagging(null); reload(); }} />}
       </Modal>
       <Modal open={editCats} onClose={() => setEditCats(false)} title="دسته‌های هزینه">
         {editCats && <CategoryEditor onDone={() => setEditCats(false)} />}

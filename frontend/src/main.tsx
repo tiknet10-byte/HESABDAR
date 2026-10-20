@@ -26,6 +26,7 @@ import PrintStaff from "./pages/PrintStaff";
 import Employees from "./pages/Employees";
 import SettingsPage from "./pages/Settings";
 import StaffShares from "./pages/StaffShares";
+import Treasury from "./pages/Treasury";
 import { Loading } from "./components/ui";
 
 function VersionBanner() {
@@ -109,6 +110,7 @@ function App() {
                 <Route path="assistant" element={<Assistant />} />
                 <Route path="reports" element={<Reports />} />
                 <Route path="staff" element={<StaffShares />} />
+                <Route path="treasury" element={<Treasury />} />
                 <Route path="employees" element={<Employees />} />
                 <Route path="expenses" element={<Expenses />} />
                 <Route path="capital" element={<Capital />} />

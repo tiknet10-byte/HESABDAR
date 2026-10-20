@@ -381,7 +381,7 @@ def settle_plan(db: Session, jy: int, jm: int, who: str = "all") -> list[dict]:
         else:
             why = "چیزی برای پرداخت نیست"
         out.append({"staff_id": p.id, "name": p.full_name, "mobile": p.mobile, "employee": emp, "active": p.is_active,
-                    "job_title": p.job_title, "salary": p.salary, "earned": st["earned_total"], "given": st["given"],
+                    "job_title": p.job_title, "salary": p.salary, "opening": st["opening"], "earned": st["earned_total"], "given": st["given"],
                     "closing": st["closing"], "paid_later": st["paid_later"], "remaining": st["remaining"],
                     "balance_now": st["balance_now"], "due": due, "why": why,
                     "salary_missing": emp and not booked_salary and bool(p.salary)})

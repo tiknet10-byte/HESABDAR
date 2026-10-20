@@ -407,6 +407,12 @@ def suggestions(db: Session, tx: BankTransaction) -> list[dict]:
                         "why": "مثل دفعه‌های قبل", "rule_id": r.id})
         elif r.target_type == "ignore":
             out.append({"action": "book", "target": "ignore", "label": "کنار گذاشتن", "why": "مثل دفعه‌های قبل", "rule_id": r.id})
+    from .textutil import normalize_text
+
+    if tx.direction == "out" and not any(s.get("target") == "expense" for s in out) and \
+            any(w in normalize_text(tx.description or "") for w in ("کارمزد", "هزینه خدمات", "حق اشتراک")):
+        out.append({"action": "book", "target": "expense", "category": "کارمزد بانکی", "line_id": None, "from_treasury": False,
+                    "label": "هزینهٔ کارمزد بانکی", "why": "کلمهٔ «کارمزد» در شرح"})
     if tx.direction == "out" and not any(s.get("target") == "staff" for s in out):
         people = [p for p in db.scalars(select(Staff).where(Staff.is_active.is_(True)).order_by(Staff.id))]
         hit = suggest_staff(tx.counterparty_name, people) if tx.counterparty_name else None
@@ -428,7 +434,8 @@ def tx_row(db: Session, tx: BankTransaction, accounts: dict[int, str] | None = N
            "direction": tx.direction, "occurred_at": tx.occurred_at.isoformat(timespec="minutes"), "reference": tx.reference,
            "description": tx.description, "status": tx.status, "matched_type": tx.matched_type, "matched_id": tx.matched_id,
            "matched_label": LABELS.get(tx.matched_type or ""), "source": tx.source, "counterparty": tx.counterparty_mask,
-           "counterparty_name": tx.counterparty_name, "auto_booked": tx.auto_booked, "rule_id": tx.rule_id,
+           "counterparty_name": tx.counterparty_name, "has_card": tx.counterparty_hash is not None,
+           "auto_booked": tx.auto_booked, "rule_id": tx.rule_id,
            "duplicate_of_id": tx.duplicate_of_id, "booked_at": tx.booked_at.isoformat(timespec="minutes") if tx.booked_at else None,
            "can_undo": tx.status == "ignored" or (tx.status == "matched" and tx.matched_type in ("staff_payout", "expense", "capital"))}
     if tx.status == "matched" and tx.matched_type == "staff_payout":
