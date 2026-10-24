@@ -39,7 +39,8 @@ function BookDialog({ t, preset, onDone }: { t: any; preset?: any; onDone: (r: a
   const staff = (useApi<any[]>("/api/staff?kind=all").data ?? []).filter((p) => p.is_active);
   const lines = (useApi<any[]>("/api/lines").data ?? []).filter((l) => l.is_active);
   const cats = useApi<any>("/api/expenses/categories").data;
-  const [target, setTarget] = useState<string>(preset?.target ?? (t.direction === "out" ? "staff" : "owner"));
+  const capitalOk = can(user, "capital");
+  const [target, setTarget] = useState<string>(preset?.target ?? (t.direction === "out" ? "staff" : capitalOk ? "owner" : "ignore"));
   const [staffId, setStaffId] = useState<number>(preset?.staff_id ?? 0);
   const [kind, setKind] = useState<string>(preset?.kind ?? "");
   const [ym, setYm] = useState<YM | null>(preset?.jy ? [preset.jy, preset.jm] : null);
@@ -49,20 +50,26 @@ function BookDialog({ t, preset, onDone }: { t: any; preset?: any; onDone: (r: a
   const [remember, setRemember] = useState(!!(t.has_card || t.counterparty_name));
   const [auto, setAuto] = useState(!!t.has_card && can(user, "settings"));
   const [busy, setBusy] = useState(false);
-  const options = t.direction === "out"
+  const [dup, setDup] = useState<string | null>(null);
+  const options = (t.direction === "out"
     ? [["staff", "پرداخت به پرسنل / کارمند"], ["expense", "هزینهٔ کلینیک"], ["owner", "پول خود مدیر (برداشت شخصی)"], ["ignore", "کنار گذاشتن (به حساب خودمان، تکراری…)"]]
-    : [["owner", "آوردن سرمایه (پول خود مدیر)"], ["ignore", "کنار گذاشتن"]];
-  async function save() {
+    : [["owner", "آوردن سرمایه (پول خود مدیر)"], ["ignore", "کنار گذاشتن"]]).filter(([k]) => k !== "owner" || capitalOk);
+  // setting aside is never remembered (a card is never set aside by itself)
+  const keep = remember && target !== "ignore";
+  async function save(force = false) {
     setBusy(true);
     try {
       const r = await api(`${BASE}/transactions/${t.id}/book`, { body: {
         target, staff_id: target === "staff" ? staffId : null, kind: kind || null, jy: ym?.[0] ?? null, jm: ym?.[1] ?? null,
         category: target === "expense" ? category : null, line_id: target === "expense" && lineId ? lineId : null,
-        from_treasury: target === "expense" && fromTreasury, remember, auto: remember && auto,
+        from_treasury: target === "expense" && fromTreasury, remember: keep, auto: keep && auto, force,
       } });
       toast(target === "ignore" ? "کنار گذاشته شد" : "ثبت شد" + (r.remembered ? (r.rule_auto ? "؛ دفعهٔ بعد خودکار ثبت می‌شود" : "؛ دفعهٔ بعد پیشنهاد می‌شود") : ""));
+      if (r.remember_note) toast(`به خاطر سپرده نشد: ${r.remember_note}`, "error");
       onDone(r);
-    } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
+    } catch (e: any) {
+      if (e.status === 409) setDup(e.message); else toast(e.message, "error");
+    } finally { setBusy(false); }
   }
   return (
     <div className="space-y-3 text-sm">
@@ -116,7 +123,13 @@ function BookDialog({ t, preset, onDone }: { t: any; preset?: any; onDone: (r: a
           {remember && !t.has_card && <div className="muted">با نام فقط پیشنهاد می‌شود (نام برای ثبت خودکار کافی نیست).</div>}
         </div>
       )}
-      <button className="btn btn-primary w-full py-3" disabled={busy || (target === "staff" && !staffId) || (target === "expense" && !category.trim())} onClick={save}>
+      {dup && (
+        <div className="space-y-2 rounded-2xl bg-rose-500/10 p-3 text-sm">
+          <div>{dup}</div>
+          <button className="btn btn-sm btn-danger" disabled={busy} onClick={() => save(true)}>بله، پرداخت جداگانه‌ای است؛ ثبت شود</button>
+        </div>
+      )}
+      <button className="btn btn-primary w-full py-3" disabled={busy || (target === "staff" && !staffId) || (target === "expense" && !category.trim())} onClick={() => save(false)}>
         <Check size={16} />{target === "ignore" ? "کنار گذاشتن" : "ثبت"}</button>
     </div>
   );
@@ -135,17 +148,21 @@ export function BankInboxList({ onChanged }: { onChanged?: () => void }) {
     changed();
     if (r?.target === "staff" && r.staff_id) setSent(r);
   };
-  async function quick(t: any, s: any) {
+  async function quick(t: any, s: any, force = false) {
     try {
       if (s.action === "link") await api(`${BASE}/transactions/${t.id}/link`, { body: { type: s.type, id: s.id } });
       else {
         const r = await api(`${BASE}/transactions/${t.id}/book`, { body: { target: s.target, staff_id: s.staff_id ?? null, kind: s.kind ?? null,
-          jy: s.jy ?? null, jm: s.jm ?? null, category: s.category ?? null, line_id: s.line_id ?? null, from_treasury: !!s.from_treasury } });
+          jy: s.jy ?? null, jm: s.jm ?? null, category: s.category ?? null, line_id: s.line_id ?? null, from_treasury: !!s.from_treasury, force } });
         if (r.target === "staff") setSent(r);
       }
       toast("ثبت شد");
       changed();
-    } catch (e: any) { toast(e.message, "error"); }
+    } catch (e: any) {
+      // maybe the same money entered by hand: say so, and book it anyway only when the person confirms
+      if (e.status === 409 && window.confirm(`${e.message}\n\nپرداخت جداگانه‌ای است و ثبت شود؟`)) return quick(t, s, true);
+      if (e.status !== 409) toast(e.message, "error");
+    }
   }
   async function direction(t: any, d: string) {
     try { await api(`${BASE}/transactions/${t.id}/direction`, { body: { direction: d } }); changed(); } catch (e: any) { toast(e.message, "error"); }

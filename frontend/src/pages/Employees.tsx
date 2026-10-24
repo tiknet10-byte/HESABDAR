@@ -179,7 +179,7 @@ export default function Employees() {
       <Modal open={payAll} onClose={() => { setPayAll(false); reload(); }} title="پرداخت حقوق همهٔ کارمندان" wide>
         {payAll && <SettleAll who="employee" month={month} onDone={() => { setPayAll(false); reload(); }} />}
       </Modal>
-      <Modal open={!!statement} onClose={() => { setStatement(null); reload(); }} title="صورت‌حساب ماه" wide>
+      <Modal open={!!statement} onClose={() => { setStatement(null); reloadAll(); }} title="صورت‌حساب ماه" wide>
         {statement && <Statement staffId={statement.staff_id} month={month} onChanged={reload} />}
       </Modal>
     </div>

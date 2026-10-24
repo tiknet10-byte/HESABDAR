@@ -86,7 +86,7 @@ export function QuickAdd({ onDone, lineId: line0 = 0, fromTreasury: ft0 = false 
       </Field>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="برای کدام لاین؟ (اختیاری)" hint="مثلاً مواد مصرفی لاین لیزر">
-          <select className="input" value={lineId} onChange={(e) => { const v = Number(e.target.value); setLineId(v); if (!v) setFromTreasury(false); }}>
+          <select className="input" value={lineId} onChange={(e) => { const v = Number(e.target.value); setLineId(v); setStaffId(0); if (!v) setFromTreasury(false); }}>
             <option value={0}>— همهٔ کلینیک —</option>{lines.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
         </Field>
@@ -130,7 +130,7 @@ function TagExpense({ e, onDone }: { e: any; onDone: () => void }) {
     <div className="space-y-3 text-sm">
       <div className="rounded-2xl p-3" style={{ background: "var(--surface)" }}>{e.category} · <b className="num">{money(e.amount)}</b> · {jdate(e.spent_at)}</div>
       <Field label="برای لاین">
-        <select className="input" value={lineId} onChange={(ev) => { const v = Number(ev.target.value); setLineId(v); if (!v) setFromTreasury(false); }}>
+        <select className="input" value={lineId} onChange={(ev) => { const v = Number(ev.target.value); setLineId(v); setStaffId(0); if (!v) setFromTreasury(false); }}>
           <option value={0}>— همهٔ کلینیک —</option>{lines.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
         </select>
       </Field>
@@ -141,7 +141,12 @@ function TagExpense({ e, onDone }: { e: any; onDone: () => void }) {
         </select></Field>}
       <p className="muted text-xs leading-6">مبلغ، تاریخ و حساب عوض نمی‌شود و هزینه همان‌طور از سود کم می‌شود؛ فقط معلوم می‌شود از خزانهٔ کدام لاین بوده.</p>
       <button className="btn btn-primary w-full" onClick={async () => {
-        try { await api(`/api/expenses/${e.id}/treasury`, { body: { line_id: lineId || null, from_treasury: fromTreasury && !!lineId, staff_id: staffId || null } }); toast("ذخیره شد"); onDone(); }
+        try {
+          await api(`/api/expenses/${e.id}/treasury`, { body: { line_id: lineId || null, from_treasury: fromTreasury && !!lineId,
+            staff_id: fromTreasury && lineId ? (staffId || null) : (e.staff_id ?? null) } });
+          toast("ذخیره شد");
+          onDone();
+        }
         catch (err: any) { toast(err.message, "error"); }
       }}>ذخیره</button>
     </div>

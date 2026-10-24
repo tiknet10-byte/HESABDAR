@@ -13,6 +13,8 @@ import { QuickAdd } from "./Expenses";
 /** The balance a line's treasury had when the program started (owner / admin), or money spent from it before the start. */
 function MoveForm({ lines, lineId: line0, kind: kind0, onDone }: { lines: any[]; lineId: number; kind: string; onDone: () => void }) {
   const toast = useToast();
+  const { user } = useAuth();
+  const openingOk = can(user, "settings"); // the treasury's balance at the start: owner / admin
   const staff = (useApi<any[]>("/api/staff").data ?? []).filter((p) => p.is_active);
   const [kind, setKind] = useState(kind0);
   const [lineId, setLineId] = useState(line0 || lines[0]?.id || 0);
@@ -27,14 +29,15 @@ function MoveForm({ lines, lineId: line0, kind: kind0, onDone }: { lines: any[];
     <div className="space-y-3 text-sm">
       <div className="grid grid-cols-2 gap-2">
         {[["opening", "موجودی اول خزانه", "مانده‌ای که خزانهٔ این لاین روز شروع کار با برنامه داشت"],
-          ["spent_before", "خرج پیش از شروع برنامه", "خرجی که قبل از شروع کار با برنامه از خزانه شده (از حساب‌ها کم نمی‌شود)"]].map(([k, label, hint]) => (
+          ["spent_before", "خرج پیش از شروع برنامه", "خرجی که قبل از شروع کار با برنامه از خزانه شده (از حساب‌ها کم نمی‌شود)"]]
+          .filter(([k]) => k !== "opening" || openingOk).map(([k, label, hint]) => (
           <button key={k} type="button" className={`rounded-2xl border p-3 text-right ${kind === k ? "border-violet-500 bg-violet-500/10 font-bold" : ""}`}
             style={kind === k ? undefined : { borderColor: "var(--border)" }} onClick={() => setKind(k)}>
             <div>{label}</div><div className="muted text-[11px] font-normal leading-5">{hint}</div></button>
         ))}
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="لاین"><select className="input" value={lineId} onChange={(e) => setLineId(Number(e.target.value))}>{lines.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></Field>
+        <Field label="لاین"><select className="input" value={lineId} onChange={(e) => { setLineId(Number(e.target.value)); setStaffId(0); }}>{lines.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></Field>
         <Field label="خزانهٔ پرسنل (اختیاری)"><select className="input" value={staffId} onChange={(e) => setStaffId(Number(e.target.value))}>
           <option value={0}>کل لاین</option>{staff.filter((p) => p.line_id === lineId).map((p) => <option key={p.id} value={p.id}>{p.full_name}</option>)}</select></Field>
         <Field label="مبلغ"><MoneyInput value={amount} onChange={setAmount} autoFocus />

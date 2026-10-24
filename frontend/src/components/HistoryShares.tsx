@@ -76,7 +76,10 @@ export function MonthsTable() {
 function BookMonth({ m, onDone }: { m: any; onDone: () => void }) {
   const toast = useToast();
   const [percents, setPercents] = useState<Record<string, string>>({});
-  const body = Object.fromEntries(Object.entries(percents).filter(([, v]) => v.trim() !== "").map(([k, v]) => [k, Number(v.replace(/[٫/]/g, "."))]));
+  // «۴۰» / «٤٠» / «۳۵٫۵» as typed on a Persian keyboard
+  const toNum = (v: string) => Number(v.replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))).replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
+    .replace(/[٫/,]/g, ".").replace(/[٪%\s]/g, ""));
+  const body = Object.fromEntries(Object.entries(percents).filter(([, v]) => v.trim() !== "").map(([k, v]) => [k, toNum(v)]));
   const valid = Object.values(body).every((v) => Number.isFinite(v) && v >= 0 && v <= 100);
   const key = JSON.stringify(body);
   const [pv, setPv] = useState<any>(null);

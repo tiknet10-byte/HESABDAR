@@ -211,9 +211,13 @@ function MoveForm({ kind, onDone }: { kind: "add" | "withdraw"; onDone: () => vo
   const toast = useToast();
   const [f, setF] = useState({ amount: 0, payment_account_id: 0, at: toLocalIso(new Date()), notes: "" });
   const [busy, setBusy] = useState(false);
-  async function save() {
+  async function save(force = false) {
     setBusy(true);
-    try { await api("/api/capital/moves", { body: { kind, ...f } }); toast("ثبت شد"); onDone(); } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
+    try { await api("/api/capital/moves", { body: { kind, ...f, force } }); toast("ثبت شد"); onDone(); } catch (e: any) {
+      // the same money was booked from the bank already: booked again only when the owner says it is another one
+      if (e.status === 409 && window.confirm(`${e.message}\n\nجداگانه است و ثبت شود؟`)) { setBusy(false); return save(true); }
+      if (e.status !== 409) toast(e.message, "error");
+    } finally { setBusy(false); }
   }
   return (
     <div className="space-y-3">
@@ -222,7 +226,7 @@ function MoveForm({ kind, onDone }: { kind: "add" | "withdraw"; onDone: () => vo
       <Field label={kind === "add" ? "به حساب" : "از حساب"}><AccountSelect value={f.payment_account_id} onChange={(id) => setF((x) => ({ ...x, payment_account_id: id }))} /></Field>
       <Field label="تاریخ"><JalaliPicker pastOnly value={f.at} onChange={(v) => setF({ ...f, at: v })} /></Field>
       <Field label="توضیح (اختیاری)"><input className="input" value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} /></Field>
-      <button className="btn btn-primary w-full" disabled={!f.amount || busy} onClick={save}>ثبت</button>
+      <button className="btn btn-primary w-full" disabled={!f.amount || busy} onClick={() => save(false)}>ثبت</button>
     </div>
   );
 }

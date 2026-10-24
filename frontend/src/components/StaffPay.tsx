@@ -434,7 +434,7 @@ export function Statement({ staffId, month: month0, onChanged }: { staffId: numb
         {paying && <PayoutForm person={person} kind={paying.kind} amount={paying.amount} month={month} booksStart={st.books_start}
           onDone={() => { setPaying(null); changed(); }} />}
       </Modal>
-      <PayCards staffId={staffId} name={st.name} />
+      <PayCards staffId={staffId} name={st.name} onChanged={changed} />
       <Modal open={!!sending} onClose={() => setSending(null)} title="ارسال در واتساپ">
         {sending && <SendPayout person={person} payout={sending} />}
       </Modal>
@@ -569,7 +569,7 @@ function BatchThumb({ file }: { file: File }) {
 
 /** The cards / IBANs a person is paid on: with the bank connected, money sent to one of them is booked as their payout
  * by itself. Only a mask is kept (never the whole number). */
-export function PayCards({ staffId, name }: { staffId: number; name: string }) {
+export function PayCards({ staffId, name, onChanged }: { staffId: number; name: string; onChanged?: () => void }) {
   const toast = useToast();
   const { user } = useAuth();
   const { data, reload } = useApi<any[]>(`/api/staff/${staffId}/pay-cards`, [staffId]);
@@ -579,7 +579,13 @@ export function PayCards({ staffId, name }: { staffId: number; name: string }) {
   if (!data || (!data.length && !mayEdit)) return null;
   async function add() {
     setBusy(true);
-    try { await api(`/api/staff/${staffId}/pay-cards`, { body: { number: text } }); setText(""); toast("کارت ثبت شد"); reload(); }
+    try {
+      const r = await api(`/api/staff/${staffId}/pay-cards`, { body: { number: text } });
+      setText("");
+      toast(r.booked_now ? `کارت ثبت شد؛ ${faDigits(r.booked_now)} پرداخت قبلی به این کارت از روی بانک ثبت شد (صورت‌حساب را ببینید)` : "کارت ثبت شد");
+      reload();
+      onChanged?.();
+    }
     catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
   }
   return (
@@ -628,13 +634,17 @@ export function SettleAll({ who, month: month0, onDone }: { who: "staff" | "empl
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [sending, setSending] = useState<any>(null);
+  // ticked once per month (what is still to pay); after a run the person's own choices stay
+  const pickedFor = useRef("");
   useEffect(() => {
-    if (!data) return;
+    if (!data || pickedFor.current === `${data.jy}-${data.jm}`) return;
+    pickedFor.current = `${data.jy}-${data.jm}`;
     setPicked(Object.fromEntries(data.rows.map((r: any) => [r.staff_id, { on: r.due > 0, amount: r.due }])));
   }, [data]);
   if (!data) return <Loading />;
   const rows = data.rows as any[];
-  const chosen = rows.filter((r) => picked[r.staff_id]?.on && picked[r.staff_id]?.amount > 0);
+  const paidNow = new Set((result?.done ?? []).map((x: any) => x.staff_id));
+  const chosen = rows.filter((r) => !paidNow.has(r.staff_id) && picked[r.staff_id]?.on && picked[r.staff_id]?.amount > 0);
   const total = chosen.reduce((a, r) => a + picked[r.staff_id].amount, 0);
   async function run() {
     setBusy(true);

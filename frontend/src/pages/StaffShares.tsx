@@ -259,19 +259,19 @@ export default function StaffShares() {
         </>
       )}
       </>}
-      <Modal open={!!payout} onClose={() => { setPayout(null); reload(); }} title={payout?.kind === "advance" ? `برداشتی - ${payout.row.name}` : `تسویه با ${payout?.row.name ?? ""}`}>
+      <Modal open={!!payout} onClose={() => { setPayout(null); reloadAll(); }} title={payout?.kind === "advance" ? `برداشتی - ${payout.row.name}` : `تسویه با ${payout?.row.name ?? ""}`}>
         {payout && <PayoutForm person={{ staff_id: payout.row.staff_id, name: payout.row.name, mobile: payout.row.mobile, balance: payout.row.balance }}
           kind={payout.kind} amount={payout.kind === "settlement" ? Math.max(0, isMonth ? (dueOf(payout.row.staff_id) ?? 0) : payout.row.balance) : 0}
           month={isMonth ? month : undefined} onDone={() => { setPayout(null); reloadAll(); }} />}
       </Modal>
-      <Modal open={!!statement} onClose={() => { setStatement(null); reload(); }} title="صورت‌حساب ماه" wide>
-        {statement && <Statement staffId={statement.staff_id} month={isMonth ? month : undefined} onChanged={reload} />}
+      <Modal open={!!statement} onClose={() => { setStatement(null); reloadAll(); }} title="صورت‌حساب ماه" wide>
+        {statement && <Statement staffId={statement.staff_id} month={isMonth ? month : undefined} onChanged={reloadAll} />}
       </Modal>
       <Modal open={settleAll} onClose={() => { setSettleAll(false); reloadAll(); }} title="تسویهٔ همهٔ پرسنل" wide>
         {settleAll && <SettleAll who="staff" month={isMonth && !atCurrent ? month : undefined} onDone={() => { setSettleAll(false); reloadAll(); }} />}
       </Modal>
-      <Modal open={batch} onClose={() => { setBatch(false); reload(); }} title="ثبت چند رسید پرداخت" wide>
-        {batch && <ReceiptBatch onDone={() => { setBatch(false); reload(); }} />}
+      <Modal open={batch} onClose={() => { setBatch(false); reloadAll(); }} title="ثبت چند رسید پرداخت" wide>
+        {batch && <ReceiptBatch onDone={() => { setBatch(false); reloadAll(); }} />}
       </Modal>
       <Modal open={!!editing} onClose={() => { setEditing(null); rates.reload(); }} title="درصد خزانهٔ ماه" wide>
         {editing && <RateEditor rate={editing} month={month} onDone={() => { setEditing(null); reloadAll(); }} />}
