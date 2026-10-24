@@ -3,6 +3,8 @@ the staff shares page shows), spent by expenses «از خزانه» (ordinary ex
 month to month, per staff member too; its opening balance and what was spent before the program are memo rows."""
 from datetime import datetime, timedelta
 
+from sqlalchemy import select
+
 from app.services.jalali import jmonth_of, month_range
 from app.services.treasury import pct_bp
 
@@ -117,9 +119,19 @@ def test_a_lines_treasury_is_set_aside_spent_and_carried(client, accounts):
 
 def test_the_funds_month_is_the_staff_pages_treasury(client, accounts):
     f = fund(client)
+    from app.models import TreasuryMove
+
+    with _db() as db:  # a line with an opening balance starts from it (what came before is in it): compared apart
+        opened = {m.line_id for m in db.scalars(select(TreasuryMove).where(TreasuryMove.kind == "opening", TreasuryMove.status == "active"))}
     for ym in (PREV, CUR):
         rep = client.get("/api/reports/staff-shares", params={"jy": ym[0], "jm": ym[1]}).json()
-        assert month_of(f["months"], ym)["accrued"] == rep["totals"]["treasury"]
+        for lr in rep["lines"]:
+            if lr["line_id"] in opened or not lr["treasury"]:
+                continue
+            line_fund = next(x for x in f["lines"] if x["line_id"] == lr["line_id"])
+            assert month_of(line_fund["months"], ym)["accrued"] == lr["treasury"], lr["name"]
+        if not opened:
+            assert month_of(f["months"], ym)["accrued"] == rep["totals"]["treasury"]
     months = client.get("/api/reports/staff-shares/months").json()
     assert months["months"][0]["jy"] == CUR[0] and months["months"][0]["jm"] == CUR[1] and len(months["months"]) == 12
     cur = months["months"][0]
