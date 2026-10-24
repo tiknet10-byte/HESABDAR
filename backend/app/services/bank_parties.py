@@ -18,7 +18,7 @@ from .textutil import normalize_text, to_en_digits
 CARD = re.compile(r"(?<![\d*])(\d{4})[ \-]?(\d{4})[ \-]?(\d{4})[ \-]?(\d{4})(?![\d*])")
 IBAN = re.compile(r"(?i)(?<![A-Z\d])IR[ \-]?((?:\d[ \-]?){23}\d)(?!\d)")
 # a card with masked middle digits as banks print them: 6037-99**-****-1234, 603799******1234
-MASKED = re.compile(r"(?<![\d*])(\d{4}[ \-]?\d{2})[\d*xX× \-]{4,9}?(\d{4})(?![\d*])")
+MASKED = re.compile(r"(?<![\d*])(\d{4}[ \-]?\d{2})(?=[\d \-]*[*xX×])[\d*xX× \-]{4,9}?(\d{4})(?![\d*])")  # (some digits hidden)
 NAME = re.compile(r"(?:به\s*نام|بنام|نام\s*گیرنده|نام\s*صاحب\s*(?:کارت|حساب)|گیرنده|ذینفع|صاحب\s*حساب)\s*[:：]?\s*"
                   r"((?:خانم|آقای|آقا|شرکت)?\s*[ء-يپچژکگیۀ‌]+"
                   r"(?:\s+[ء-يپچژکگیۀ‌]+){0,3})")
