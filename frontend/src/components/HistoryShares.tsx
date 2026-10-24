@@ -3,7 +3,7 @@ import { Fragment, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { money, num } from "../lib/format";
 import { can, useApi, useAuth, useToast } from "../lib/hooks";
-import { faDigits, monthName, type YM } from "../lib/jalali";
+import { faDigits, monthName, stepMonth, thisMonth, type YM } from "../lib/jalali";
 import JalaliPicker from "./JalaliPicker";
 import { Card, Empty, Loading, Modal } from "./ui";
 
@@ -13,7 +13,11 @@ const pctText = (p: number | null | undefined) => (p === null || p === undefined
 export function MonthsTable() {
   const [all, setAll] = useState(false);
   const recent = useApi<any>("/api/reports/staff-shares/months", []).data; // the last 12 months (and the first month of all)
-  const first = recent?.first as YM | null | undefined;
+  const first0 = recent?.first as YM | null | undefined;
+  // at most 30 years at once (the server's limit): further back is left out, and said so below
+  const oldest = stepMonth(thisMonth(), -359);
+  const first = first0 && (first0[0] * 12 + first0[1] < oldest[0] * 12 + oldest[1]) ? oldest : first0;
+  const cut = !!first0 && first !== first0;
   const whole = useApi<any>(all && first ? `/api/reports/staff-shares/months?from_jy=${first[0]}&from_jm=${first[1]}` : null, [all, first?.[0], first?.[1]]).data;
   const data = all && first ? whole : recent;
   const [open, setOpen] = useState<string | null>(null);
@@ -62,6 +66,7 @@ export function MonthsTable() {
           })}</tbody>
         </table>
       </div>
+      {all && cut && <p className="px-5 pt-3 text-xs text-amber-700">ماه‌های قدیمی‌تر از {monthName(first!)} اینجا نشان داده نمی‌شوند (حداکثر ۳۰ سال).</p>}
       <p className="muted px-5 py-3 text-xs leading-6">روی هر ماه بزنید تا سهم هر پرسنل در آن ماه را ببینید. «پرداخت بابت ماه» برداشتی‌ها و تسویه‌هایی است که برای همان ماه ثبت شده (حتی اگر ماه بعد پرداخت شده باشد).</p>
     </Card>
   );
@@ -144,8 +149,8 @@ export function HistoryPanel({ onChanged }: { onChanged?: () => void }) {
       changed();
     } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
   }
-  async function act(path: string, body: any, ok: string) {
-    try { await api(path, { body }); toast(ok); changed(); } catch (e: any) { toast(e.message, "error"); }
+  async function act(path: string, body: any, ok: string, method = "POST") {
+    try { await api(path, { method, body }); toast(ok); changed(); } catch (e: any) { toast(e.message, "error"); }
   }
   return (
     <div className="space-y-5">
@@ -170,7 +175,7 @@ export function HistoryPanel({ onChanged }: { onChanged?: () => void }) {
                 try { const r = await api("/api/history/start", { method: "PUT", body: { day: start } }); toast(`ذخیره شد${r.rebooked ? ` - ${faDigits(r.rebooked)} ماه دوباره حساب شد` : ""}`); setStart(null); changed(); }
                 catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
               }}>ذخیرهٔ روز شروع</button>
-              {data.start_set && <button className="btn btn-sm" onClick={() => act("/api/history/start", { day: null }, "به حالت خودکار برگشت").then(() => setStart(null))}>خودکار</button>}
+              {data.start_set && <button className="btn btn-sm" onClick={() => act("/api/history/start", { day: null }, "به حالت خودکار برگشت", "PUT").then(() => setStart(null))}>خودکار</button>}
             </div>
           )}
         </div>
@@ -202,10 +207,10 @@ export function HistoryPanel({ onChanged }: { onChanged?: () => void }) {
                   <td className="num font-semibold text-amber-600">{money(m.staff_share)}</td><td className="num text-emerald-600">{money(m.salon_share)}</td>
                   <td>{m.booked ? <span className={`badge ${m.stale ? "bg-amber-500/15 text-amber-700" : "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"}`}>{m.stale ? "تغییر کرده" : "ثبت شده"}</span>
                     : m.rows ? <span className="badge">فقط نمایش</span> : null}</td>
-                  <td>{mayEdit && m.rows > 0 && (
+                  <td>{mayEdit && (m.rows > 0 || m.booked) && (
                     <div className="flex gap-1">
-                      <button className={`btn btn-sm ${m.booked && !m.stale ? "" : "btn-primary"}`} onClick={() => setBooking(m)}>
-                        {m.booked ? <><RotateCcw size={13} />دوباره</> : <><Check size={13} />ثبت</>}</button>
+                      {m.rows > 0 && <button className={`btn btn-sm ${m.booked && !m.stale ? "" : "btn-primary"}`} onClick={() => setBooking(m)}>
+                        {m.booked ? <><RotateCcw size={13} />دوباره</> : <><Check size={13} />ثبت</>}</button>}
                       {m.booked && <button className="btn btn-sm px-2" title="برداشتن ثبت (فقط نمایش)" onClick={() => {
                         if (window.confirm("ثبت این ماه برداشته شود؟ سهم پرسنل این ماه از طلبشان کم می‌شود.")) act("/api/history/unbook", { jy: m.jy, jm: m.jm }, "برداشته شد");
                       }}><Undo2 size={13} /></button>}

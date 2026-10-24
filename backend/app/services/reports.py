@@ -656,6 +656,7 @@ def staff_shares_months(db: Session, first: tuple[int, int], last: tuple[int, in
     from .jalali import month_range, next_month
 
     booked = {(h.jy, h.jm) for h in db.scalars(select(HistoryMonth))}
+    names = {p.id: p.full_name for p in db.scalars(select(Staff))}
     paid: dict[tuple, int] = {}
     for sid, jy, jm, amount in db.execute(select(StaffPayout.staff_id, StaffPayout.jy, StaffPayout.jm, func.sum(StaffPayout.amount))
                                           .where(StaffPayout.status == "booked")
@@ -664,12 +665,17 @@ def staff_shares_months(db: Session, first: tuple[int, int], last: tuple[int, in
     out = []
     ym = first
     n = 0
-    while ym <= last and n < 120:
+    while ym <= last and n < 360:
         s, e = month_range(*ym)
         rep = staff_shares(db, s.date(), (e - timedelta(days=1)).date(), balances=False)
         staff_rows = [{k: r[k] for k in ("staff_id", "name", "line", "revenue", "forfeits", "treasury", "staff_share", "salon_share",
                                          "history", "history_share")} | {"paid_for_month": paid.get((r["staff_id"], *ym), 0)}
-                      for r in rep["staff"] if r["revenue"] or r["forfeits"] or r["staff_share"]]
+                      for r in rep["staff"] if r["revenue"] or r["forfeits"] or r["staff_share"] or paid.get((r["staff_id"], *ym))]
+        shown = {r["staff_id"] for r in staff_rows}
+        for (sid, y, m), amount in paid.items():  # paid for the month, no work in it (e.g. an employee's salary)
+            if (y, m) == ym and sid not in shown and amount:
+                staff_rows.append({"staff_id": sid, "name": names.get(sid, "—"), "line": None, "revenue": 0, "forfeits": 0, "treasury": 0,
+                                   "staff_share": 0, "salon_share": 0, "history": 0, "history_share": 0, "paid_for_month": amount})
         t = rep["totals"]
         out.append({"jy": ym[0], "jm": ym[1], "month": f"{J_MONTHS[ym[1] - 1]} {ym[0]}",
                     **{k: t[k] for k in ("revenue", "forfeits", "treasury", "staff_share", "salon_share", "history",

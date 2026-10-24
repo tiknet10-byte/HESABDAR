@@ -40,6 +40,8 @@ function MoveForm({ lines, lineId: line0, kind: kind0, onDone }: { lines: any[];
         <Field label="مبلغ"><MoneyInput value={amount} onChange={setAmount} autoFocus />
           {kind === "opening" && <label className="mt-1 flex items-center gap-2 text-xs"><input type="checkbox" checked={negative} onChange={(e) => setNegative(e.target.checked)} />منفی بود (بیشتر از خزانه خرج شده بود)</label>}</Field>
         <Field label="تاریخ"><JalaliPicker pastOnly value={at} onChange={setAt} /></Field>
+        {kind === "opening" && <p className="muted text-xs leading-6 sm:col-span-2">موجودی اول یعنی خزانهٔ این لاین در همین تاریخ چقدر بود؛
+          هرچه پیش از این تاریخ در این لاین بوده (خزانهٔ کارکرد نرم‌افزار قبلی، خرج‌های قبلی) دیگر جدا حساب نمی‌شود، چون در همین مبلغ هست.</p>}
         {kind === "spent_before" && <Field label="برای چه؟"><input className="input" value={category} onChange={(e) => setCategory(e.target.value)} placeholder="مثلاً مواد مصرفی، تعمیر دستگاه" /></Field>}
         <Field label="توضیح (اختیاری)"><input className="input" value={description} onChange={(e) => setDescription(e.target.value)} /></Field>
       </div>

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import (JournalEntry, JournalLine, LedgerAccount, PaymentAccount, SalaryAccrual, Staff, StaffPayout,
@@ -92,6 +92,8 @@ def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", pay
         raise PayError("مبلغ پرداخت بیش از حد بزرگ است؛ عدد را دوباره نگاه کنید")
     if kind not in KINDS:
         raise PayError("نوع پرداخت نامعتبر است")
+    if paid_at is not None and paid_at.tzinfo is not None:
+        paid_at = paid_at.replace(tzinfo=None)  # a time sent with its zone: as written (all times here are local)
     if before_start:
         from .history_shares import books_start
 
@@ -124,6 +126,18 @@ def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", pay
                 StaffPayout.source == "bank", StaffPayout.paid_at.between(at - timedelta(days=3), at + timedelta(days=3))).limit(1)):
             raise Duplicate("همین مبلغ برای همین شخص از روی تراکنش بانک (خودکار) ثبت شده است؛ صورت‌حسابش را ببینید. "
                             "اگر پرداخت جداگانه‌ای است، دوباره تأیید کنید")
+        if source == "bank":  # the same payment entered by hand (or from its receipt) and not linked to a bank line yet
+            hand = db.scalar(select(StaffPayout).where(
+                StaffPayout.staff_id == staff.id, StaffPayout.amount == amount, StaffPayout.status == "booked",
+                StaffPayout.bank_transaction_id.is_(None), StaffPayout.source != "bank",
+                StaffPayout.paid_at.between(at - timedelta(days=3), at + timedelta(days=3))).limit(1))
+            if hand is not None:
+                from .jalali import to_jalali_str
+
+                acc = db.get(PaymentAccount, hand.payment_account_id) if hand.payment_account_id else None
+                raise Duplicate(f"همین مبلغ برای {staff.full_name} در {to_jalali_str(hand.paid_at)} (دستی یا با رسید) ثبت شده است"
+                                f"{' از «' + acc.name + '»' if acc is not None else ''}؛ "
+                                "اگر همان پرداخت است، دوباره ثبت نکنید. اگر پرداخت جداگانه‌ای است، دوباره تأیید کنید")
         day = datetime.combine(at.date(), datetime.min.time())
         if db.scalar(select(StaffPayout.id).where(StaffPayout.staff_id == staff.id, StaffPayout.amount == amount,
                                                   StaffPayout.status == "booked", StaffPayout.paid_at >= day,
@@ -312,6 +326,11 @@ def statement(db: Session, staff_id: int, jy: int, jm: int, work: bool = True) -
         select(StaffPayout).where(StaffPayout.staff_id == staff_id, StaffPayout.jy == jy, StaffPayout.jm == jm,
                                   StaffPayout.status == "booked", StaffPayout.paid_at >= e).order_by(StaffPayout.paid_at))]
     paid_later = sum(x["amount"] for x in later)
+    # what is left of this month also goes down by what was paid after it for an earlier month (settling two months
+    # in a row: the second must not pay the first one's share again); an advance for a later month does not count
+    paid_older = int(db.scalar(select(func.coalesce(func.sum(StaffPayout.amount), 0)).where(
+        StaffPayout.staff_id == staff_id, StaffPayout.status == "booked", StaffPayout.paid_at >= e,
+        or_(StaffPayout.jy < jy, and_(StaffPayout.jy == jy, StaffPayout.jm < jm)))) or 0)
     want_work, work = work, None
     if want_work and not is_employee(person):
         rep = reports.staff_shares(db, s.date(), (e - timedelta(days=1)).date(), balances=False)
@@ -330,7 +349,8 @@ def statement(db: Session, staff_id: int, jy: int, jm: int, work: bool = True) -
             "jy": jy, "jm": jm, "month": month_label(jy, jm), "current": (jy, jm) == jmonth_of(local_now()),
             "opening": opening, "earned": earned, "earned_total": sum(earned.values()), "given": given, "closing": closing,
             "advances": sum(x["amount"] for x in in_month if x["kind"] == "advance" and x["status"] == "booked"),
-            "payouts": in_month, "paid_later": paid_later, "later": later, "remaining": closing - paid_later,
+            "payouts": in_month, "paid_later": paid_later, "later": later, "paid_older": paid_older,
+            "remaining": closing - paid_later - paid_older,
             "balance_now": balance_at(db, staff_id), "work": work, "salaries": salaries,
             "books_start": (st.date().isoformat() if (st := books_start(db)) else None)}
 

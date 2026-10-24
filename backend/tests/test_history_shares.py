@@ -207,8 +207,8 @@ def _run(client, accounts, line, p1, p2):  # noqa: ANN001
     assert ref_sum("2200", "history_share", p1["id"]) == 0 and ref_sum("2200", "history_share", p2["id"]) == 0
     from app.models import HistoryMonth
 
-    with _db() as db:
-        assert db.scalar(select(func.count(HistoryMonth.id)).where(HistoryMonth.jy == 1390)) == 0
+    with _db() as db:  # the bookings stay (nothing owed, the percents kept for when the rows come back)
+        assert {(h.rows, h.staff_share, h.entry_id) for h in db.scalars(select(HistoryMonth).where(HistoryMonth.jy == 1390))} <= {(0, 0, None)}
     balanced(client)
 
 

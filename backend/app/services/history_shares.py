@@ -255,20 +255,31 @@ def _clean_percents(db: Session, percents: dict | None) -> dict[int, float] | No
 def book_month(db: Session, jy: int, jm: int, percents: dict | None = None, user=None) -> HistoryMonth | None:  # noqa: ANN001
     """Freeze the month's rows (line, treasury, percent and share) and book what the staff earned. Booked again: the
     rows keep what they were booked with, except the percents given now; rows not frozen yet (a staff member set since,
-    rows added by an import) are worked out. A booked month left without rows is unbooked (returns None)."""
+    rows added by an import) are worked out. A booked month left without rows (an import undone, the start moved) keeps
+    its booking with nothing owed, and its percents: when its rows come back it is booked again with them.
+    The first booking pins the start day (when it was worked out from the first invoice): an invoice dated earlier later
+    must not move rows out of a booked month."""
+    from . import settings_store
     from .audit import audit, write_lock
 
     _check(jy, jm)
     pcts = _clean_percents(db, percents)
     write_lock(db)
+    if not _start_setting(db):
+        start = books_start(db)
+        if start is not None:
+            settings_store.set_value(db, "books.start", start.date().isoformat())
     s, e = month_range(jy, jm)
     figures = row_figures(db, _old(db, s, e), percents=pcts)
     hm = db.scalar(select(HistoryMonth).where(HistoryMonth.jy == jy, HistoryMonth.jm == jm))
     if not figures:
-        if hm is not None:
-            unbook_month(db, jy, jm, user=user)
-            return None
-        raise HistoryError("در این ماه کارکردی از نرم‌افزار قبلی (پیش از شروع کار با برنامه) نیست")
+        if hm is None:
+            raise HistoryError("در این ماه کارکردی از نرم‌افزار قبلی (پیش از شروع کار با برنامه) نیست")
+        _delete_entries(db, hm)
+        hm.entry_id, hm.rows, hm.revenue, hm.treasury, hm.staff_share = None, 0, 0, 0, 0
+        db.flush()
+        audit(db, "history.book", "history_month", hm.id, {"month": f"{jy}/{jm:02d}", "rows": 0, "staff_share": 0}, user=user)
+        return hm
     for f in figures:
         a = f["appt"]
         a.line_id, a.treasury_bp, a.treasury_amount = f["line_id"], f["bp"], f["treasury"]
@@ -502,6 +513,17 @@ def set_start(db: Session, day: date | None, user=None) -> int:  # noqa: ANN001
     old = books_start(db)
     settings_store.set_value(db, "books.start", day.isoformat() if day else "")
     new = books_start(db)
+    if new is not None:  # what was entered as «before the program» must stay before it
+        from ..models import StaffPayout, TreasuryMove
+        from .jalali import to_jalali_str
+
+        last = max([d for d in (
+            db.scalar(select(func.max(StaffPayout.paid_at)).where(StaffPayout.before_start.is_(True), StaffPayout.status == "booked")),
+            db.scalar(select(func.max(TreasuryMove.at)).where(TreasuryMove.kind == "spent_before", TreasuryMove.status == "active")),
+        ) if d is not None], default=None)
+        if last is not None and last >= new:
+            raise HistoryError(f"پرداخت یا خرجی «پیش از شروع برنامه» با تاریخ {to_jalali_str(last)} ثبت شده است؛ روز شروع باید بعد از آن باشد "
+                               "(یا اول آن را باطل کنید)")
     audit(db, "books.start", "setting", "books.start", {"date": day.isoformat() if day else None}, user=user)
     if old == new:
         return 0

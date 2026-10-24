@@ -74,8 +74,8 @@ def staff_shares_months(from_jy: int | None = None, from_jm: int | None = None, 
         first = (y - 1, m + 1) if m < 12 else (y, 1)
     if first > last:
         raise HTTPException(400, "ماه شروع بعد از ماه پایان است")
-    if (last[0] - first[0]) * 12 + last[1] - first[1] >= 120:
-        raise HTTPException(400, "حداکثر ۱۰ سال را با هم ببینید")
+    if (last[0] - first[0]) * 12 + last[1] - first[1] >= 360:
+        raise HTTPException(400, "حداکثر ۳۰ سال را با هم ببینید")
     earliest = [d for d in (db.scalar(select(func.min(Invoice.issued_at))),
                             db.scalar(select(func.min(Appointment.start_at)).where(reports._old_service()))) if d is not None]
     return {"first": list(jmonth_of(min(earliest))) if earliest else None, "from": list(first), "to": list(last),

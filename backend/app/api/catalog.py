@@ -211,7 +211,7 @@ def delete_line(lid: int, db: Session = Depends(get_db), user=Depends(require("s
     used = db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.line_id == lid)) or \
         db.scalar(select(func.count(Service.id)).where(Service.line_id == lid)) or \
         db.scalar(select(func.count(Staff.id)).where(Staff.line_id == lid)) or \
-        db.scalar(select(func.count(JournalLine.id)).where(JournalLine.line_id == lid))
+        db.scalar(select(func.count(JournalLine.id)).where(JournalLine.line_id == lid)) or _line_kept_elsewhere(db, lid)
     if used:
         l.is_active = False
     else:
@@ -221,6 +221,15 @@ def delete_line(lid: int, db: Session = Depends(get_db), user=Depends(require("s
     _names_changed()
     db.commit()
     return {"ok": True, "archived": bool(used)}
+
+
+def _line_kept_elsewhere(db: Session, lid: int) -> bool:
+    """The line's treasury memo rows, expenses, bank rules or booked months of the previous software (1.23) name it."""
+    from ..models import Appointment as Appt, BankRule, Expense, TreasuryMove
+
+    return any(db.scalar(select(m.id).where(col == lid).limit(1)) is not None
+               for m, col in ((TreasuryMove, TreasuryMove.line_id), (Expense, Expense.line_id), (BankRule, BankRule.line_id),
+                              (Appt, Appt.line_id)))
 
 
 def _remove_service(db: Session, s: Service) -> bool:

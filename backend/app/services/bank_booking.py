@@ -51,7 +51,9 @@ def _linked(db: Session, kind: str) -> set[int]:
 
 
 # ------------------------------------------------------------------ 1. an entry already made for it
-def link_candidates(db: Session, tx: BankTransaction) -> list[dict]:
+def link_candidates(db: Session, tx: BankTransaction, strict: bool = True) -> list[dict]:
+    """Entries made by hand that this line may be: same account and amount within 3 days, not linked to another line;
+    strict (to link by itself): the same tracking number when both have one."""
     if not tx.payment_account_id or tx.direction not in ("in", "out"):
         return []
     lo, hi = tx.occurred_at - LINK_WINDOW, tx.occurred_at + LINK_WINDOW
@@ -61,7 +63,7 @@ def link_candidates(db: Session, tx: BankTransaction) -> list[dict]:
         for p in db.scalars(select(StaffPayout).where(
                 StaffPayout.status == "booked", StaffPayout.payment_account_id == tx.payment_account_id,
                 StaffPayout.amount == tx.amount, StaffPayout.paid_at.between(lo, hi), StaffPayout.bank_transaction_id.is_(None))):
-            if p.id not in taken and _refs_ok(p.reference, tx.reference):
+            if p.id not in taken and (not strict or _refs_ok(p.reference, tx.reference)):
                 who = db.get(Staff, p.staff_id)
                 out.append({"type": "staff_payout", "id": p.id, "at": p.paid_at, "label": f"پرداخت به {who.full_name if who else '—'}"})
         taken = _linked(db, "expense")
@@ -84,7 +86,7 @@ def link_candidates(db: Session, tx: BankTransaction) -> list[dict]:
 def link(db: Session, tx: BankTransaction, kind: str, rec_id: int, user=None, auto: bool = False) -> None:  # noqa: ANN001
     from .audit import audit
 
-    cands = {(c["type"], c["id"]) for c in link_candidates(db, tx)}
+    cands = {(c["type"], c["id"]) for c in link_candidates(db, tx, strict=auto)}
     if (kind, rec_id) not in cands:
         raise BankBookError("این ردیف با این تراکنش جور نیست (حساب، مبلغ یا تاریخ فرق دارد، یا به تراکنش دیگری وصل است)")
     if not _claim(db, tx):
@@ -185,8 +187,8 @@ def on_unmatched(db: Session, tx: BankTransaction) -> str | None:
             return "linked"
         except BankBookError:
             return None
-    if cands:
-        return None  # several entries alike: a person picks
+    if cands or link_candidates(db, tx, strict=False):
+        return None  # several entries alike, or one with another tracking number: a person picks
     rules = rules_for(db, tx)
     exact = [r for r in rules if r.match_hash and r.match_hash == tx.counterparty_hash]
     if len(exact) != 1 or len(rules) != 1 or not exact[0].auto or not _auto_ok(tx):
@@ -385,7 +387,7 @@ def suggestions(db: Session, tx: BankTransaction) -> list[dict]:
     from .history_shares import suggest_staff
 
     out: list[dict] = []
-    for c in link_candidates(db, tx):
+    for c in link_candidates(db, tx, strict=False):
         out.append({"action": "link", "type": c["type"], "id": c["id"], "label": f"همان «{c['label']}» که ثبت شده",
                     "why": "همین مبلغ و حساب، چند روز این طرف یا آن طرف"})
     for r in rules_for(db, tx):

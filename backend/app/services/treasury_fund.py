@@ -36,10 +36,23 @@ def _label(ym: tuple[int, int]) -> str:
 
 
 def _cells(db: Session) -> dict[tuple, dict]:
-    """(line, staff, (jy, jm)) -> {"opening", "accrued", "spent"}: everything that moved a treasury."""
+    """(line, staff, (jy, jm)) -> {"opening", "accrued", "spent"}: everything that moved a treasury. A line's opening
+    balance is its treasury on that day: what the line had before it (the previous software's work, spending before the
+    program) is in it, so it is not counted again."""
     from .history_shares import _old, books_start, row_figures
 
     cells: dict[tuple, dict] = defaultdict(lambda: {"opening": 0, "accrued": 0, "spent": 0})
+    moves = list(db.scalars(select(TreasuryMove).where(TreasuryMove.status == "active")))
+    cutoff: dict[int | None, datetime] = {}
+    for m in moves:
+        if m.kind == "opening":
+            cutoff[m.line_id] = min(cutoff.get(m.line_id, m.at), m.at)
+
+    def add(line_id: int | None, staff_id: int | None, at: datetime, field: str, amount: int) -> None:
+        if line_id in cutoff and at < cutoff[line_id]:
+            return  # before the line's opening balance: already in it
+        cells[(line_id, staff_id, jmonth_of(at))][field] += amount
+
     # service rows of invoices: sold in their month, a return (voided after its day) taken back in the return's month
     undo = dict(db.execute(select(JournalEntry.ref_id, func.min(JournalEntry.at)).where(JournalEntry.ref_type == "invoice_void")
                            .group_by(JournalEntry.ref_id)).all())
@@ -50,30 +63,26 @@ def _cells(db: Session) -> dict[tuple, dict]:
                    InvoiceItem.treasury_amount.is_not(None), InvoiceItem.treasury_amount != 0)):
         at_undo = undo.get(inv_id)
         if status != "void" or (at_undo is not None and at_undo != issued):
-            cells[(line_id, staff_id, jmonth_of(issued))]["accrued"] += int(t)
+            add(line_id, staff_id, issued, "accrued", int(t))
         if status == "void" and at_undo is not None and at_undo != issued:
-            cells[(line_id, staff_id, jmonth_of(at_undo))]["accrued"] -= int(t)
+            add(line_id, staff_id, at_undo, "accrued", -int(t))
     # forfeited deposits shared like services (1.22)
     employees = {p.id for p in db.scalars(select(Staff)) if (p.kind or "") == "employee"}
     for line_id, staff_id, t, at in db.execute(select(Deposit.forfeit_line_id, Deposit.staff_id, Deposit.treasury_amount, Deposit.closed_at)
                                                .where(Deposit.status == "forfeited", Deposit.treasury_bp.is_not(None),
                                                       Deposit.treasury_amount != 0)):
         if at is not None and t:
-            cells[(line_id, None if staff_id in employees else staff_id, jmonth_of(at))]["accrued"] += int(t)
+            add(line_id, None if staff_id in employees else staff_id, at, "accrued", int(t))
     # the previous software's services before the program started
     for f in row_figures(db, _old(db, datetime(1900, 1, 1), datetime(2200, 1, 1), books_start(db))):
         if f["treasury"]:
-            cells[(f["line_id"], f["share_staff_id"], jmonth_of(f["appt"].start_at))]["accrued"] += f["treasury"]
+            add(f["line_id"], f["share_staff_id"], f["appt"].start_at, "accrued", f["treasury"])
     # spent: expenses paid from the treasury (voided ones never happened)
     for line_id, staff_id, amount, at in db.execute(select(Expense.line_id, Expense.staff_id, Expense.amount, Expense.spent_at)
                                                     .where(Expense.from_treasury.is_(True), Expense.voided_at.is_(None))):
-        cells[(line_id, staff_id, jmonth_of(at))]["spent"] += int(amount)
-    for m in db.scalars(select(TreasuryMove).where(TreasuryMove.status == "active")):
-        c = cells[(m.line_id, m.staff_id, jmonth_of(m.at))]
-        if m.kind == "opening":
-            c["opening"] += int(m.amount)
-        else:
-            c["spent"] += int(m.amount)
+        add(line_id, staff_id, at, "spent", int(amount))
+    for m in moves:
+        add(m.line_id, m.staff_id, m.at, "opening" if m.kind == "opening" else "spent", int(m.amount))
     return cells
 
 
@@ -194,7 +203,7 @@ def add_move(db: Session, *, kind: str, line_id: int | None, amount: int, at: da
     if not amount:
         raise FundError("مبلغ را بنویسید")
     ensure_not_future(at, "تاریخ")
-    when = at or local_now()
+    when = at.replace(tzinfo=None) if at is not None else local_now()  # (a time sent with its zone: as written)
     if kind == "spent_before":
         start = books_start(db)
         if start is not None and when >= start:

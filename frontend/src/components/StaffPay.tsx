@@ -406,7 +406,8 @@ export function Statement({ staffId, month: month0, onChanged }: { staffId: numb
       </div>
       <div className="rounded-2xl bg-violet-500/10 p-3 text-xs leading-6">
         ماندهٔ اول ماه {money(st.opening)} + {st.employee ? "حقوق" : "سهم"} این ماه {money(st.earned_total)} − داده‌شده {money(st.given)} = <b>{money(st.closing)}</b>
-        {st.paid_later > 0 && <> · بعد از ماه بابت همین ماه {money(st.paid_later)} پرداخت شد؛ باقی: <b className={st.remaining < 0 ? "text-rose-600" : ""}>{money(st.remaining)}</b></>}
+        {(st.paid_later > 0 || st.paid_older > 0) && <> · بعد از ماه{st.paid_later > 0 ? ` بابت همین ماه ${money(st.paid_later)}` : ""}
+          {st.paid_older > 0 ? `${st.paid_later > 0 ? " و" : ""} بابت ماه‌های قبل‌تر ${money(st.paid_older)}` : ""} پرداخت شد؛ باقی: <b className={st.remaining < 0 ? "text-rose-600" : ""}>{money(st.remaining)}</b></>}
       </div>
       {earnedRows.length > 0 && (
         <div className="grid gap-2 sm:grid-cols-2">
@@ -645,6 +646,18 @@ export function SettleAll({ who, month: month0, onDone }: { who: "staff" | "empl
       reload();
     } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
   }
+  /** a row refused as maybe the same payment again, confirmed by the person as another one */
+  async function forceOne(row: any) {
+    setBusy(true);
+    try {
+      const r = await api("/api/staff/settle", { body: { jy: month[0], jm: month[1], payment_account_id: fromOwner ? null : acc, from_owner: fromOwner,
+        paid_at: paidAt, rows: [{ staff_id: row.staff_id, amount: picked[row.staff_id]?.amount ?? row.due, expected: row.due, force: true }] } });
+      setResult((old: any) => ({ ...r, done: [...(old?.done ?? []), ...r.done], total: (old?.total ?? 0) + r.total,
+        errors: [...(old?.errors ?? []).filter((x: any) => x.staff_id !== row.staff_id), ...r.errors] }));
+      if (r.done.length) toast(`${row.name}: ثبت شد`);
+      reload();
+    } catch (e: any) { toast(e.message, "error"); } finally { setBusy(false); }
+  }
   const person = (r: any): Person => ({ staff_id: r.staff_id, name: r.name, mobile: r.mobile, employee: rows.find((x) => x.staff_id === r.staff_id)?.employee });
   return (
     <div className="space-y-3">
@@ -684,7 +697,8 @@ export function SettleAll({ who, month: month0, onDone }: { who: "staff" | "empl
                 <div className="flex items-center gap-1">
                   {done && <button className="btn btn-sm" title="ارسال در واتساپ" onClick={() => setSending(done)}><Send size={13} /></button>}
                 </div>
-                {err && <div className="text-xs text-rose-600 sm:col-span-4">{err.error}</div>}
+                {err && <div className="flex flex-wrap items-center gap-2 text-xs text-rose-600 sm:col-span-4">{err.error}
+                  {err.duplicate && <button className="btn btn-sm btn-danger" disabled={busy} onClick={() => forceOne(r)}>بله، پرداخت جداگانه‌ای است؛ ثبت شود</button>}</div>}
               </div>
             );
           })}
