@@ -481,6 +481,7 @@ class BankTransaction(TimestampMixin, Base):
     rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # the rule that booked it by itself
     auto_booked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # booked by itself (True) / by a person here
     booked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    manual_only: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # taken back once / direction set by hand: a person decides
 
 
 class BankRule(Base):

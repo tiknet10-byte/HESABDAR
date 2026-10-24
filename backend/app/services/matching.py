@@ -258,22 +258,50 @@ def import_bank_transaction(db: Session, *, payment_account_id: int | None, exte
                          description=mask_text(description or "")[:2000], reference=reference,
                          counterparty_card=party["mask"], counterparty_hash=party["hash"], counterparty_mask=party["mask"],
                          counterparty_name=party["name"], source=source)
-    if payment_account_id and tx.direction in ("in", "out"):
-        same = db.scalar(select(BankTransaction).where(
-            BankTransaction.payment_account_id == payment_account_id, BankTransaction.source != source,
-            BankTransaction.direction == tx.direction, BankTransaction.amount == amount, BankTransaction.duplicate_of_id.is_(None),
-            BankTransaction.occurred_at.between(occurred_at - SAME_MONEY_WINDOW, occurred_at + SAME_MONEY_WINDOW))
-            .order_by(BankTransaction.id).limit(1))
-        if same is not None and (not reference or not same.reference or same.reference == reference):
-            tx.duplicate_of_id, tx.status = same.id, "duplicate"
-            if same.counterparty_hash is None and party["hash"]:  # the other source knew who it was: kept on the first
-                same.counterparty_hash, same.counterparty_mask = party["hash"], party["mask"]
-                same.counterparty_name = same.counterparty_name or party["name"]
     db.add(tx)
     db.flush()
+    mark_same_money(db, tx)
     bus.emit("bank_transaction.imported", {"id": tx.id, "amount": amount, "direction": tx.direction}, db=db)
-    on_bank_transaction(db, tx)
+    if tx.status != "duplicate":
+        on_bank_transaction(db, tx)
     return tx, True
+
+
+def same_money(db: Session, tx: BankTransaction) -> BankTransaction | None:
+    """The line of another source that is the same money: same account and amount within 15 minutes, a direction
+    that agrees (an unclear SMS agrees with both), the same tracking number when both have one, not set aside, and not
+    already the same money as another line of this source (two real payments stay two). The closest in time."""
+    if not tx.payment_account_id:
+        return None
+    dirs = ("in", "out", "unknown") if tx.direction == "unknown" else (tx.direction, "unknown")
+    taken = select(BankTransaction.duplicate_of_id).where(BankTransaction.source == tx.source,
+                                                          BankTransaction.duplicate_of_id.is_not(None))
+    taken_by_me = select(BankTransaction.id).where(BankTransaction.source == tx.source, BankTransaction.status == "duplicate",
+                                                   BankTransaction.duplicate_of_id.is_not(None))
+    cands = [c for c in db.scalars(select(BankTransaction).where(
+        BankTransaction.payment_account_id == tx.payment_account_id, BankTransaction.source != tx.source,
+        BankTransaction.id != tx.id, BankTransaction.amount == tx.amount, BankTransaction.direction.in_(dirs),
+        BankTransaction.duplicate_of_id.is_(None), BankTransaction.status.not_in(("duplicate", "ignored")),
+        BankTransaction.id.not_in(taken), BankTransaction.id.not_in(taken_by_me),
+        BankTransaction.occurred_at.between(tx.occurred_at - SAME_MONEY_WINDOW, tx.occurred_at + SAME_MONEY_WINDOW)))
+             if not tx.reference or not c.reference or c.reference == tx.reference]
+    return min(cands, key=lambda c: (abs((c.occurred_at - tx.occurred_at).total_seconds()), c.id)) if cands else None
+
+
+def mark_same_money(db: Session, tx: BankTransaction) -> BankTransaction | None:
+    """Keep one line of the same money seen from two sources: the one whose direction is clear, else the first; the
+    other is a duplicate nothing acts on. The other side (card hash, name) is kept on the line that stays."""
+    same = same_money(db, tx)
+    if same is None:
+        return None
+    keep, dup = (tx, same) if same.direction == "unknown" and tx.direction != "unknown" and same.status == "unmatched" else (same, tx)
+    dup.status, dup.duplicate_of_id = "duplicate", keep.id
+    if keep.counterparty_hash is None and dup.counterparty_hash:
+        keep.counterparty_hash, keep.counterparty_mask = dup.counterparty_hash, dup.counterparty_mask
+    keep.counterparty_mask = keep.counterparty_mask or dup.counterparty_mask
+    keep.counterparty_name = keep.counterparty_name or dup.counterparty_name
+    db.flush()
+    return keep
 
 
 def unreconciled_summary(db: Session) -> dict:

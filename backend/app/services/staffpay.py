@@ -126,6 +126,11 @@ def pay(db: Session, staff: Staff, amount: int, *, kind: str = "settlement", pay
                 StaffPayout.source == "bank", StaffPayout.paid_at.between(at - timedelta(days=3), at + timedelta(days=3))).limit(1)):
             raise Duplicate("همین مبلغ برای همین شخص از روی تراکنش بانک (خودکار) ثبت شده است؛ صورت‌حسابش را ببینید. "
                             "اگر پرداخت جداگانه‌ای است، دوباره تأیید کنید")
+        if source == "bank" and db.scalar(select(StaffPayout.id).where(
+                StaffPayout.staff_id == staff.id, StaffPayout.amount == amount, StaffPayout.status == "booked",
+                StaffPayout.source == "bank", StaffPayout.paid_at.between(at - timedelta(hours=1), at + timedelta(hours=1))).limit(1)):
+            raise Duplicate("همین مبلغ برای همین شخص همین ساعت از روی تراکنش دیگری از بانک ثبت شده است (شاید همان پول از دو جا "
+                            "آمده: پیامک و صورت‌حساب)؛ اگر پرداخت جداگانه‌ای است، دوباره تأیید کنید")
         if source == "bank":  # the same payment entered by hand (or from its receipt) and not linked to a bank line yet
             hand = db.scalar(select(StaffPayout).where(
                 StaffPayout.staff_id == staff.id, StaffPayout.amount == amount, StaffPayout.status == "booked",

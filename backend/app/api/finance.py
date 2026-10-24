@@ -248,10 +248,17 @@ def edit_appointment(aid: int, body: AppointmentUpdate, db: Session = Depends(ge
         data.pop("customer_id")
     from ..services.legacy_import import IMPORT_NOTE
 
-    if data.get("notes") is not None and a.status == "done" and not a.invoice_id and (a.notes or "").startswith(IMPORT_NOTE) \
-            and not data["notes"].startswith(IMPORT_NOTE):
-        # a service of the previous software stays one (its mark is what the reports and the staff shares go by)
-        data["notes"] = f"{IMPORT_NOTE} - {data['notes']}".rstrip(" -")
+    if data.get("notes") is not None:
+        old_notes, new_notes = a.notes or "", data["notes"]
+        if old_notes.startswith(IMPORT_NOTE) and a.status == "done" and not a.invoice_id:
+            # a service of the previous software: its notes say what it is and who did it (the staff shares go by them);
+            # words can be added after them, the owner / admin may change them
+            if not new_notes.startswith(old_notes) and not has_permission(user.role, "settings"):
+                raise HTTPException(400, "توضیح سوابق منتقل‌شده از نرم‌افزار قبلی فقط ادامه داده می‌شود (نوشتهٔ قبلی می‌ماند)")
+            if not new_notes.startswith(IMPORT_NOTE):
+                data["notes"] = f"{IMPORT_NOTE} - {new_notes}".rstrip(" -")
+        elif new_notes.startswith(IMPORT_NOTE):
+            raise HTTPException(400, "این نوشته مخصوص سوابق منتقل‌شده از نرم‌افزار قبلی است")
     for k, v in data.items():
         setattr(a, k, v)
     if "start_at" in data:
@@ -1004,6 +1011,8 @@ def expense_treasury(expense_id: int, body: ExpenseTreasuryIn, db: Session = Dep
         raise HTTPException(400, "شخص پیدا نشد")
     if body.from_treasury and body.line_id is None:
         raise HTTPException(400, "برای خرج از خزانه، لاینی را که خزانه‌اش خرج شد انتخاب کنید")
+    if body.from_treasury and body.staff_id is not None and (db.get(Staff, body.staff_id).line_id or body.line_id) != body.line_id:
+        raise HTTPException(400, "این پرسنل در لاین انتخاب‌شده نیست؛ خزانهٔ همان لاین یا «کل لاین» را انتخاب کنید")
     before = {"line": e.line_id, "staff": e.staff_id, "from_treasury": bool(e.from_treasury)}
     e.line_id, e.staff_id, e.from_treasury = body.line_id, body.staff_id, True if body.from_treasury else None
     entry = db.scalar(select(JournalEntry).where(JournalEntry.ref_type == "expense", JournalEntry.ref_id == e.id)

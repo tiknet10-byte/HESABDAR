@@ -193,8 +193,12 @@ def add_move(db: Session, *, kind: str, line_id: int | None, amount: int, at: da
         raise FundError("نوع نامعتبر است")
     if line_id is None or db.get(ServiceLine, line_id) is None:
         raise FundError("لاین را انتخاب کنید")
-    if staff_id is not None and db.get(Staff, staff_id) is None:
-        raise FundError("پرسنل پیدا نشد")
+    if staff_id is not None:
+        person = db.get(Staff, staff_id)
+        if person is None:
+            raise FundError("پرسنل پیدا نشد")
+        if person.line_id and person.line_id != line_id:
+            raise FundError("این پرسنل در لاین انتخاب‌شده نیست؛ خزانهٔ همان لاین یا «کل لاین» را انتخاب کنید")
     amount = int(amount)
     if kind == "spent_before" and amount <= 0:
         raise FundError("مبلغ خرج باید مثبت باشد")

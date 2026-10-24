@@ -85,13 +85,23 @@ def check_number(text: str) -> tuple[str, str]:
     return kind, value
 
 
+BARE_IBAN = re.compile(r"(?<![\d*A-Za-z])(\d{24})(?!\d)")  # an IBAN written without «IR» (24 digits)
+
+
+def _card_of(m: re.Match) -> str | None:
+    """The 16 digits of a CARD match when they pass the card check digit (a 16-digit tracking number is not a card)."""
+    d = "".join(m.groups())
+    return d if luhn_ok(d) else None
+
+
 def mask_text(text: str | None) -> str:
     """The text with every full card number and IBAN masked (descriptions of bank lines are kept like this)."""
     if not text:
         return text or ""
     t = to_en_digits(text)
     t = IBAN.sub(lambda m: mask("iban", "IR" + re.sub(r"\D", "", m.group(1))), t)
-    return CARD.sub(lambda m: mask("card", "".join(m.groups())), t)
+    t = BARE_IBAN.sub(lambda m: mask("iban", "IR" + m.group(1)), t)
+    return CARD.sub(lambda m: mask("card", d) if (d := _card_of(m)) else m.group(0), t)
 
 
 def own_masks(db) -> set[tuple[str, str]]:  # noqa: ANN001
@@ -132,15 +142,19 @@ def counterparty(text: str | None, *, card: str | None = None, iban: str | None 
             found.append(got)
     for m in IBAN.finditer(t):
         found.append(("iban", "IR" + re.sub(r"\D", "", m.group(1))))
+    for m in BARE_IBAN.finditer(t):
+        if iban_ok("IR" + m.group(1)):
+            found.append(("iban", "IR" + m.group(1)))
     for m in CARD.finditer(t):
-        found.append(("card", "".join(m.groups())))
+        if (d := _card_of(m)):
+            found.append(("card", d))
     for kind, value in found:
         if (kind == "card" and (value[:6], value[-4:]) in own) or (kind == "iban" and value in own_iban):
             continue
         out.update(hash=number_hash(kind, value), mask=mask(kind, value), last4=value[-4:])
         break
     if out["mask"] is None:
-        for m in MASKED.finditer(t):
+        for m in MASKED.finditer(to_en_digits(card or "") + " " + t):  # a masked card (a column / the API) first
             first, last = re.sub(r"\D", "", m.group(1)), m.group(2)
             if (first[:6], last) in own:
                 continue
@@ -170,20 +184,24 @@ WEAK_OUT = ("انتقال از", "پرداخت", "انتقال وجه", "کار�
 def sms_direction(text: str, salon_last4: set[str] | None = None) -> str:
     """in | out | unknown."""
     raw = to_en_digits(text or "").replace("٬", ",")
-    # the sign written with the amount: «1,500,000-», «-1,500,000», «+1500000» (not a date like 1402/05/01-12:30, a
-    # card 6037-9912-... or a phone 0912-...)
-    num = r"(?:\d{1,3}(?:,\d{3})+|\d{4,})"
-    m = re.search(rf"(?<!\d)([+\-])\s?{num}(?![\d,/:])|(?<![\d,/:]){num}\s?([+\-])(?!\d)", raw)
-    if m:
-        return "out" if (m.group(1) or m.group(2)) == "-" else "in"
     from .payout_receipt import DEST_LABELS, SOURCE_LABELS, _labelled_card
 
+    # card to card: the salon's card is the source (money went out) or the destination (money came in)
     salon = salon_last4 or set()
     src, dest = _labelled_card(raw, SOURCE_LABELS), _labelled_card(raw, DEST_LABELS)
     if src and src in salon and dest not in salon:
         return "out"
     if dest and dest in salon and src not in salon:
         return "in"
+    # the sign written with the amount: «1,500,000-», «-1,500,000», «+1500000» - not the end of a card
+    # (6219-86**-****-5678), a date (1402/05/01-12:30) or a phone number (+98 912..., 0912-...)
+    num = r"(?:\d{1,3}(?:,\d{3})+|\d{4,})"
+    for m in re.finditer(rf"(?<![\d*xX×\-])([+\-])\s?({num})(?![\d,/:*])|(?<![\d,/*xX×\-])({num})\s?([+\-])(?![\d*])", raw):
+        sign, n = m.group(1) or m.group(4), m.group(2) or m.group(3)
+        digits = n.replace(",", "")
+        if "," not in n and len(digits) >= 10 and digits.startswith(("98", "0")):
+            continue
+        return "out" if sign == "-" else "in"
     t = normalize_text(raw)
     for phrase in ("قابل برداشت", "کارت برداشت", "قابل پرداخت", "شناسه پرداخت", "شماره پرداخت"):
         t = t.replace(normalize_text(phrase), " ")  # «موجودی قابل برداشت» in an SMS of money that came in
@@ -199,6 +217,45 @@ def sms_direction(text: str, salon_last4: set[str] | None = None) -> str:
     return "unknown"
 
 
+OLD_STMT_ID = re.compile(r"^stmt-(\d{12})-(\d+)-\d+$")  # 1.22: minute-amount-row index in the file
+
+
+def statement_ext(when, amount: int, direction: str, reference: str | None, description: str, n: int) -> str:  # noqa: ANN001
+    """The id of a statement row without a tracking number: what it says (its description masked) and how many
+    identical rows came before it in the file - keyed, so it gives nothing away of the description."""
+    key = f"{when:%Y%m%d%H%M}|{amount}|{direction}|{reference or ''}|{' '.join(mask_text(description or '').split())}|{n}"
+    return "stmt-" + number_hash("stmt", key)[:32]
+
+
+KEY_CHECK = "bank.key_check"
+
+
+def check_key(db) -> bool:  # noqa: ANN001
+    """The cards of the staff (hashes) and the bank token depend on this install's secret key: a backup restored on
+    another install (a new key) can't know them. Then the owner is told, and nothing is booked by a card by itself."""
+    from sqlalchemy import select, update
+
+    from ..models import BankRule
+    from . import settings_store
+
+    want = number_hash("check", "hesabdar")
+    have = settings_store.get(db, KEY_CHECK)
+    if have == want:
+        return True
+    settings_store.set_value(db, KEY_CHECK, want)
+    if have is None:
+        return True
+    if db.scalar(select(BankRule.id).where(BankRule.match_hash.is_not(None)).limit(1)) is not None:
+        db.execute(update(BankRule).where(BankRule.match_hash.is_not(None)).values(auto=False))
+    from .audit import raise_alert
+
+    raise_alert(db, "bank_key_changed", "کارت‌های پرسنل و توکن بانک را دوباره وارد کنید",
+                "این برنامه کلید امنیتی تازه‌ای دارد (مثلاً پشتیبان روی نصب دیگری برگردانده شده)، پس کارت/شبای پرسنل و توکن API بانک "
+                "دیگر شناخته نمی‌شوند. در صورت‌حساب هر پرسنل کارتش را دوباره وارد کنید و در تنظیمات حساب، توکن بانک را دوباره بنویسید. "
+                "تا آن موقع هیچ پرداختی خودکار از روی کارت ثبت نمی‌شود.", level="danger")
+    return False
+
+
 def seal_old(db) -> int:  # noqa: ANN001
     """Once (1.23): bank lines and payout receipts saved before keep no whole card number / IBAN any more (the other
     side as hash + mask), and a bank connection's token is encrypted."""
@@ -210,10 +267,33 @@ def seal_old(db) -> int:  # noqa: ANN001
 
     if settings_store.get(db, "privacy.sealed_1_23"):
         return 0
+    from datetime import timedelta
+
+    from ..models import local_now
+
     n = 0
     own, own_i = own_masks(db), own_ibans(db)
-    for tx in db.scalars(select(BankTransaction)):
+    seen: dict[tuple, int] = {}
+    taken = {(a, e) for a, e in db.execute(select(BankTransaction.payment_account_id, BankTransaction.external_id))}
+    old_cut = local_now() - timedelta(days=45)
+    for tx in db.scalars(select(BankTransaction).order_by(BankTransaction.id)):
         raw_card = tx.counterparty_card or ""
+        m = OLD_STMT_ID.match(tx.external_id or "") if tx.source == "statement" else None
+        if m:  # 1.22's id (row index in the file): the same row downloaded again must be known as the same line
+            key = (tx.payment_account_id, tx.occurred_at, tx.amount, tx.direction, tx.reference,
+                   " ".join(mask_text(tx.description or "").split()))
+            seen[key] = seen.get(key, 0) + 1
+            new_id = statement_ext(tx.occurred_at, tx.amount, tx.direction, tx.reference, tx.description or "", seen[key])
+            if (tx.payment_account_id, new_id) not in taken:
+                taken.add((tx.payment_account_id, new_id))
+                tx.external_id = new_id
+        if tx.status == "unmatched" and tx.direction != "in" and tx.occurred_at < old_cut:
+            tx.status = "ignored"  # money out before 1.23 (nothing looked at it then): kept, not in the inbox
+        if tx.counterparty_mask is None and raw_card and ("*" in raw_card or "x" in raw_card.lower()):
+            mm = MASKED.search(to_en_digits(raw_card))
+            if mm:
+                first = re.sub(r"\D", "", mm.group(1))
+                tx.counterparty_mask = f"{first[:4]}-{first[4:6]}**-****-{mm.group(2)}"
         if tx.counterparty_hash is None and (CARD.search(to_en_digits(tx.description or "")) or IBAN.search(tx.description or "")
                                              or len(re.sub(r"\D", "", raw_card)) >= 16):
             party = counterparty(tx.description, card=raw_card, own=own, own_iban=own_i)
@@ -229,7 +309,7 @@ def seal_old(db) -> int:  # noqa: ANN001
             tx.counterparty_card = tx.counterparty_mask or mask_card(raw_card)
     for p in db.scalars(select(StaffPayout).where(StaffPayout.parsed.is_not(None))):
         parsed = dict(p.parsed or {})
-        new = {k: (mask_text(v) if isinstance(v, str) else v) for k, v in parsed.items()}
+        new = {k: (mask_text(v) if isinstance(v, str) and k != "reference" else v) for k, v in parsed.items()}
         if new != parsed:
             p.parsed = new  # a new dict (a JSON column changed in place is not saved)
     for a in db.scalars(select(PaymentAccount).where(PaymentAccount.provider_config.is_not(None))):

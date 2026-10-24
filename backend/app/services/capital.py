@@ -74,8 +74,12 @@ def _positive(amount: int, label: str = "مبلغ") -> int:
 
 
 # ------------------------------------------------------------------ owner's capital
+class DuplicateMove(AccountingError):
+    """The same money is already booked from the bank line of this account."""
+
+
 def add_or_withdraw(db: Session, *, kind: str, amount: int, payment_account: PaymentAccount | None, at: datetime | None = None,
-                    notes: str = "", user=None) -> CapitalMove:  # noqa: ANN001
+                    notes: str = "", force: bool = False, user=None) -> CapitalMove:  # noqa: ANN001
     """add: the owner put money into this account. withdraw: the owner took money out of it for themselves."""
     if kind not in ("add", "withdraw"):
         raise AccountingError("نوع نامعتبر")
@@ -83,6 +87,9 @@ def add_or_withdraw(db: Session, *, kind: str, amount: int, payment_account: Pay
         raise AccountingError("حساب (صندوق، کارت یا بانک) را انتخاب کنید")
     amount = _positive(amount)
     ensure_not_future(at, "تاریخ")
+    if not force and accounting._booked_from_bank(db, "capital", payment_account.id, amount, (at or local_now()).replace(tzinfo=None)):
+        raise DuplicateMove("همین مبلغ از همین حساب از روی تراکنش بانک (پول خود مدیر) ثبت شده است "
+                            "(تطبیق رسید و بانک ← ثبت‌شده‌ها از بانک)؛ اگر جداگانه است، دوباره تأیید کنید")
     m = CapitalMove(kind=kind, amount=amount, payment_account_id=payment_account.id, at=at or local_now(), notes=notes,
                     user_id=getattr(user, "id", None))
     db.add(m)

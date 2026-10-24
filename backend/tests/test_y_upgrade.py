@@ -44,6 +44,22 @@ with SessionLocal() as db:  # as an older version left it
     db.query(Product).update({Product.stock_value: 123})
     db.query(Deposit).update({Deposit.source: "import"})
     db.commit()
+from app.models import BankTransaction, PaymentAccount, Setting
+with SessionLocal() as db:  # 1.22 kept bank lines as they came (whole card numbers), a plain token, row-index statement ids
+    pa = PaymentAccount(kind="card", name="کارت ارتقا", card_mask="603799******1111", provider="generic_http",
+                        provider_config={"url": "https://bank.example/{account}", "token": "plain-token-xyz"})
+    db.add(pa)
+    db.flush()
+    old = datetime.now() - timedelta(days=100)
+    db.add_all([
+        BankTransaction(payment_account_id=pa.id, external_id="stmt-202601011000-5000000-0", amount=5000000, direction="out",
+                        occurred_at=datetime.now() - timedelta(days=2), source="statement",
+                        description="انتقال کارت به کارت به 6219861012345673 بنام زهرا احمدی"),
+        BankTransaction(payment_account_id=pa.id, external_id="api-1", amount=900000, direction="out", occurred_at=old,
+                        source="bank_api", description="برداشت", counterparty_card="6219861012345673"),
+    ])
+    db.query(Setting).filter(Setting.key.in_(["privacy.sealed_1_23", "bank.key_check"])).delete()
+    db.commit()
 '''
 
 START = r'''
@@ -86,5 +102,16 @@ def test_start_on_an_older_database(tmp_path):
         assert con.execute("SELECT SUM(stock_value) FROM products").fetchone()[0] == ledger_1300 == 200_000
         # a Tizpardaz balance is a credit, and so is what is left of it after it was split (twice)
         assert [k for (k,) in con.execute("SELECT kind FROM deposits ORDER BY id")] == ["credit", "credit", "credit"]
+        # 1.23: no whole card number left, the other side known by hash + mask, the token encrypted, an old statement
+        # row's id in the new form (the same file downloaded again is the same line), old money out not in the inbox
+        rows = con.execute("SELECT external_id, description, counterparty_card, counterparty_hash, counterparty_mask, status, source "
+                           "FROM bank_transactions ORDER BY id").fetchall()
+        assert all("6219861012345673" not in (r[1] or "") + (r[2] or "") for r in rows)
+        stmt = next(r for r in rows if r[6] == "statement")
+        assert stmt[0].startswith("stmt-") and not stmt[0].startswith("stmt-2026") and stmt[3] and stmt[4].endswith("5673")
+        assert stmt[5] == "unmatched"
+        assert next(r for r in rows if r[6] == "bank_api")[5] == "ignored"
+        token = con.execute("SELECT provider_config FROM payment_accounts WHERE name = 'کارت ارتقا'").fetchone()[0]
+        assert "plain-token-xyz" not in token and '"enc:' in token
     finally:
         con.close()

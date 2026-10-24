@@ -100,6 +100,10 @@ def reset(db: Session, scope: str) -> dict:
     db.execute(update(Service).values(learned_avg_price=None, learned_count=0))
     # (the website keeps its reading place: orders read before are not read again - unless they change on the website
     # later, then they are booked as new; to start the website clean too, set a new start date in its settings)
+    from . import settings_store
+
+    if settings_store.get(db, "books.start"):  # the invoices / months it was worked out from are gone
+        settings_store.set_value(db, "books.start", "")
     if scope in ("customers", "factory"):
         db.execute(update(Supplier).values(customer_id=None))
         wipe(Customer)

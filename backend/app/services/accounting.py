@@ -1057,6 +1057,17 @@ def expense_category(name: str | None) -> str:
     return " ".join(text.split())[:64]
 
 
+def _booked_from_bank(db: Session, kind: str, account_id: int, amount: int, at: datetime) -> bool:
+    """A record of this kind already booked from a bank line of this account and amount within 3 days (an entry
+    made by hand now would be the same money again)."""
+    from ..models import BankTransaction
+
+    return db.scalar(select(BankTransaction.id).where(
+        BankTransaction.status == "matched", BankTransaction.matched_type == kind, BankTransaction.auto_booked.is_not(None),
+        BankTransaction.payment_account_id == account_id, BankTransaction.amount == amount,
+        BankTransaction.occurred_at.between(at - timedelta(days=3), at + timedelta(days=3))).limit(1)) is not None
+
+
 def record_expense(db: Session, *, category: str, amount: int, payment_account: PaymentAccount,
                    spent_at: datetime | None = None, description: str = "", staff_id: int | None = None, force: bool = False,
                    line_id: int | None = None, from_treasury: bool = False, user=None) -> Expense:
@@ -1078,8 +1089,13 @@ def record_expense(db: Session, *, category: str, amount: int, payment_account: 
         raise AccountingError("لاین انتخاب‌شده پیدا نشد")
     if from_treasury and line_id is None:
         raise AccountingError("برای خرج از خزانه، لاینی را که خزانه‌اش خرج شد انتخاب کنید")
+    if from_treasury and staff_id is not None and line_id is not None and (db.get(Staff, staff_id).line_id or line_id) != line_id:
+        raise AccountingError("این پرسنل در لاین انتخاب‌شده نیست؛ خزانهٔ همان لاین یا «کل لاین» را انتخاب کنید")
     write_lock(db)  # a double click: the second one sees the first
-    when = spent_at or local_now()
+    when = spent_at.replace(tzinfo=None) if spent_at is not None else local_now()  # (a time sent with its zone: as written)
+    if not force and not db.info.get("bank_booking") and _booked_from_bank(db, "expense", payment_account.id, amount, when):
+        raise DuplicateExpense("همین مبلغ از همین حساب از روی تراکنش بانک (به‌عنوان هزینه) ثبت شده است "
+                               "(تطبیق رسید و بانک ← ثبت‌شده‌ها از بانک)؛ اگر خرید جداگانه‌ای است، دوباره تأیید کنید")
     day = datetime.combine(when.date(), datetime.min.time())
     if not force and db.scalar(select(Expense.id).where(
             Expense.category == category, Expense.amount == amount, Expense.payment_account_id == payment_account.id,

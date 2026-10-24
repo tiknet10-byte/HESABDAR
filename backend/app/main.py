@@ -80,6 +80,7 @@ def init_db() -> None:
         from .services import bank_parties
 
         bank_parties.seal_old(db)  # once: no whole card number / IBAN left in bank lines and receipts, tokens encrypted
+        bank_parties.check_key(db)  # a backup restored on another install: the staff cards and bank token must be entered again
         db.commit()
         from .services.audit import rechain_once
 

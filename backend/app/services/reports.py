@@ -656,10 +656,10 @@ def staff_shares_months(db: Session, first: tuple[int, int], last: tuple[int, in
     from .jalali import month_range, next_month
 
     booked = {(h.jy, h.jm) for h in db.scalars(select(HistoryMonth))}
-    names = {p.id: p.full_name for p in db.scalars(select(Staff))}
+    names = {p.id: p.full_name for p in db.scalars(select(Staff)) if (p.kind or "") != "employee"}  # employees: their own page
     paid: dict[tuple, int] = {}
     for sid, jy, jm, amount in db.execute(select(StaffPayout.staff_id, StaffPayout.jy, StaffPayout.jm, func.sum(StaffPayout.amount))
-                                          .where(StaffPayout.status == "booked")
+                                          .where(StaffPayout.status == "booked", StaffPayout.staff_id.in_(list(names) or [0]))
                                           .group_by(StaffPayout.staff_id, StaffPayout.jy, StaffPayout.jm)):
         paid[(sid, jy, jm)] = int(amount or 0)
     out = []

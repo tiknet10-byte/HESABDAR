@@ -22,6 +22,9 @@ def _done(db: Session, fn):  # noqa: ANN001, ANN202
         out = fn()
         db.commit()
         return out
+    except capital.DuplicateMove as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
     except AccountingError as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
@@ -47,6 +50,7 @@ class MoveIn(BaseModel):
     payment_account_id: int
     at: datetime | None = None
     notes: str = ""
+    force: bool = False  # the same money was booked from the bank, and the owner confirmed this is another one
 
 
 @router.get("/moves")
@@ -60,7 +64,7 @@ def moves(limit: int = 200, db: Session = Depends(get_db), _=Depends(require("ca
 def add_move(body: MoveIn, db: Session = Depends(get_db), user=Depends(require("capital"))):
     pa = _get(db, PaymentAccount, body.payment_account_id, "حساب")
     return _done(db, lambda: capital.move_out(db, capital.add_or_withdraw(db, kind=body.kind, amount=body.amount, payment_account=pa,
-                                                                         at=body.at, notes=body.notes, user=user)))
+                                                                         at=body.at, notes=body.notes, force=body.force, user=user)))
 
 
 class SupplierIn(BaseModel):

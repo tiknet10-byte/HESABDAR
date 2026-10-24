@@ -83,6 +83,29 @@ def link_candidates(db: Session, tx: BankTransaction, strict: bool = True) -> li
     return out
 
 
+def _consistent(db: Session, tx: BankTransaction, kind: str, rec) -> bool:  # noqa: ANN001
+    """May this line be linked to this record without a person? Only when nothing says the money was someone else's:
+    the card / IBAN of the line belongs (by a rule) to this record's person or kind, or is unknown and the person has no
+    known card. Money coming in is never linked by itself (it may be a customer's)."""
+    if tx.direction != "out":
+        return False
+    hash_rules = [r for r in rules_for(db, tx) if r.match_hash] if tx.counterparty_hash else []
+    if hash_rules:
+        r = hash_rules[0]
+        if kind == "staff_payout":
+            return r.target_type == "staff" and r.staff_id == rec.staff_id
+        return r.target_type == {"expense": "expense", "capital": "owner"}.get(kind)
+    if kind == "staff_payout" and tx.counterparty_hash:
+        known = db.scalar(select(BankRule.id).where(BankRule.is_active.is_(True), BankRule.target_type == "staff",
+                                                    BankRule.staff_id == rec.staff_id, BankRule.match_hash.is_not(None)).limit(1))
+        return known is None  # their card is known and this is another one: not theirs
+    return True
+
+
+def _record(db: Session, kind: str, rec_id: int):  # noqa: ANN202
+    return db.get({"staff_payout": StaffPayout, "expense": Expense, "capital": CapitalMove}[kind], rec_id)
+
+
 def link(db: Session, tx: BankTransaction, kind: str, rec_id: int, user=None, auto: bool = False) -> None:  # noqa: ANN001
     from .audit import audit
 
@@ -109,12 +132,13 @@ def after_record(db: Session, kind: str, rec) -> bool:  # noqa: ANN001
         account_id, amount, at, ref, direction = rec.payment_account_id, rec.amount, rec.at, None, "out" if rec.kind == "withdraw" else "in"
     else:
         return False
-    if not account_id:
-        return False
+    if not account_id or direction != "out" or db.info.get("bank_booking"):
+        return False  # (money in may be a customer's; a record made from a bank line is that line's)
     found = [t for t in db.scalars(select(BankTransaction).where(
+        BankTransaction.manual_only.is_not(True),
         BankTransaction.payment_account_id == account_id, BankTransaction.status == "unmatched", BankTransaction.direction == direction,
         BankTransaction.amount == amount, BankTransaction.occurred_at.between(at - LINK_WINDOW, at + LINK_WINDOW)))
-             if _refs_ok(ref, t.reference)]
+             if _refs_ok(ref, t.reference) and _consistent(db, t, kind, rec)]
     if len(found) != 1:
         return False  # none, or several alike: the inbox asks
     try:
@@ -178,20 +202,21 @@ def _auto_ok(tx: BankTransaction) -> bool:
 
 def on_unmatched(db: Session, tx: BankTransaction) -> str | None:
     """A new (or still waiting) bank line that no customer's money took: linked or booked by itself, else it waits."""
-    if tx.status != "unmatched" or tx.direction not in ("in", "out"):
+    if tx.status != "unmatched" or tx.direction not in ("in", "out") or tx.manual_only:
         return None
-    cands = link_candidates(db, tx)
-    if len(cands) == 1:
+    cands = [c for c in link_candidates(db, tx) if _consistent(db, tx, c["type"], _record(db, c["type"], c["id"]))]
+    if len(cands) == 1 and len(link_candidates(db, tx, strict=False)) == 1:
         try:
             link(db, tx, cands[0]["type"], cands[0]["id"], auto=True)
             return "linked"
         except BankBookError:
             return None
-    if cands or link_candidates(db, tx, strict=False):
-        return None  # several entries alike, or one with another tracking number: a person picks
+    if link_candidates(db, tx, strict=False):
+        return None  # entries alike (several, another tracking number, maybe someone else's): a person picks
     rules = rules_for(db, tx)
     exact = [r for r in rules if r.match_hash and r.match_hash == tx.counterparty_hash]
-    if len(exact) != 1 or len(rules) != 1 or not exact[0].auto or not _auto_ok(tx):
+    # by itself only a staff payout or an expense (the owner's own money and setting aside: always a person)
+    if len(exact) != 1 or len(rules) != 1 or not exact[0].auto or exact[0].target_type not in ("staff", "expense") or not _auto_ok(tx):
         return None
     rule = exact[0]
     if rule.auto_cap and tx.amount > rule.auto_cap:
@@ -211,7 +236,6 @@ def book(db: Session, tx: BankTransaction, *, target: str, staff_id: int | None 
          from_treasury: bool = False, description: str = "", rule: BankRule | None = None, auto: bool = False,
          force: bool = False, user=None) -> dict:  # noqa: ANN001
     """Book what the line is, from its own account, amount, date and tracking number. Returns what was booked."""
-    from . import accounting, capital, staffpay
     from .audit import audit
 
     if target not in TARGETS:
@@ -226,6 +250,31 @@ def book(db: Session, tx: BankTransaction, *, target: str, staff_id: int | None 
     text = (description or tx.description or "").strip()
     rec_type = rec_id = None
     result: dict = {"target": target}
+    db.info["bank_booking"] = True  # the record made here is this line's: it must not take another waiting line
+    try:
+        rec_type, rec_id = _book_record(db, tx, pa, result, target=target, staff_id=staff_id, kind=kind, jy=jy, jm=jm, category=category,
+                                        line_id=line_id, from_treasury=from_treasury, description=description, text=text,
+                                        force=force, user=user)
+    finally:
+        db.info.pop("bank_booking", None)
+    tx.matched_type, tx.matched_id = rec_type, rec_id
+    tx.booked_at, tx.auto_booked = local_now(), True if auto else (False if rec_type else None)
+    tx.rule_id = rule.id if rule is not None else None
+    if rule is not None:
+        rule.hits = (rule.hits or 0) + 1
+        rule.last_used_at = local_now()
+    audit(db, "bank_tx.book", "bank_transaction", tx.id, {"target": target, "record": rec_id, "amount": tx.amount, "auto": auto,
+                                                          "rule": rule.id if rule else None}, user=user,
+          actor="bank" if auto else None)
+    return result
+
+
+def _book_record(db: Session, tx: BankTransaction, pa: PaymentAccount | None, result: dict, *, target: str, staff_id: int | None,
+                 kind: str | None, jy: int | None, jm: int | None, category: str | None, line_id: int | None, from_treasury: bool,
+                 description: str, text: str, force: bool, user) -> tuple[str | None, int | None]:  # noqa: ANN001
+    from . import accounting, capital, staffpay
+
+    rec_type = rec_id = None
     if target == "staff":
         if tx.direction != "out":
             raise BankBookError("پرداخت به پرسنل، برداشت از حساب است")
@@ -251,29 +300,21 @@ def book(db: Session, tx: BankTransaction, *, target: str, staff_id: int | None 
             raise BankBookError("این تراکنش همین الان ثبت شد")
         e = accounting.record_expense(db, category=category or "", amount=tx.amount, payment_account=pa,
                                       spent_at=min(tx.occurred_at, local_now()), description=text[:500], line_id=line_id,
-                                      from_treasury=from_treasury, force=True, user=user)
+                                      from_treasury=from_treasury, force=True, staff_id=staff_id if from_treasury else None, user=user)
         rec_type, rec_id = "expense", e.id
         result.update(expense_id=e.id, category=e.category)
     elif target == "owner":
         if not _claim(db, tx):
             raise BankBookError("این تراکنش همین الان ثبت شد")
         m = capital.add_or_withdraw(db, kind="withdraw" if tx.direction == "out" else "add", amount=tx.amount, payment_account=pa,
-                                    at=min(tx.occurred_at, local_now()), notes=(description or "از روی تراکنش بانک").strip(), user=user)
+                                    at=min(tx.occurred_at, local_now()), notes=(description or "از روی تراکنش بانک").strip(),
+                                    force=True, user=user)
         rec_type, rec_id = "capital", m.id
         result.update(capital_id=m.id)
     else:  # ignore
         if not _claim(db, tx, "unmatched", "ignored"):
             raise BankBookError("این تراکنش همین الان ثبت شد")
-    tx.matched_type, tx.matched_id = rec_type, rec_id
-    tx.booked_at, tx.auto_booked = local_now(), True if auto else (False if rec_type else None)
-    tx.rule_id = rule.id if rule is not None else None
-    if rule is not None:
-        rule.hits = (rule.hits or 0) + 1
-        rule.last_used_at = local_now()
-    audit(db, "bank_tx.book", "bank_transaction", tx.id, {"target": target, "record": rec_id, "amount": tx.amount, "auto": auto,
-                                                          "rule": rule.id if rule else None}, user=user,
-          actor="bank" if auto else None)
-    return result
+    return rec_type, rec_id
 
 
 def undo(db: Session, tx: BankTransaction, user=None, then: str = "inbox") -> None:  # noqa: ANN001
@@ -285,6 +326,7 @@ def undo(db: Session, tx: BankTransaction, user=None, then: str = "inbox") -> No
     if tx.status == "ignored":
         if not _claim(db, tx, "ignored", "unmatched"):
             raise BankBookError("وضعیت این تراکنش همین الان عوض شد")
+        tx.manual_only = True  # a person decides it now (never linked or booked by itself again)
         audit(db, "bank_tx.unignore", "bank_transaction", tx.id, {}, user=user)
         return
     if tx.status != "matched" or tx.matched_type not in ("staff_payout", "expense", "capital"):
@@ -313,13 +355,16 @@ def undo(db: Session, tx: BankTransaction, user=None, then: str = "inbox") -> No
             rule.undos = (rule.undos or 0) + 1
             rule.auto = False  # it booked something wrong: suggested only, until a person turns it on again
     tx.matched_type = tx.matched_id = tx.rule_id = tx.booked_at = tx.auto_booked = None
+    tx.manual_only = True  # taken back: the hourly look-again must not link or book it the same way again
     audit(db, "bank_tx.undo", "bank_transaction", tx.id, {"type": kind, "id": rec_id, "voided": booked_here, "then": then}, user=user)
 
 
 # ------------------------------------------------------------------ remembering who a card is
 def add_rule(db: Session, *, match_kind: str, match_hash: str | None, match_text: str, target: str, direction: str = "out",
              staff_id: int | None = None, category: str | None = None, line_id: int | None = None, from_treasury: bool = False,
-             auto: bool = False, source: str = "manual", user=None) -> BankRule:  # noqa: ANN001
+             auto: bool = False, source: str = "manual", may_change: bool = True, user=None) -> BankRule:  # noqa: ANN001
+    """A new rule, or the rule of the same card / name changed (only by the owner / admin: may_change; a card known as
+    a staff member's is never given to someone or something else - it is removed on their statement first)."""
     from .audit import audit
 
     if target not in TARGETS:
@@ -333,10 +378,15 @@ def add_rule(db: Session, *, match_kind: str, match_hash: str | None, match_text
     same = db.scalar(select(BankRule).where(BankRule.is_active.is_(True), BankRule.direction == direction,
                                             (BankRule.match_hash == match_hash) if match_hash else
                                             ((BankRule.match_kind == "name") & (BankRule.match_text == match_text))))
+    before = None
     if same is not None:
-        if same.target_type == "staff" and target == "staff" and same.staff_id != staff_id:
+        if same.target_type == "staff" and (target != "staff" or same.staff_id != staff_id):
             other = db.get(Staff, same.staff_id or 0)
-            raise BankBookError(f"این کارت/شبا قبلاً برای «{other.full_name if other else '—'}» ثبت شده است؛ اول آن را بردارید")
+            raise BankBookError(f"این کارت/شبا مال «{other.full_name if other else '—'}» ثبت شده است؛ اگر اشتباه است، اول در "
+                                "صورت‌حساب او برش دارید")
+        if not may_change:
+            raise BankBookError("این کارت قبلاً به چیز دیگری وصل شده؛ تغییرش با مدیر است (تطبیق ← کارت‌های شناخته‌شده)")
+        before = {"target": same.target_type, "staff": same.staff_id, "category": same.category, "auto": same.auto}
         rule = same
     else:
         rule = BankRule(match_kind=match_kind, match_hash=match_hash, match_text=match_text[:128], direction=direction,
@@ -346,27 +396,30 @@ def add_rule(db: Session, *, match_kind: str, match_hash: str | None, match_text
     rule.line_id, rule.from_treasury, rule.auto = line_id, True if from_treasury else None, bool(auto)
     db.flush()
     audit(db, "bank_rule.save", "bank_rule", rule.id, {"kind": match_kind, "mask": match_text, "target": target, "staff": staff_id,
-                                                       "category": category, "auto": bool(auto)}, user=user)
+                                                       "category": category, "auto": bool(auto), "before": before}, user=user)
     return rule
 
 
 def remember(db: Session, tx: BankTransaction, *, target: str, staff_id: int | None = None, category: str | None = None,
-             line_id: int | None = None, from_treasury: bool = False, auto: bool = False, user=None) -> BankRule | None:  # noqa: ANN001
+             line_id: int | None = None, from_treasury: bool = False, auto: bool = False, may_change: bool = True,
+             user=None) -> BankRule | None:  # noqa: ANN001
+    if target == "ignore":
+        auto = False  # setting aside is never done by itself
     if tx.counterparty_hash:
         kind = "iban" if (tx.counterparty_mask or "").upper().startswith("IR") else "card"
         return add_rule(db, match_kind=kind, match_hash=tx.counterparty_hash, match_text=tx.counterparty_mask or "", target=target,
                         direction=tx.direction, staff_id=staff_id, category=category, line_id=line_id, from_treasury=from_treasury,
-                        auto=auto, source="learned", user=user)
+                        auto=auto, source="learned", may_change=may_change, user=user)
     if tx.counterparty_name:
         return add_rule(db, match_kind="name", match_hash=None, match_text=plain(tx.counterparty_name), target=target,
                         direction=tx.direction, staff_id=staff_id, category=category, line_id=line_id, from_treasury=from_treasury,
-                        auto=False, source="learned", user=user)
+                        auto=False, source="learned", may_change=may_change, user=user)
     return None
 
 
 def staff_card(db: Session, person: Staff, number: str, user=None) -> BankRule:  # noqa: ANN001
     """A staff member's card / IBAN entered on the staff page: payments to it are booked as theirs by themselves.
-    Earlier bank lines to it (waiting in the inbox) are looked at again."""
+    Earlier bank lines to it (waiting in the inbox) are looked at again (rule.booked_now: how many were booked)."""
     from .bank_parties import check_number, mask, number_hash
 
     try:
@@ -375,9 +428,11 @@ def staff_card(db: Session, person: Staff, number: str, user=None) -> BankRule: 
         raise BankBookError(str(exc)) from exc
     rule = add_rule(db, match_kind=kind, match_hash=number_hash(kind, value), match_text=mask(kind, value), target="staff",
                     staff_id=person.id, auto=True, source="staff_form", user=user)
-    for tx in db.scalars(select(BankTransaction).where(BankTransaction.status == "unmatched",
-                                                       BankTransaction.counterparty_hash == rule.match_hash)):
-        on_unmatched(db, tx)
+    n = 0
+    for tx in list(db.scalars(select(BankTransaction).where(BankTransaction.status == "unmatched",
+                                                            BankTransaction.counterparty_hash == rule.match_hash))):
+        n += bool(on_unmatched(db, tx))
+    rule.booked_now = n  # (not a column: told to the person)
     return rule
 
 
@@ -430,7 +485,8 @@ def suggestions(db: Session, tx: BankTransaction) -> list[dict]:
     return out[:6]
 
 
-def tx_row(db: Session, tx: BankTransaction, accounts: dict[int, str] | None = None, with_suggestions: bool = False) -> dict:
+def tx_row(db: Session, tx: BankTransaction, accounts: dict[int, str] | None = None, with_suggestions: bool = False,
+           may_void: bool = True, capital_ok: bool = True) -> dict:
     accounts = accounts if accounts is not None else {pa.id: pa.name for pa in db.scalars(select(PaymentAccount))}
     row = {"id": tx.id, "account_id": tx.payment_account_id, "account": accounts.get(tx.payment_account_id), "amount": tx.amount,
            "direction": tx.direction, "occurred_at": tx.occurred_at.isoformat(timespec="minutes"), "reference": tx.reference,
@@ -439,7 +495,9 @@ def tx_row(db: Session, tx: BankTransaction, accounts: dict[int, str] | None = N
            "counterparty_name": tx.counterparty_name, "has_card": tx.counterparty_hash is not None,
            "auto_booked": tx.auto_booked, "rule_id": tx.rule_id,
            "duplicate_of_id": tx.duplicate_of_id, "booked_at": tx.booked_at.isoformat(timespec="minutes") if tx.booked_at else None,
-           "can_undo": tx.status == "ignored" or (tx.status == "matched" and tx.matched_type in ("staff_payout", "expense", "capital"))}
+           # a link or a set-aside: anyone who moves money; voiding what was booked from the line: owner / admin
+           "can_undo": tx.status == "ignored" or (tx.status == "matched" and tx.matched_type in ("staff_payout", "expense", "capital")
+                                                  and (tx.auto_booked is None or may_void))}
     if tx.status == "matched" and tx.matched_type == "staff_payout":
         p = db.get(StaffPayout, tx.matched_id or 0)
         who = db.get(Staff, p.staff_id) if p else None
@@ -453,7 +511,7 @@ def tx_row(db: Session, tx: BankTransaction, accounts: dict[int, str] | None = N
         if e is not None:
             row["matched_label"] = f"هزینهٔ {e.category}" + (" (از خزانه)" if e.from_treasury else "")
     if with_suggestions:
-        row["suggestions"] = suggestions(db, tx)
+        row["suggestions"] = [x for x in suggestions(db, tx) if capital_ok or (x.get("target") != "owner" and x.get("type") != "capital")]
     return row
 
 

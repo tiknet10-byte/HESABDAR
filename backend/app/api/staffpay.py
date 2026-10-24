@@ -220,8 +220,9 @@ def add_pay_card(pid: int, body: CardIn, db: Session = Depends(get_db), user=Dep
     except (bank_booking.BankBookError, ValueError) as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
+    booked = getattr(rule, "booked_now", 0)
     db.commit()
-    return _card_row(rule)
+    return {**_card_row(rule), "booked_now": booked}
 
 
 @router.delete("/staff/pay-cards/{rule_id}")

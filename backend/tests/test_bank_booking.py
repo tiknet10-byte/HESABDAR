@@ -97,10 +97,12 @@ def test_a_staff_card_books_their_payouts_by_itself_and_can_be_taken_back(client
     dup = client.post(f"/api/staff/{person['id']}/payout", json={"amount": 3_500_000, "payment_account_id": acc, "kind": "advance"})
     assert dup.status_code == 409 and "بانک" in dup.json()["detail"]
 
-    # taken back (by an accountant: it was booked by itself): the payout is voided, the line waits, the card asks first
-    booked = acc_user.get(f"{BASE}/booked").json()
-    assert any(x["id"] == tx.id and x["auto_booked"] and x["can_undo"] for x in booked)
-    r = acc_user.post(f"{BASE}/transactions/{tx.id}/undo", json={})
+    # taken back by the owner: the payout is voided, the line waits for a person, the card asks first
+    booked = acc_user.get(f"{BASE}/booked").json()  # an accountant sees it, but voiding a payout is the owner's
+    assert any(x["id"] == tx.id and x["auto_booked"] and not x["can_undo"] for x in booked)
+    assert acc_user.post(f"{BASE}/transactions/{tx.id}/undo", json={}).status_code == 403
+    assert any(x["id"] == tx.id and x["can_undo"] for x in client.get(f"{BASE}/booked").json())
+    r = client.post(f"{BASE}/transactions/{tx.id}/undo", json={})
     assert r.status_code == 200, r.text
     with _db() as db:
         assert db.get(StaffPayout, p.id).status == "void"

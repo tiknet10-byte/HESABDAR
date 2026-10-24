@@ -392,7 +392,8 @@ def delete_service(sid: int, db: Session = Depends(get_db), user=Depends(require
             if db.scalar(select(func.count(Service.id)).where(Service.line_id == line_id)) or \
                     db.scalar(select(func.count(InvoiceItem.id)).where(InvoiceItem.line_id == line_id)) or \
                     db.scalar(select(func.count(Staff.id)).where(Staff.line_id == line_id)) or \
-                    db.scalar(select(func.count(JournalLine.id)).where(JournalLine.line_id == line_id)):
+                    db.scalar(select(func.count(JournalLine.id)).where(JournalLine.line_id == line_id)) or \
+                    _line_kept_elsewhere(db, line_id):
                 line.is_active = False
             else:
                 _forget_rates(db, line_id)
